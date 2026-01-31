@@ -29,21 +29,21 @@ def setup_register(tree: app_commands.CommandTree) -> None:
 
         if created:
             embed = Embed(
-                title=f"✅ Registered SUCCESS ✅",
-                description=f"Hello {interaction.user.mention} ! \n Welcome to Capitalism! 📈",
+                title=f"✅ Registered **SUCCESS** ✅",
+                description=f"Hello {interaction.user.mention} ! \n Welcome to **Capitalism**! 📈",
             )
             embed.add_field(
-                name="💳 Balance",
+                name="💳 **Balance**",
                 value=f"${START_BALANCE}",
                 inline=True,
             )
             embed.add_field(
-                name="︽ Rank",
+                name="︽ **Rank**",
                 value=Rank.PRIVATE.value.title(),
                 inline=True,
             )
             embed.add_field(
-                name="📅 Joined",
+                name="📅 **Joined**",
                 value=joined_date,
                 inline=True,
             )
