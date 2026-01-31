@@ -1,2 +1,4 @@
 #ignore the bot token!!!! VERY IMPORTANT
 TOKEN
+data/
+__pycache__/

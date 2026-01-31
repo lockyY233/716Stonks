@@ -15,5 +15,5 @@ pip install -r requirements.txt
 ## Run
 
 ```powershell
-python -m stockbot.bot
+python -m stockbot
 ```
