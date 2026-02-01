@@ -26,6 +26,204 @@ def register_user(
         return True
 
 
+def add_company(
+    guild_id: int,
+    symbol: str,
+    name: str,
+    base_price: float,
+    slope: float,
+    drift: float,
+    starting_tick: int,
+    current_price: float,
+    last_tick: int,
+    updated_at: str,
+) -> bool:
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM companies WHERE guild_id = ? AND symbol = ?",
+            (guild_id, symbol),
+        ).fetchone()
+        if existing:
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO companies (
+                guild_id,
+                symbol,
+                name,
+                base_price,
+                slope,
+                drift,
+                starting_tick,
+                current_price,
+                last_tick,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                symbol,
+                name,
+                base_price,
+                slope,
+                drift,
+                starting_tick,
+                current_price,
+                last_tick,
+                updated_at,
+            ),
+        )
+        return True
+
+
+def get_companies(guild_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, name, base_price, slope, drift, starting_tick, current_price, last_tick, updated_at
+            FROM companies
+            WHERE guild_id = ?
+            ORDER BY symbol
+            """,
+            (guild_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def update_company_price(
+    guild_id: int,
+    symbol: str,
+    base_price: float,
+    slope: float,
+    drift: float,
+    current_price: float,
+    last_tick: int,
+    updated_at: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE companies
+            SET base_price = ?,
+                slope = ?,
+                drift = ?,
+                current_price = ?,
+                last_tick = ?,
+                updated_at = ?
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (
+                base_price,
+                slope,
+                drift,
+                current_price,
+                last_tick,
+                updated_at,
+                guild_id,
+                symbol,
+            ),
+        )
+
+
+def backfill_company_starting_ticks() -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE companies
+            SET starting_tick = (
+                SELECT COALESCE(MIN(ph.tick_index), 0)
+                FROM price_history ph
+                WHERE ph.guild_id = companies.guild_id
+                  AND ph.symbol = companies.symbol
+            )
+            WHERE starting_tick = 0
+            """
+        )
+        conn.execute(
+            """
+            UPDATE companies
+            SET last_tick = (
+                SELECT COALESCE(MAX(ph.tick_index), 0)
+                FROM price_history ph
+                WHERE ph.guild_id = companies.guild_id
+                  AND ph.symbol = companies.symbol
+            )
+            WHERE last_tick = 0
+            """
+        )
+
+
+def add_price_history(
+    guild_id: int,
+    symbol: str,
+    tick_index: int,
+    ts: str,
+    price: float,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO price_history (guild_id, symbol, tick_index, ts, price)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (guild_id, symbol, tick_index, ts, price),
+        )
+
+
+def get_price_history(
+    guild_id: int,
+    symbol: str,
+    limit: int | None = 50,
+) -> list[dict]:
+    with get_connection() as conn:
+        if limit is None:
+            rows = conn.execute(
+                """
+                SELECT ts, price
+                FROM price_history
+                WHERE guild_id = ? AND symbol = ?
+                ORDER BY tick_index DESC
+                """,
+                (guild_id, symbol),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ts, price
+                FROM price_history
+                WHERE guild_id = ? AND symbol = ?
+                ORDER BY tick_index DESC
+                LIMIT ?
+                """,
+                (guild_id, symbol, limit),
+            ).fetchall()
+
+        return [dict(row) for row in rows[::-1]]
+
+
+def get_state_value(key: str) -> str | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return None if row is None else row["value"]
+
+
+def set_state_value(key: str, value: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+
 def get_user_status(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         user = conn.execute(
@@ -53,3 +251,56 @@ def get_user_status(guild_id: int, user_id: int) -> dict | None:
             "user": dict(user),
             "holdings": [dict(row) for row in holdings],
         }
+
+
+def get_user_shares(
+    guild_id: int,
+    user_id: int,
+    symbol: str,
+) -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT shares
+            FROM holdings
+            WHERE guild_id = ? AND user_id = ? AND symbol = ?
+            """,
+            (guild_id, user_id, symbol),
+        ).fetchone()
+        return 0 if row is None else int(row["shares"])
+
+
+def upsert_daily_close(
+    guild_id: int,
+    symbol: str,
+    date: str,
+    close_price: float,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_close (guild_id, symbol, date, close_price)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, symbol, date)
+            DO UPDATE SET close_price = excluded.close_price
+            """,
+            (guild_id, symbol, date, close_price),
+        )
+
+
+def get_latest_close(
+    guild_id: int,
+    symbol: str,
+) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT date, close_price
+            FROM daily_close
+            WHERE guild_id = ? AND symbol = ?
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            (guild_id, symbol),
+        ).fetchone()
+        return None if row is None else dict(row)

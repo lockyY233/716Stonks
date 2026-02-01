@@ -11,7 +11,7 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
                 "Please use this command in a server.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return
 
@@ -22,7 +22,7 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         if data is None:
             await interaction.response.send_message(
                 "You are not registered yet. Use /register first.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return
 
@@ -57,7 +57,6 @@ def setup_status(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message(
                 embed=embed,
                 file=banner,
-                ephemeral=True,
             )
         else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
