@@ -15,8 +15,8 @@ def setup_addcompany(tree: app_commands.CommandTree) -> None:
         symbol: str,
         name: str,
         base_price: float,
-        slope: float = 0.0,
-        drift: float = 1.0,
+        slope: float,
+        drift: float,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(

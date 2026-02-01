@@ -270,6 +270,20 @@ def get_user_shares(
         return 0 if row is None else int(row["shares"])
 
 
+def purge_all_data() -> None:
+    with get_connection() as conn:
+        conn.executescript(
+            """
+            DELETE FROM daily_close;
+            DELETE FROM price_history;
+            DELETE FROM holdings;
+            DELETE FROM users;
+            DELETE FROM companies;
+            DELETE FROM app_state;
+            """
+        )
+
+
 def upsert_daily_close(
     guild_id: int,
     symbol: str,

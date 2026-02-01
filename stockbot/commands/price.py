@@ -47,6 +47,7 @@ def setup_price(tree: app_commands.CommandTree) -> None:
             return
 
         max_points = 200
+        min_marker_points = 30
         if len(rows) > max_points:
             step = max(1, len(rows) // max_points)
             sampled = rows[::step]
@@ -69,12 +70,22 @@ def setup_price(tree: app_commands.CommandTree) -> None:
         fig.patch.set_alpha(0)
         ax.patch.set_alpha(0)
         x_values = list(range(len(labels)))
-        ax.plot(
-            x_values,
-            prices,
-            color="#2ecc71",
-            linewidth=3.0,
-        )
+        if len(rows) <= min_marker_points:
+            ax.plot(
+                x_values,
+                prices,
+                color="#3ae280cc",
+                linewidth=3.0,
+                marker="o",
+                markersize=10,
+            )
+        else:
+            ax.plot(
+                x_values,
+                prices,
+                color="#2ecc71",
+                linewidth=3.0,
+            )
         ax.set_title(f"{symbol.upper()} Price", fontsize=18, color="#666666")
         ax.set_xlabel("Time", fontsize=14, color="#666666")
         ax.set_ylabel("Price", fontsize=14, color="#666666")
