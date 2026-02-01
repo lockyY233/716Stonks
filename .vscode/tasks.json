@@ -18,6 +18,22 @@
         "panel": "shared"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Deploy to VPS",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/deploy.sh"
+      ],
+      "options": {
+        "envFile": "${workspaceFolder}/.env.deploy"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
     }
   ]
 }

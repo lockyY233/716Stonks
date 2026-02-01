@@ -1,0 +1,46 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "${{ secrets.VPS_PORT }}" -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync to VPS
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude "__pycache__" \
+            --exclude ".venv" \
+            --exclude "TOKEN" \
+            --exclude ".vscode" \
+            --exclude "*.code-workspace" \
+            -e "ssh -p ${{ secrets.VPS_PORT }}" \
+            ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_DIR }}/"
+
+      - name: Install deps and restart
+        run: |
+          ssh -p "${{ secrets.VPS_PORT }}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" <<'SSH'
+            set -euo pipefail
+            cd "${VPS_DIR}"
+            python3 -m venv .venv || true
+            source .venv/bin/activate
+            pip install -r requirements.txt
+            pm2 start ecosystem.config.js || pm2 reload ecosystem.config.js
+            pm2 save
+          SSH
+        env:
+          VPS_DIR: ${{ secrets.VPS_DIR }}

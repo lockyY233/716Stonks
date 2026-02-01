@@ -1,14 +1,23 @@
 from pathlib import Path
-from sqlite_web import sqlite_web
+import subprocess
+import sys
 
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     db_path = repo_root / "data" / "stockbot.db"
-    sqlite_web.run(
-        db_path=str(db_path),
-        host="127.0.0.1",
-        port=8081,
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sqlite_web",
+            str(db_path),
+            "--host", 
+            "0.0.0.0",
+            "--port",
+            "8081",
+        ],
+        check=True,
     )
 
 
