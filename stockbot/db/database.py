@@ -43,6 +43,7 @@ def init_db() -> None:
                 base_price REAL NOT NULL,
                 slope REAL NOT NULL,
                 drift REAL NOT NULL,
+                player_impact REAL NOT NULL DEFAULT 0.5,
                 starting_tick INTEGER NOT NULL,
                 current_price REAL NOT NULL DEFAULT 0,
                 last_tick INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +157,10 @@ def _ensure_company_columns(conn: sqlite3.Connection) -> None:
     if "last_tick" not in columns:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN last_tick INTEGER NOT NULL DEFAULT 0;"
+        )
+    if "player_impact" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN player_impact REAL NOT NULL DEFAULT 0.5;"
         )
 
 

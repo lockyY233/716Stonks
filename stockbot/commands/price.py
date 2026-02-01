@@ -3,13 +3,67 @@ from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import matplotlib
-from discord import Embed, File, Interaction, app_commands
+from discord import ButtonStyle, Embed, File, Interaction, app_commands
+from discord.ui import View, button
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 from stockbot.config import DISPLAY_TIMEZONE
-from stockbot.db import get_companies, get_latest_close, get_price_history, get_user_shares
+from stockbot.commands.trade_views import BuyConfirmView, SellConfirmView
+from stockbot.db import (
+    get_companies,
+    get_company,
+    get_latest_close,
+    get_price_history,
+    get_user_shares,
+)
+
+
+class PriceView(View):
+    def __init__(self, symbol: str) -> None:
+        super().__init__()
+        self.symbol = symbol
+
+    @button(label="Buy", style=ButtonStyle.green)
+    async def buy(self, interaction: Interaction, _button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Please use this command in a server.",
+                ephemeral=True,
+            )
+            return
+        company = get_company(interaction.guild.id, self.symbol)
+        if company is not None:
+            price = float(company.get("current_price", company["base_price"]))
+            message = f"Confirm buy action for {self.symbol} @ **${price:.2f}**:"
+        else:
+            message = "Confirm buy action:"
+        await interaction.response.send_message(
+            message,
+            view=BuyConfirmView(self.symbol),
+            ephemeral=True,
+        )
+
+    @button(label="Sell", style=ButtonStyle.red)
+    async def sell(self, interaction: Interaction, _button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Please use this command in a server.",
+                ephemeral=True,
+            )
+            return
+        company = get_company(interaction.guild.id, self.symbol)
+        if company is not None:
+            price = float(company.get("current_price", company["base_price"]))
+            message = f"Confirm sell action for {self.symbol} @ **${price:.2f}**:"
+        else:
+            message = "Confirm sell action:"
+        await interaction.response.send_message(
+            message,
+            view=SellConfirmView(self.symbol),
+            ephemeral=True,
+        )
 
 
 def setup_price(tree: app_commands.CommandTree) -> None:
@@ -131,7 +185,7 @@ def setup_price(tree: app_commands.CommandTree) -> None:
         if current_price is not None:
             embed.add_field(
                 name="Current Price",
-                value=f"**${current_price}**",
+                value=f"**${current_price:.2f}**",
                 inline=True,
             )
             latest_close = get_latest_close(interaction.guild.id, symbol.upper())
@@ -182,4 +236,5 @@ def setup_price(tree: app_commands.CommandTree) -> None:
             embed.color = 0x2ecc71 if change_value >= 0 else 0xe74c3c
         embed.set_image(url="attachment://price.png")
 
-        await interaction.response.send_message(embed=embed, file=chart_file)
+        view = PriceView(symbol.upper())
+        await interaction.response.send_message(embed=embed, file=chart_file, view=view)

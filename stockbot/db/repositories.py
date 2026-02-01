@@ -26,6 +26,19 @@ def register_user(
         return True
 
 
+def get_user(guild_id: int, user_id: int) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT guild_id, user_id, joined_at, bank, rank
+            FROM users
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+
 def add_company(
     guild_id: int,
     symbol: str,
@@ -33,6 +46,7 @@ def add_company(
     base_price: float,
     slope: float,
     drift: float,
+    player_impact: float,
     starting_tick: int,
     current_price: float,
     last_tick: int,
@@ -55,12 +69,13 @@ def add_company(
                 base_price,
                 slope,
                 drift,
+                player_impact,
                 starting_tick,
                 current_price,
                 last_tick,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -69,6 +84,7 @@ def add_company(
                 base_price,
                 slope,
                 drift,
+                player_impact,
                 starting_tick,
                 current_price,
                 last_tick,
@@ -82,7 +98,7 @@ def get_companies(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, name, base_price, slope, drift, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, base_price, slope, drift, player_impact, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ?
             ORDER BY symbol
@@ -90,6 +106,37 @@ def get_companies(guild_id: int) -> list[dict]:
             (guild_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_company(guild_id: int, symbol: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT symbol, name, base_price, slope, drift, player_impact, starting_tick, current_price, last_tick, updated_at
+            FROM companies
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (guild_id, symbol),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+
+def update_company_slope(
+    guild_id: int,
+    symbol: str,
+    slope: float,
+    updated_at: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE companies
+            SET slope = ?,
+                updated_at = ?
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (slope, updated_at, guild_id, symbol),
+        )
 
 
 def update_company_price(
@@ -124,6 +171,22 @@ def update_company_price(
                 guild_id,
                 symbol,
             ),
+        )
+
+
+def update_user_bank(
+    guild_id: int,
+    user_id: int,
+    new_bank: float,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET bank = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (new_bank, guild_id, user_id),
         )
 
 
@@ -268,6 +331,52 @@ def get_user_shares(
             (guild_id, user_id, symbol),
         ).fetchone()
         return 0 if row is None else int(row["shares"])
+
+
+def upsert_holding(
+    guild_id: int,
+    user_id: int,
+    symbol: str,
+    shares_delta: int,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO holdings (guild_id, user_id, symbol, shares)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, symbol)
+            DO UPDATE SET shares = shares + excluded.shares
+            """,
+            (guild_id, user_id, symbol, shares_delta),
+        )
+
+
+def set_holding(
+    guild_id: int,
+    user_id: int,
+    symbol: str,
+    shares: int,
+) -> None:
+    with get_connection() as conn:
+        if shares <= 0:
+            conn.execute(
+                """
+                DELETE FROM holdings
+                WHERE guild_id = ? AND user_id = ? AND symbol = ?
+                """,
+                (guild_id, user_id, symbol),
+            )
+            return
+
+        conn.execute(
+            """
+            INSERT INTO holdings (guild_id, user_id, symbol, shares)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, symbol)
+            DO UPDATE SET shares = excluded.shares
+            """,
+            (guild_id, user_id, symbol, shares),
+        )
 
 
 def purge_all_data() -> None:

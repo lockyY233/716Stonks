@@ -17,6 +17,7 @@ def setup_addcompany(tree: app_commands.CommandTree) -> None:
         base_price: float,
         slope: float,
         drift: float,
+        player_impact: float = 0.5,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -34,6 +35,7 @@ def setup_addcompany(tree: app_commands.CommandTree) -> None:
             base_price=base_price,
             slope=slope,
             drift=drift,
+            player_impact=player_impact,
             starting_tick=current_tick,
             current_price=base_price,
             last_tick=current_tick,

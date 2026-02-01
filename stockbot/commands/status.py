@@ -1,13 +1,16 @@
 from pathlib import Path
 
-from discord import Embed, File, Interaction, app_commands
+from discord import Embed, File, Interaction, Member, app_commands
 
 from stockbot.db import get_user_status
 
 
 def setup_status(tree: app_commands.CommandTree) -> None:
     @tree.command(name="status", description="Show your status and holdings.")
-    async def status(interaction: Interaction) -> None:
+    async def status(
+        interaction: Interaction,
+        member: Member | None = None,
+    ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
                 "Please use this command in a server.",
@@ -15,13 +18,14 @@ def setup_status(tree: app_commands.CommandTree) -> None:
             )
             return
 
+        target = member or interaction.user
         data = get_user_status(
             guild_id=interaction.guild.id,
-            user_id=interaction.user.id,
+            user_id=target.id,
         )
         if data is None:
             await interaction.response.send_message(
-                "You are not registered yet. Use /register first.",
+                "User is not registered yet. Use /register first.",
                 ephemeral=False,
             )
             return
@@ -30,8 +34,8 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         holdings = data["holdings"]
 
         embed = Embed(
-            title=f"📊 Status of {interaction.user.display_name}",
-            description=f"{interaction.user.mention}"
+            title=f"📊 Status of {target.display_name}",
+            description=f"{target.mention}"
         )
         embed.add_field(name="💳 Balance", value=f"**${user['bank']}**", inline=True)
         embed.add_field(name="︽ Rank", value=user["rank"].title(), inline=True)
@@ -43,9 +47,9 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         else:
             embed.add_field(name="📈 Holdings", value="None", inline=False)
 
-        avatar_url = interaction.user.display_avatar.url
+        avatar_url = target.display_avatar.url
         embed.set_author(
-            name=interaction.user.display_name,
+            name=target.display_name,
             icon_url=avatar_url,
         )
 
