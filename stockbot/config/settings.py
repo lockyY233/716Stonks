@@ -13,3 +13,4 @@ TICK_INTERVAL = 5                           # 1 tick = 1 update to the pricing
 TREND_MULTIPLIER = 1e-2                     # Multiplier to the slope 
 DISPLAY_TIMEZONE = "America/New_York"       # Timezone for display only
 MARKET_CLOSE_HOUR = 21                      # hour to record daily close (reset changes and send tag players for news)
+STONKERS_ROLE_NAME = "📈💰📊Stonkers"             # Role granted on successful registration

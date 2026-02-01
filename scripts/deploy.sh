@@ -20,6 +20,7 @@ RSYNC_EXCLUDES=(
   "__pycache__"
   ".venv"
   "TOKEN"
+  "data"
   ".vscode"
   "*.code-workspace"
 )

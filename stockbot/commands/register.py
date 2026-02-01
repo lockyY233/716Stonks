@@ -1,11 +1,20 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import discord
 from discord import Embed, File, Interaction, app_commands
+from discord.utils import get as get_role
 
-from stockbot.config import START_BALANCE
+from stockbot.config import START_BALANCE, STONKERS_ROLE_NAME
 from stockbot.core.ranks import Rank
 from stockbot.db import register_user
+
+
+async def _ensure_stonkers_role(guild: discord.Guild) -> discord.Role:
+    role = get_role(guild.roles, name=STONKERS_ROLE_NAME)
+    if role is None:
+        role = await guild.create_role(name=STONKERS_ROLE_NAME, reason="Auto role for registered users")
+    return role
 
 
 def setup_register(tree: app_commands.CommandTree) -> None:
@@ -27,7 +36,17 @@ def setup_register(tree: app_commands.CommandTree) -> None:
             rank=Rank.PRIVATE.value,
         )
 
+        role_note = None
         if created:
+            try:
+                member = interaction.user
+                if not isinstance(member, discord.Member):
+                    member = await interaction.guild.fetch_member(interaction.user.id)
+                role = await _ensure_stonkers_role(interaction.guild)
+                await member.add_roles(role, reason="User registered")
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                role_note = f"Could not assign `{STONKERS_ROLE_NAME}` role: {exc.__class__.__name__}"
+
             embed = Embed(
                 title=f"✅ Registered **SUCCESS** ✅",
                 description=f"Hello {interaction.user.mention} ! \n Welcome to **Capitalism**! 📈",
@@ -47,6 +66,8 @@ def setup_register(tree: app_commands.CommandTree) -> None:
                 value=joined_date,
                 inline=True,
             )
+            if role_note:
+                embed.add_field(name="⚠️ Role", value=role_note, inline=False)
         else:
             embed = Embed(
                 title="ALREADY REGISTERED",

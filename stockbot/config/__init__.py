@@ -7,6 +7,7 @@ from stockbot.config.settings import (
     TREND_MULTIPLIER,
     DISPLAY_TIMEZONE,
     MARKET_CLOSE_HOUR,
+    STONKERS_ROLE_NAME,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "TREND_MULTIPLIER",
     "DISPLAY_TIMEZONE",
     "MARKET_CLOSE_HOUR",
+    "STONKERS_ROLE_NAME",
 ]
