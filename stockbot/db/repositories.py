@@ -6,6 +6,7 @@ def register_user(
     user_id: int,
     joined_at: str,
     bank: int,
+    display_name: str,
     rank: str,
 ) -> bool:
     with get_connection() as conn:
@@ -18,10 +19,10 @@ def register_user(
 
         conn.execute(
             """
-            INSERT INTO users (guild_id, user_id, joined_at, bank, rank)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (guild_id, user_id, joined_at, bank, display_name, rank)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, joined_at, bank, rank),
+            (guild_id, user_id, joined_at, bank, display_name, rank),
         )
         return True
 
@@ -30,13 +31,27 @@ def get_user(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, rank
+            SELECT guild_id, user_id, joined_at, bank, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
             (guild_id, user_id),
         ).fetchone()
         return None if row is None else dict(row)
+
+
+def get_users(guild_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, bank, display_name, rank, joined_at
+            FROM users
+            WHERE guild_id = ?
+            ORDER BY bank DESC, user_id ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def add_company(
@@ -52,6 +67,8 @@ def add_company(
     last_tick: int,
     updated_at: str,
 ) -> bool:
+    base_price = max(0.01, float(base_price))
+    current_price = max(0.01, float(current_price))
     with get_connection() as conn:
         existing = conn.execute(
             "SELECT 1 FROM companies WHERE guild_id = ? AND symbol = ?",
@@ -149,6 +166,8 @@ def update_company_price(
     last_tick: int,
     updated_at: str,
 ) -> None:
+    base_price = max(0.01, float(base_price))
+    current_price = max(0.01, float(current_price))
     with get_connection() as conn:
         conn.execute(
             """
@@ -291,7 +310,7 @@ def get_user_status(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         user = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, rank
+            SELECT guild_id, user_id, joined_at, bank, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
@@ -390,6 +409,67 @@ def purge_all_data() -> None:
             DELETE FROM companies;
             DELETE FROM app_state;
             """
+        )
+
+
+def wipe_price_history(guild_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM price_history
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM daily_close
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+
+
+def wipe_users(guild_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM users
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+
+
+def wipe_companies(guild_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM companies
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM price_history
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM daily_close
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM holdings
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
         )
 
 

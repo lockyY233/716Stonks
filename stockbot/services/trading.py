@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from discord import Interaction
 
+from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE
 from stockbot.db import (
     get_company,
     get_user,
@@ -26,7 +27,7 @@ async def perform_buy(
 
     user = get_user(interaction.guild.id, interaction.user.id)
     if user is None:
-        return False, "You are not registered yet. Use /register first."
+        return False, REGISTER_REQUIRED_MESSAGE
 
     company = get_company(interaction.guild.id, symbol.upper())
     if company is None:
@@ -64,7 +65,7 @@ async def perform_sell(
 
     user = get_user(interaction.guild.id, interaction.user.id)
     if user is None:
-        return False, "You are not registered yet. Use /register first."
+        return False, REGISTER_REQUIRED_MESSAGE
 
     company = get_company(interaction.guild.id, symbol.upper())
     if company is None:

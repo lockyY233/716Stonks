@@ -33,7 +33,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
             symbol = company["symbol"]
             base_price = float(company["base_price"])
             slope = float(company["slope"])
-            drift = float(company["drift"])
+            drift_percent = abs(float(company["drift"]))
             player_impact = float(company.get("player_impact", 0.5))
             starting_tick = int(company.get("starting_tick", 0))
             current_price = float(company.get("current_price", base_price))
@@ -41,8 +41,9 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
 
             ticks_since_last = max(1, tick_index - last_tick)
             trend = slope * player_impact * ticks_since_last * TREND_MULTIPLIER
+            random_change = current_price * uniform(-drift_percent, drift_percent) / 100.0
             price = round(
-                max(0.01, current_price + trend + uniform(-drift, drift)),
+                max(0.01, current_price + trend + random_change),
                 2,
             )
 
@@ -51,7 +52,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
                 symbol=symbol,
                 base_price=base_price,
                 slope=slope,
-                drift=drift,
+                drift=drift_percent,
                 current_price=price,
                 last_tick=tick_index,
                 updated_at=now,

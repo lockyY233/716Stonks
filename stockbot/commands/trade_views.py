@@ -1,6 +1,7 @@
 from discord import ButtonStyle, Interaction
 from discord.ui import Modal, TextInput, View, button
 
+from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
 from stockbot.db import get_company
 from stockbot.services.trading import perform_buy, perform_sell
 
@@ -22,6 +23,9 @@ class BuySharesModal(Modal):
             )
             return
         _ok, message = await perform_buy(interaction, self.symbol, shares)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
         await interaction.response.send_message(message, ephemeral=True)
 
 
@@ -42,6 +46,9 @@ class SellSharesModal(Modal):
             )
             return
         _ok, message = await perform_sell(interaction, self.symbol, shares)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
         await interaction.response.send_message(message, ephemeral=True)
 
 
@@ -53,6 +60,9 @@ class BuyConfirmView(View):
     @button(label="Buy 1 Share", style=ButtonStyle.green)
     async def buy_one(self, interaction: Interaction, _button) -> None:
         _ok, message = await perform_buy(interaction, self.symbol, 1)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
         await interaction.response.send_message(message, ephemeral=True)
 
     @button(label="Buy Shares", style=ButtonStyle.blurple)
@@ -68,6 +78,9 @@ class SellConfirmView(View):
     @button(label="Sell 1 Share", style=ButtonStyle.red)
     async def sell_one(self, interaction: Interaction, _button) -> None:
         _ok, message = await perform_sell(interaction, self.symbol, 1)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
         await interaction.response.send_message(message, ephemeral=True)
 
     @button(label="Sell Shares", style=ButtonStyle.blurple)

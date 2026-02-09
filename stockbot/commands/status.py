@@ -2,6 +2,7 @@ from pathlib import Path
 
 from discord import Embed, File, Interaction, Member, app_commands
 
+from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
 from stockbot.db import get_user_status
 
 
@@ -25,8 +26,9 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         )
         if data is None:
             await interaction.response.send_message(
-                "User is not registered yet. Use /register first.",
-                ephemeral=False,
+                REGISTER_REQUIRED_MESSAGE,
+                ephemeral=True,
+                view=RegisterNowView(),
             )
             return
 

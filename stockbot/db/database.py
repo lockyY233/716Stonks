@@ -21,6 +21,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 joined_at TEXT NOT NULL,
                 bank REAL NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
                 rank TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
             );
@@ -76,6 +77,7 @@ def init_db() -> None:
         )
         _ensure_users_bank_type(conn)
         _ensure_rank_column(conn)
+        _ensure_display_name_column(conn)
         _ensure_company_columns(conn)
         _ensure_price_history_columns(conn)
 
@@ -88,6 +90,17 @@ def _ensure_rank_column(conn: sqlite3.Connection) -> None:
     if "rank" not in columns:
         conn.execute(
             "ALTER TABLE users ADD COLUMN rank TEXT NOT NULL DEFAULT 'PRIVATE';"
+        )
+
+
+def _ensure_display_name_column(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(users);").fetchall()
+    }
+    if "display_name" not in columns:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';"
         )
 
 
@@ -108,6 +121,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id INTEGER NOT NULL,
             joined_at TEXT NOT NULL,
             bank REAL NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
             rank TEXT NOT NULL,
             PRIMARY KEY (guild_id, user_id)
         );
@@ -117,6 +131,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id,
             joined_at,
             bank,
+            display_name,
             rank
         )
         SELECT
@@ -124,6 +139,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id,
             joined_at,
             bank,
+            '' AS display_name,
             rank
         FROM users;
 

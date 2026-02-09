@@ -9,6 +9,9 @@ from stockbot.db import add_company, get_state_value
 
 def setup_addcompany(tree: app_commands.CommandTree) -> None:
     @tree.command(name="addcompany", description="Admin: add a company.")
+    @app_commands.describe(
+        drift="Volatility in percent per tick (1 = 1%).",
+    )
     @app_commands.checks.has_permissions(administrator=True)
     async def addcompany(
         interaction: Interaction,
