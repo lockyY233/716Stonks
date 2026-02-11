@@ -39,7 +39,8 @@ def setup_status(tree: app_commands.CommandTree) -> None:
             title=f"📊 Status of {target.display_name}",
             description=f"{target.mention}"
         )
-        embed.add_field(name="💳 Balance", value=f"**${user['bank']}**", inline=True)
+        balance = round(float(user["bank"]), 2)
+        embed.add_field(name="💳 Balance", value=f"**${balance:.2f}**", inline=True)
         embed.add_field(name="︽ Rank", value=user["rank"].title(), inline=True)
         embed.add_field(name="📅 Joined", value=user["joined_at"][:10], inline=True)
 

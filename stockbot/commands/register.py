@@ -94,11 +94,12 @@ class RegisterNowView(View):
                 ephemeral=True,
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         embed, banner = await _build_register_response(interaction)
         if banner is None:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        await interaction.response.send_message(embed=embed, file=banner, ephemeral=True)
+        await interaction.followup.send(embed=embed, file=banner, ephemeral=True)
 
 
 def setup_register(tree: app_commands.CommandTree) -> None:
@@ -109,8 +110,9 @@ def setup_register(tree: app_commands.CommandTree) -> None:
                 "Please use this command in a server."
             )
             return
+        await interaction.response.defer(thinking=True)
         embed, banner = await _build_register_response(interaction)
         if banner is None:
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
             return
-        await interaction.response.send_message(embed=embed, file=banner)
+        await interaction.followup.send(embed=embed, file=banner)

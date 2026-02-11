@@ -44,7 +44,9 @@ def init_db() -> None:
                 base_price REAL NOT NULL,
                 slope REAL NOT NULL,
                 drift REAL NOT NULL,
-                player_impact REAL NOT NULL DEFAULT 0.5,
+                liquidity REAL NOT NULL DEFAULT 100.0,
+                pending_buy REAL NOT NULL DEFAULT 0.0,
+                pending_sell REAL NOT NULL DEFAULT 0.0,
                 starting_tick INTEGER NOT NULL,
                 current_price REAL NOT NULL DEFAULT 0,
                 last_tick INTEGER NOT NULL DEFAULT 0,
@@ -158,10 +160,16 @@ def _ensure_company_columns(conn: sqlite3.Connection) -> None:
         return
     if "guild_id" not in columns:
         _migrate_companies_table(conn)
-        return
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(companies);").fetchall()
+        }
     if "offset" in columns:
         _migrate_companies_remove_offset(conn)
-        return
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(companies);").fetchall()
+        }
     if "starting_tick" not in columns:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN starting_tick INTEGER NOT NULL DEFAULT 0;"
@@ -174,9 +182,17 @@ def _ensure_company_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN last_tick INTEGER NOT NULL DEFAULT 0;"
         )
-    if "player_impact" not in columns:
+    if "liquidity" not in columns:
         conn.execute(
-            "ALTER TABLE companies ADD COLUMN player_impact REAL NOT NULL DEFAULT 0.5;"
+            "ALTER TABLE companies ADD COLUMN liquidity REAL NOT NULL DEFAULT 100.0;"
+        )
+    if "pending_buy" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN pending_buy REAL NOT NULL DEFAULT 0.0;"
+        )
+    if "pending_sell" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN pending_sell REAL NOT NULL DEFAULT 0.0;"
         )
 
 
@@ -206,7 +222,12 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             base_price REAL NOT NULL,
             slope REAL NOT NULL,
             drift REAL NOT NULL,
-            offset REAL NOT NULL DEFAULT 0,
+            liquidity REAL NOT NULL DEFAULT 100.0,
+            pending_buy REAL NOT NULL DEFAULT 0.0,
+            pending_sell REAL NOT NULL DEFAULT 0.0,
+            starting_tick INTEGER NOT NULL DEFAULT 0,
+            current_price REAL NOT NULL DEFAULT 0,
+            last_tick INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (guild_id, symbol)
         );
@@ -218,7 +239,12 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             base_price,
             slope,
             drift,
-            offset,
+            liquidity,
+            pending_buy,
+            pending_sell,
+            starting_tick,
+            current_price,
+            last_tick,
             updated_at
         )
         SELECT
@@ -228,7 +254,12 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             base_price,
             slope,
             drift,
-            offset,
+            100.0 AS liquidity,
+            0.0 AS pending_buy,
+            0.0 AS pending_sell,
+            0 AS starting_tick,
+            base_price AS current_price,
+            0 AS last_tick,
             updated_at
         FROM companies;
 
@@ -248,6 +279,9 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             base_price REAL NOT NULL,
             slope REAL NOT NULL,
             drift REAL NOT NULL,
+            liquidity REAL NOT NULL DEFAULT 100.0,
+            pending_buy REAL NOT NULL DEFAULT 0.0,
+            pending_sell REAL NOT NULL DEFAULT 0.0,
             starting_tick INTEGER NOT NULL,
             current_price REAL NOT NULL DEFAULT 0,
             last_tick INTEGER NOT NULL DEFAULT 0,
@@ -262,6 +296,9 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             base_price,
             slope,
             drift,
+            liquidity,
+            pending_buy,
+            pending_sell,
             starting_tick,
             current_price,
             last_tick,
@@ -274,6 +311,9 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             base_price,
             slope,
             drift,
+            100.0 AS liquidity,
+            0.0 AS pending_buy,
+            0.0 AS pending_sell,
             starting_tick,
             current_price,
             last_tick,

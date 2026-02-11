@@ -8,7 +8,7 @@ from stockbot.db import (
     get_user,
     get_user_shares,
     set_holding,
-    update_company_slope,
+    update_company_trade_volume,
     update_user_bank,
     upsert_holding,
 )
@@ -41,12 +41,11 @@ async def perform_buy(
     new_bank = float(user["bank"]) - total_cost
     update_user_bank(interaction.guild.id, interaction.user.id, new_bank)
     upsert_holding(interaction.guild.id, interaction.user.id, symbol.upper(), shares)
-    slope = float(company.get("slope", 0))
-    player_impact = float(company.get("player_impact", 0.5))
-    update_company_slope(
+    update_company_trade_volume(
         interaction.guild.id,
         symbol.upper(),
-        slope + (shares * player_impact),
+        float(shares),
+        0.0,
         datetime.now(timezone.utc).isoformat(),
     )
     return True, f"Bought {shares} shares of {symbol.upper()} for ${total_cost}."
@@ -80,12 +79,11 @@ async def perform_sell(
     new_bank = float(user["bank"]) + total_gain
     update_user_bank(interaction.guild.id, interaction.user.id, new_bank)
     set_holding(interaction.guild.id, interaction.user.id, symbol.upper(), owned - shares)
-    slope = float(company.get("slope", 0))
-    player_impact = float(company.get("player_impact", 0.5))
-    update_company_slope(
+    update_company_trade_volume(
         interaction.guild.id,
         symbol.upper(),
-        slope - (shares * player_impact),
+        0.0,
+        float(shares),
         datetime.now(timezone.utc).isoformat(),
     )
     return True, f"Sold {shares} shares of {symbol.upper()} for ${total_gain}."

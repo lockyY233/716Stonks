@@ -1,4 +1,7 @@
-from stockbot.db.database import get_connection
+from pathlib import Path
+
+from stockbot.config import DB_PATH
+from stockbot.db.database import get_connection, init_db
 
 
 def register_user(
@@ -61,7 +64,7 @@ def add_company(
     base_price: float,
     slope: float,
     drift: float,
-    player_impact: float,
+    liquidity: float,
     starting_tick: int,
     current_price: float,
     last_tick: int,
@@ -86,13 +89,15 @@ def add_company(
                 base_price,
                 slope,
                 drift,
-                player_impact,
+                liquidity,
+                pending_buy,
+                pending_sell,
                 starting_tick,
                 current_price,
                 last_tick,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -101,7 +106,9 @@ def add_company(
                 base_price,
                 slope,
                 drift,
-                player_impact,
+                liquidity,
+                0.0,
+                0.0,
                 starting_tick,
                 current_price,
                 last_tick,
@@ -115,7 +122,7 @@ def get_companies(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, name, base_price, slope, drift, player_impact, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, base_price, slope, drift, liquidity, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ?
             ORDER BY symbol
@@ -129,7 +136,7 @@ def get_company(guild_id: int, symbol: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT symbol, name, base_price, slope, drift, player_impact, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, base_price, slope, drift, liquidity, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ? AND symbol = ?
             """,
@@ -162,6 +169,8 @@ def update_company_price(
     base_price: float,
     slope: float,
     drift: float,
+    pending_buy: float,
+    pending_sell: float,
     current_price: float,
     last_tick: int,
     updated_at: str,
@@ -175,6 +184,8 @@ def update_company_price(
             SET base_price = ?,
                 slope = ?,
                 drift = ?,
+                pending_buy = ?,
+                pending_sell = ?,
                 current_price = ?,
                 last_tick = ?,
                 updated_at = ?
@@ -184,12 +195,34 @@ def update_company_price(
                 base_price,
                 slope,
                 drift,
+                pending_buy,
+                pending_sell,
                 current_price,
                 last_tick,
                 updated_at,
                 guild_id,
                 symbol,
             ),
+        )
+
+
+def update_company_trade_volume(
+    guild_id: int,
+    symbol: str,
+    buy_delta: float,
+    sell_delta: float,
+    updated_at: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE companies
+            SET pending_buy = pending_buy + ?,
+                pending_sell = pending_sell + ?,
+                updated_at = ?
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (buy_delta, sell_delta, updated_at, guild_id, symbol),
         )
 
 
@@ -399,17 +432,17 @@ def set_holding(
 
 
 def purge_all_data() -> None:
-    with get_connection() as conn:
-        conn.executescript(
-            """
-            DELETE FROM daily_close;
-            DELETE FROM price_history;
-            DELETE FROM holdings;
-            DELETE FROM users;
-            DELETE FROM companies;
-            DELETE FROM app_state;
-            """
-        )
+    db_path = Path(DB_PATH)
+
+    # Ensure no open sqlite handle from this process before deleting the file.
+    with get_connection():
+        pass
+
+    if db_path.exists():
+        db_path.unlink()
+
+    # Recreate schema immediately so the bot can continue without restart.
+    init_db()
 
 
 def wipe_price_history(guild_id: int) -> None:

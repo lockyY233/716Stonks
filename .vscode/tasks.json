@@ -4,11 +4,8 @@
     {
       "label": "Run bot",
       "type": "shell",
-      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "args": [
-        "-m",
-        "stockbot"
-      ],
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "stockbot"],
       "group": {
         "kind": "build",
         "isDefault": true

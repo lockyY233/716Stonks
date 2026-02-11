@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 import matplotlib
 from discord import ButtonStyle, Embed, File, Interaction, app_commands
+from discord.errors import NotFound
 from discord.ui import View, button
 
 matplotlib.use("Agg")
@@ -79,12 +80,18 @@ def setup_price(tree: app_commands.CommandTree) -> None:
                 ephemeral=True,
             )
             return
+        try:
+            await interaction.response.defer(thinking=True)
+        except NotFound:
+            # Interaction token expired before we could acknowledge it.
+            return
 
+        default_limit = 50
         if last is None:
             rows = get_price_history(
                 guild_id=interaction.guild.id,
                 symbol=symbol.upper(),
-                limit=None,
+                limit=default_limit,
             )
         else:
             limit = max(1, min(last, 200))
@@ -93,11 +100,16 @@ def setup_price(tree: app_commands.CommandTree) -> None:
                 symbol=symbol.upper(),
                 limit=limit,
             )
+            # If requested history is larger than available, the query naturally
+            # returns all rows back to the earliest available point.
         if not rows:
-            await interaction.response.send_message(
-                f"No price history for `{symbol.upper()}` yet.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.followup.send(
+                    f"No price history for `{symbol.upper()}` yet.",
+                    ephemeral=True,
+                )
+            except NotFound:
+                return
             return
 
         max_points = 200
@@ -237,4 +249,7 @@ def setup_price(tree: app_commands.CommandTree) -> None:
         embed.set_image(url="attachment://price.png")
 
         view = PriceView(symbol.upper())
-        await interaction.response.send_message(embed=embed, file=chart_file, view=view)
+        try:
+            await interaction.followup.send(embed=embed, file=chart_file, view=view)
+        except NotFound:
+            return

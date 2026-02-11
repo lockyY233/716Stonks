@@ -31,12 +31,22 @@ VPS_PORT=22
 VPS_DIR=/home/ubuntu/apps/716Stonks
 APP_NAME=716Stonks
 PYTHON=python3
+SETUP_SYSTEMD=0
 ```
 
 ### Deploy from Mac
 
 ```bash
 ./scripts/deploy.sh
+```
+
+Normal deploy syncs files, installs dependencies, and restarts the existing
+`systemd` service `${APP_NAME}.service`.
+
+For first deploy (or whenever you want to recreate/update the unit file), run:
+
+```bash
+SETUP_SYSTEMD=1 ./scripts/deploy.sh
 ```
 
 ### VS Code task

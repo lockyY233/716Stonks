@@ -125,7 +125,10 @@ def _build_company_pages(rows: list[dict]) -> tuple[list[Embed], list[File]]:
                 f"{float(row.get('current_price', row['base_price'])):.2f}",
                 f"{float(row['slope']):.4f}",
                 f"{float(row['drift']):.4f}",
-                f"{float(row.get('player_impact', 0.5)):.2f}",
+                f"{float(row.get('liquidity', 100.0)):.2f}",
+                f"{float(row.get('pending_buy', 0.0)):.2f}",
+                f"{float(row.get('pending_sell', 0.0)):.2f}",
+                f"{float(row.get('pending_buy', 0.0) - row.get('pending_sell', 0.0)):.2f}",
             ]
         )
 
@@ -136,7 +139,18 @@ def _build_company_pages(rows: list[dict]) -> tuple[list[Embed], list[File]]:
         filename = f"adminshow_companies_{i}.png"
         image = _render_table_image(
             title="Companies Table",
-            headers=["symbol", "name", "base", "current", "slope", "drift", "impact"],
+            headers=[
+                "symbol",
+                "name",
+                "base",
+                "current",
+                "slope",
+                "drift",
+                "liquidity",
+                "buy_tick",
+                "sell_tick",
+                "net_tick",
+            ],
             rows=chunk,
         )
         files.append(File(image, filename=filename))

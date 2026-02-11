@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from random import uniform
 
-from stockbot.config import DISPLAY_TIMEZONE, MARKET_CLOSE_HOUR, TREND_MULTIPLIER
+from stockbot.config import DISPLAY_TIMEZONE, MARKET_CLOSE_HOUR
 from stockbot.db import (
     add_price_history,
     get_companies,
@@ -14,7 +14,7 @@ from stockbot.db import (
 
 
 def process_tick(tick_index: int, guild_ids: list[int]) -> None:
-    """Advance the economy by one tick using slope + drift model."""
+    """Advance economy by one tick with simple base update and drift noise."""
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     try:
@@ -33,26 +33,30 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
             symbol = company["symbol"]
             base_price = float(company["base_price"])
             slope = float(company["slope"])
-            drift_percent = abs(float(company["drift"]))
-            player_impact = float(company.get("player_impact", 0.5))
+            drift_amount = abs(float(company["drift"]))
+            liquidity = max(1.0, float(company.get("liquidity", 100.0)))
+            pending_buy = float(company.get("pending_buy", 0.0))
+            pending_sell = float(company.get("pending_sell", 0.0))
             starting_tick = int(company.get("starting_tick", 0))
-            current_price = float(company.get("current_price", base_price))
             last_tick = int(company.get("last_tick", starting_tick))
 
             ticks_since_last = max(1, tick_index - last_tick)
-            trend = slope * player_impact * ticks_since_last * TREND_MULTIPLIER
-            random_change = current_price * uniform(-drift_percent, drift_percent) / 100.0
+            base_delta = (slope * ticks_since_last) + ((pending_buy - pending_sell) / liquidity)
+            next_base_price = max(0.01, base_price + base_delta)
+            drift_noise = uniform(-drift_amount, drift_amount)
             price = round(
-                max(0.01, current_price + trend + random_change),
+                max(0.01, next_base_price + drift_noise),
                 2,
             )
 
             update_company_price(
                 guild_id=guild_id,
                 symbol=symbol,
-                base_price=base_price,
+                base_price=next_base_price,
                 slope=slope,
-                drift=drift_percent,
+                drift=drift_amount,
+                pending_buy=0.0,
+                pending_sell=0.0,
                 current_price=price,
                 last_tick=tick_index,
                 updated_at=now,
