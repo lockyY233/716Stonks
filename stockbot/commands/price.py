@@ -86,7 +86,7 @@ def setup_price(tree: app_commands.CommandTree) -> None:
             # Interaction token expired before we could acknowledge it.
             return
 
-        default_limit = 50
+        default_limit = 80
         if last is None:
             rows = get_price_history(
                 guild_id=interaction.guild.id,
@@ -173,21 +173,16 @@ def setup_price(tree: app_commands.CommandTree) -> None:
         buf.seek(0)
         chart_file = File(buf, filename="price.png")
 
+        company_row = get_company(interaction.guild.id, symbol.upper())
         current_price = None
         base_price = None
-        created_at = None
-        for company in get_companies(interaction.guild.id):
-            if company["symbol"] == symbol.upper():
-                current_price = company.get("current_price")
-                base_price = company.get("base_price")
-                created_at = company.get("updated_at")
-                break
-
         company_name = None
-        for company in get_companies(interaction.guild.id):
-            if company["symbol"] == symbol.upper():
-                company_name = company.get("name")
-                break
+        founded_year = None
+        if company_row is not None:
+            current_price = company_row.get("current_price")
+            base_price = company_row.get("base_price")
+            company_name = company_row.get("name")
+            founded_year = company_row.get("founded_year")
 
         embed = Embed(
             title=f"{symbol.upper()} Price",
@@ -221,19 +216,12 @@ def setup_price(tree: app_commands.CommandTree) -> None:
                     value=f"**{arrow} {change:+.2f}%**",
                     inline=True,
                 )
-                if created_at:
-                    try:
-                        tz = ZoneInfo(DISPLAY_TIMEZONE)
-                    except Exception:
-                        tz = timezone.utc
-                    created_dt = datetime.fromisoformat(
-                        created_at.replace("Z", "+00:00")
-                    ).astimezone(tz)
-                    embed.add_field(
-                        name="Created",
-                        value=created_dt.strftime("%m/%d"),
-                        inline=True,
-                    )
+            if founded_year:
+                embed.add_field(
+                    name="Founded",
+                    value=str(founded_year),
+                    inline=True,
+                )
             owned = get_user_shares(
                 guild_id=interaction.guild.id,
                 user_id=interaction.user.id,

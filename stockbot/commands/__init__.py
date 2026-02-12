@@ -12,6 +12,7 @@ from stockbot.commands.list import setup_list
 from stockbot.commands.help import setup_help
 from stockbot.commands.wipe import setup_wipe
 from stockbot.commands.adminshow import setup_adminshow
+from stockbot.commands.desc import setup_desc
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -27,3 +28,4 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_help(tree)
     setup_wipe(tree)
     setup_adminshow(tree)
+    setup_desc(tree)

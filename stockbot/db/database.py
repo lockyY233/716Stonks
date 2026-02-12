@@ -41,10 +41,16 @@ def init_db() -> None:
                 guild_id INTEGER NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT NOT NULL,
+                location TEXT NOT NULL DEFAULT '',
+                industry TEXT NOT NULL DEFAULT '',
+                founded_year INTEGER NOT NULL DEFAULT 2000,
+                description TEXT NOT NULL DEFAULT '',
+                evaluation TEXT NOT NULL DEFAULT '',
                 base_price REAL NOT NULL,
                 slope REAL NOT NULL,
                 drift REAL NOT NULL,
                 liquidity REAL NOT NULL DEFAULT 100.0,
+                impact_power REAL NOT NULL DEFAULT 1.0,
                 pending_buy REAL NOT NULL DEFAULT 0.0,
                 pending_sell REAL NOT NULL DEFAULT 0.0,
                 starting_tick INTEGER NOT NULL,
@@ -186,6 +192,30 @@ def _ensure_company_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN liquidity REAL NOT NULL DEFAULT 100.0;"
         )
+    if "location" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN location TEXT NOT NULL DEFAULT '';"
+        )
+    if "industry" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN industry TEXT NOT NULL DEFAULT '';"
+        )
+    if "founded_year" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN founded_year INTEGER NOT NULL DEFAULT 2000;"
+        )
+    if "description" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN description TEXT NOT NULL DEFAULT '';"
+        )
+    if "evaluation" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN evaluation TEXT NOT NULL DEFAULT '';"
+        )
+    if "impact_power" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN impact_power REAL NOT NULL DEFAULT 1.0;"
+        )
     if "pending_buy" not in columns:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN pending_buy REAL NOT NULL DEFAULT 0.0;"
@@ -219,10 +249,16 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
+            location TEXT NOT NULL DEFAULT '',
+            industry TEXT NOT NULL DEFAULT '',
+            founded_year INTEGER NOT NULL DEFAULT 2000,
+            description TEXT NOT NULL DEFAULT '',
+            evaluation TEXT NOT NULL DEFAULT '',
             base_price REAL NOT NULL,
             slope REAL NOT NULL,
             drift REAL NOT NULL,
             liquidity REAL NOT NULL DEFAULT 100.0,
+            impact_power REAL NOT NULL DEFAULT 1.0,
             pending_buy REAL NOT NULL DEFAULT 0.0,
             pending_sell REAL NOT NULL DEFAULT 0.0,
             starting_tick INTEGER NOT NULL DEFAULT 0,
@@ -236,10 +272,16 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            location,
+            industry,
+            founded_year,
+            description,
+            evaluation,
             base_price,
             slope,
             drift,
             liquidity,
+            impact_power,
             pending_buy,
             pending_sell,
             starting_tick,
@@ -251,10 +293,16 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             0 AS guild_id,
             symbol,
             name,
+            '' AS location,
+            '' AS industry,
+            2000 AS founded_year,
+            '' AS description,
+            '' AS evaluation,
             base_price,
             slope,
             drift,
             100.0 AS liquidity,
+            1.0 AS impact_power,
             0.0 AS pending_buy,
             0.0 AS pending_sell,
             0 AS starting_tick,
@@ -276,10 +324,16 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
+            location TEXT NOT NULL DEFAULT '',
+            industry TEXT NOT NULL DEFAULT '',
+            founded_year INTEGER NOT NULL DEFAULT 2000,
+            description TEXT NOT NULL DEFAULT '',
+            evaluation TEXT NOT NULL DEFAULT '',
             base_price REAL NOT NULL,
             slope REAL NOT NULL,
             drift REAL NOT NULL,
             liquidity REAL NOT NULL DEFAULT 100.0,
+            impact_power REAL NOT NULL DEFAULT 1.0,
             pending_buy REAL NOT NULL DEFAULT 0.0,
             pending_sell REAL NOT NULL DEFAULT 0.0,
             starting_tick INTEGER NOT NULL,
@@ -293,10 +347,16 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            location,
+            industry,
+            founded_year,
+            description,
+            evaluation,
             base_price,
             slope,
             drift,
             liquidity,
+            impact_power,
             pending_buy,
             pending_sell,
             starting_tick,
@@ -308,10 +368,16 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            '' AS location,
+            '' AS industry,
+            2000 AS founded_year,
+            '' AS description,
+            '' AS evaluation,
             base_price,
             slope,
             drift,
             100.0 AS liquidity,
+            1.0 AS impact_power,
             0.0 AS pending_buy,
             0.0 AS pending_sell,
             starting_tick,

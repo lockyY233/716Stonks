@@ -61,10 +61,16 @@ def add_company(
     guild_id: int,
     symbol: str,
     name: str,
+    location: str,
+    industry: str,
+    founded_year: int,
+    description: str,
+    evaluation: str,
     base_price: float,
     slope: float,
     drift: float,
     liquidity: float,
+    impact_power: float,
     starting_tick: int,
     current_price: float,
     last_tick: int,
@@ -86,10 +92,16 @@ def add_company(
                 guild_id,
                 symbol,
                 name,
+                location,
+                industry,
+                founded_year,
+                description,
+                evaluation,
                 base_price,
                 slope,
                 drift,
                 liquidity,
+                impact_power,
                 pending_buy,
                 pending_sell,
                 starting_tick,
@@ -97,16 +109,22 @@ def add_company(
                 last_tick,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
                 symbol,
                 name,
+                location,
+                industry,
+                founded_year,
+                description,
+                evaluation,
                 base_price,
                 slope,
                 drift,
                 liquidity,
+                impact_power,
                 0.0,
                 0.0,
                 starting_tick,
@@ -122,7 +140,7 @@ def get_companies(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, name, base_price, slope, drift, liquidity, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ?
             ORDER BY symbol
@@ -136,7 +154,7 @@ def get_company(guild_id: int, symbol: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT symbol, name, base_price, slope, drift, liquidity, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ? AND symbol = ?
             """,
@@ -240,6 +258,82 @@ def update_user_bank(
             """,
             (new_bank, guild_id, user_id),
         )
+
+
+def update_user_admin_fields(
+    guild_id: int,
+    user_id: int,
+    updates: dict[str, str],
+) -> bool:
+    allowed = {
+        "bank": float,
+        "rank": str,
+    }
+    sets: list[str] = []
+    values: list[object] = []
+    for key, raw in updates.items():
+        caster = allowed.get(key)
+        if caster is None:
+            continue
+        value = caster(raw) if caster is not str else str(raw)
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return False
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE users
+            SET {", ".join(sets)}
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (*values, guild_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
+def update_company_admin_fields(
+    guild_id: int,
+    symbol: str,
+    updates: dict[str, str],
+) -> bool:
+    allowed = {
+        "name": str,
+        "location": str,
+        "industry": str,
+        "founded_year": int,
+        "description": str,
+        "evaluation": str,
+        "base_price": float,
+        "slope": float,
+        "drift": float,
+        "liquidity": float,
+        "impact_power": float,
+        "current_price": float,
+    }
+    sets: list[str] = []
+    values: list[object] = []
+    for key, raw in updates.items():
+        caster = allowed.get(key)
+        if caster is None:
+            continue
+        value = caster(raw) if caster is not str else str(raw)
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return False
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE companies
+            SET {", ".join(sets)}
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (*values, guild_id, symbol),
+        )
+        return cur.rowcount > 0
 
 
 def backfill_company_starting_ticks() -> None:

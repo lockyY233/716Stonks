@@ -1,168 +1,290 @@
-from io import BytesIO
+import discord
+from discord import ButtonStyle, Embed, Interaction, app_commands
+from discord.ui import Button, Modal, TextInput, View, button
 
-import matplotlib
-from discord import ButtonStyle, Embed, File, Interaction, app_commands
-from discord.ui import View, button
+from stockbot.commands.company_graphs import (
+    build_player_impact_curve,
+    build_price_projection_curve,
+)
+from stockbot.db import (
+    get_companies,
+    get_users,
+    update_company_admin_fields,
+    update_user_admin_fields,
+)
 
-from stockbot.db import get_companies, get_users
 
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt
+def _parse_kv_updates(raw: str) -> tuple[dict[str, str], str | None]:
+    updates: dict[str, str] = {}
+    for idx, line in enumerate(raw.splitlines(), start=1):
+        text = line.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            return {}, f"Line {idx} missing '=': {line}"
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            return {}, f"Line {idx} has empty field name."
+        updates[key] = value
+    if not updates:
+        return {}, "No updates were provided."
+    return updates, None
 
 
-_PAGE_SIZE = 10
+class AdminEditModal(Modal):
+    def __init__(self, parent_view: "AdminShowPager") -> None:
+        title = "Edit User Fields" if parent_view.target == "users" else "Edit Company Fields"
+        super().__init__(title=title)
+        self._parent_view = parent_view
+        defaults = parent_view.current_edit_defaults()
+        self.updates = TextInput(
+            label="field=value (one per line)",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            default=defaults,
+            max_length=2000,
+        )
+        self.add_item(self.updates)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        updates, error = _parse_kv_updates(self.updates.value)
+        if error is not None:
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        if self._parent_view.target == "users":
+            row = self._parent_view.current_row()
+            ok = update_user_admin_fields(
+                guild_id=self._parent_view.guild.id,
+                user_id=int(row["user_id"]),
+                updates=updates,
+            )
+        else:
+            row = self._parent_view.current_row()
+            ok = update_company_admin_fields(
+                guild_id=self._parent_view.guild.id,
+                symbol=str(row["symbol"]),
+                updates=updates,
+            )
+
+        if not ok:
+            await interaction.response.send_message(
+                "No valid fields were updated. Check field names and values.",
+                ephemeral=True,
+            )
+            return
+
+        await self._parent_view.reload_rows()
+        if self._parent_view.target == "companies":
+            row = self._parent_view.current_row()
+            symbol = str(row.get("symbol", "")).upper()
+            slope = float(row.get("slope", 0.0))
+            drift = float(row.get("drift", 0.0))
+            liquidity = max(1.0, float(row.get("liquidity", 100.0)))
+            impact_power = max(0.1, float(row.get("impact_power", 1.0)))
+            current_price = float(row.get("current_price", row.get("base_price", 1.0)))
+            impact_curve = build_player_impact_curve(
+                symbol=symbol,
+                slope=slope,
+                drift=drift,
+                liquidity=liquidity,
+                impact_power=impact_power,
+            )
+            projection_curve = build_price_projection_curve(
+                symbol=symbol,
+                start_price=current_price,
+                slope=slope,
+                drift=drift,
+                liquidity=liquidity,
+                impact_power=impact_power,
+            )
+            impact_embed = Embed(
+                title=f"{symbol} updated",
+                description="Player impact curve preview.",
+            )
+            impact_embed.set_image(url=f"attachment://{symbol.lower()}_impact_curve.png")
+            sim_embed = Embed(
+                title=f"{symbol} simulated path",
+                description="No-trade simulation from current price/slope/drift.",
+            )
+            sim_embed.set_image(url=f"attachment://{symbol.lower()}_projection_curve.png")
+            await interaction.response.send_message(
+                content="Record updated.",
+                embeds=[impact_embed, sim_embed],
+                files=[impact_curve, projection_curve],
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message("Record updated.", ephemeral=True)
+        await self._parent_view.refresh_message()
 
 
 class AdminShowPager(View):
-    def __init__(self, owner_id: int, pages: list[Embed]) -> None:
-        super().__init__(timeout=180)
+    def __init__(self, owner_id: int, guild: discord.Guild, target: str) -> None:
+        super().__init__(timeout=300)
         self._owner_id = owner_id
-        self._pages = pages
+        self.guild = guild
+        self.target = target
+        self._rows: list[dict] = []
         self._index = 0
+        self.message: discord.InteractionMessage | None = None
+        self._sync_buttons()
+
+    async def reload_rows(self) -> None:
+        if self.target == "users":
+            self._rows = get_users(self.guild.id)
+        else:
+            self._rows = get_companies(self.guild.id)
+        if self._rows:
+            self._index = max(0, min(self._index, len(self._rows) - 1))
+        else:
+            self._index = 0
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
-        self.prev.disabled = self._index <= 0
-        self.next.disabled = self._index >= len(self._pages) - 1
+        has_rows = bool(self._rows)
+        self.prev.disabled = (not has_rows) or self._index <= 0
+        self.next.disabled = (not has_rows) or self._index >= len(self._rows) - 1
+        self.edit.disabled = not has_rows
 
     async def interaction_check(self, interaction: Interaction) -> bool:
         if interaction.user.id != self._owner_id:
             await interaction.response.send_message(
-                "Only the command user can change pages.",
+                "Only the command user can interact with this panel.",
                 ephemeral=True,
             )
             return False
         return True
 
+    def current_row(self) -> dict:
+        return self._rows[self._index]
+
+    def current_edit_defaults(self) -> str:
+        row = self.current_row()
+        if self.target == "users":
+            return "\n".join(
+                [
+                    f"bank={float(row.get('bank', 0.0)):.2f}",
+                    f"rank={row.get('rank', '')}",
+                ]
+            )
+        return "\n".join(
+            [
+                f"name={row.get('name', '')}",
+                f"location={row.get('location', '')}",
+                f"industry={row.get('industry', '')}",
+                f"founded_year={int(row.get('founded_year', 2000))}",
+                f"description={row.get('description', '')}",
+                f"evaluation={row.get('evaluation', '')}",
+                f"base_price={float(row.get('base_price', 0.0)):.2f}",
+                f"slope={float(row.get('slope', 0.0)):.4f}",
+                f"drift={float(row.get('drift', 0.0)):.4f}",
+                f"liquidity={float(row.get('liquidity', 0.0)):.2f}",
+                f"impact_power={float(row.get('impact_power', 1.0)):.3f}",
+                f"current_price={float(row.get('current_price', 0.0)):.2f}",
+            ]
+        )
+
+    async def _build_user_embed(self, row: dict) -> Embed:
+        user_id = int(row["user_id"])
+        member = self.guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await self.guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+
+        display_name = str(row.get("display_name") or (member.display_name if member else user_id))
+        embed = Embed(
+            title=f"adminshow: user {self._index + 1}/{len(self._rows)}",
+            description=f"**{display_name}**",
+        )
+        if member is not None:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        for key in ("user_id", "display_name", "bank", "rank", "joined_at"):
+            value = row.get(key)
+            if key == "bank" and value is not None:
+                text = f"{float(value):.2f}"
+            else:
+                text = str(value)
+            embed.add_field(name=key, value=text, inline=(key != "joined_at"))
+        embed.set_footer(text=f"Page {self._index + 1}/{len(self._rows)}")
+        return embed
+
+    async def _build_company_embed(self, row: dict) -> Embed:
+        symbol = str(row.get("symbol", ""))
+        name = str(row.get("name", ""))
+        embed = Embed(
+            title=f"adminshow: company {self._index + 1}/{len(self._rows)}",
+            description=f"**{symbol}** — {name}",
+        )
+        fields = [
+            ("symbol", symbol),
+            ("name", name),
+            ("location", str(row.get("location", ""))),
+            ("industry", str(row.get("industry", ""))),
+            ("founded_year", str(int(row.get("founded_year", 2000)))),
+            ("description", str(row.get("description", ""))),
+            ("evaluation", str(row.get("evaluation", ""))),
+            ("base_price", f"{float(row.get('base_price', 0.0)):.2f}"),
+            ("current_price", f"{float(row.get('current_price', 0.0)):.2f}"),
+            ("slope", f"{float(row.get('slope', 0.0)):.4f}"),
+            ("drift", f"{float(row.get('drift', 0.0)):.4f}"),
+            ("liquidity", f"{float(row.get('liquidity', 0.0)):.2f}"),
+            ("impact_power", f"{float(row.get('impact_power', 1.0)):.3f}"),
+            ("pending_buy", f"{float(row.get('pending_buy', 0.0)):.2f}"),
+            ("pending_sell", f"{float(row.get('pending_sell', 0.0)):.2f}"),
+            ("starting_tick", str(int(row.get("starting_tick", 0)))),
+            ("last_tick", str(int(row.get("last_tick", 0)))),
+            ("updated_at", str(row.get("updated_at", ""))),
+        ]
+        for key, value in fields:
+            embed.add_field(
+                name=key,
+                value=value,
+                inline=key not in {"name", "description", "evaluation", "updated_at"},
+            )
+        embed.set_footer(text=f"Page {self._index + 1}/{len(self._rows)}")
+        return embed
+
+    async def build_current_embed(self) -> Embed:
+        if not self._rows:
+            return Embed(title=f"adminshow: {self.target}", description="No rows found.")
+        row = self.current_row()
+        if self.target == "users":
+            return await self._build_user_embed(row)
+        return await self._build_company_embed(row)
+
+    async def refresh_message(self) -> None:
+        if self.message is None:
+            return
+        self._sync_buttons()
+        embed = await self.build_current_embed()
+        await self.message.edit(embed=embed, view=self)
+
     @button(label="Prev", style=ButtonStyle.secondary)
-    async def prev(self, interaction: Interaction, _button) -> None:
+    async def prev(self, interaction: Interaction, _button: Button) -> None:
         self._index = max(0, self._index - 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self._pages[self._index], view=self)
+        embed = await self.build_current_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @button(label="Next", style=ButtonStyle.secondary)
-    async def next(self, interaction: Interaction, _button) -> None:
-        self._index = min(len(self._pages) - 1, self._index + 1)
+    async def next(self, interaction: Interaction, _button: Button) -> None:
+        self._index = min(len(self._rows) - 1, self._index + 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self._pages[self._index], view=self)
+        embed = await self.build_current_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
-
-def _chunks(rows: list[list[str]]) -> list[list[list[str]]]:
-    return [rows[i : i + _PAGE_SIZE] for i in range(0, len(rows), _PAGE_SIZE)]
-
-
-def _render_table_image(
-    title: str,
-    headers: list[str],
-    rows: list[list[str]],
-) -> BytesIO:
-    height = max(2.6, 1.2 + (len(rows) * 0.42))
-    fig, ax = plt.subplots(figsize=(14, height))
-    ax.axis("off")
-    table = ax.table(
-        cellText=rows,
-        colLabels=headers,
-        cellLoc="left",
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.3)
-    ax.set_title(title, fontsize=13, pad=10)
-    buf = BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=170)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-def _build_user_pages(rows: list[dict]) -> tuple[list[Embed], list[File]]:
-    if not rows:
-        return [Embed(title="adminshow: users", description="No users found.")], []
-
-    table_rows: list[list[str]] = []
-    for row in rows:
-        table_rows.append(
-            [
-                str(row["user_id"]),
-                str(row.get("display_name", "")),
-                f"{float(row['bank']):.2f}",
-                str(row["rank"]),
-                str(row["joined_at"]),
-            ]
-        )
-
-    pages: list[Embed] = []
-    files: list[File] = []
-    chunks = _chunks(table_rows)
-    for i, chunk in enumerate(chunks, start=1):
-        filename = f"adminshow_users_{i}.png"
-        image = _render_table_image(
-            title="Users Table",
-            headers=["user_id", "display_name", "bank", "rank", "joined_at"],
-            rows=chunk,
-        )
-        files.append(File(image, filename=filename))
-        embed = Embed(title="adminshow: users")
-        embed.set_image(url=f"attachment://{filename}")
-        embed.set_footer(text=f"Page {i}/{len(chunks)} • Total {len(rows)}")
-        pages.append(embed)
-    return pages, files
-
-
-def _build_company_pages(rows: list[dict]) -> tuple[list[Embed], list[File]]:
-    if not rows:
-        return [Embed(title="adminshow: companies", description="No companies found.")], []
-
-    table_rows: list[list[str]] = []
-    for row in rows:
-        table_rows.append(
-            [
-                str(row["symbol"]),
-                str(row["name"]),
-                f"{float(row['base_price']):.2f}",
-                f"{float(row.get('current_price', row['base_price'])):.2f}",
-                f"{float(row['slope']):.4f}",
-                f"{float(row['drift']):.4f}",
-                f"{float(row.get('liquidity', 100.0)):.2f}",
-                f"{float(row.get('pending_buy', 0.0)):.2f}",
-                f"{float(row.get('pending_sell', 0.0)):.2f}",
-                f"{float(row.get('pending_buy', 0.0) - row.get('pending_sell', 0.0)):.2f}",
-            ]
-        )
-
-    pages: list[Embed] = []
-    files: list[File] = []
-    chunks = _chunks(table_rows)
-    for i, chunk in enumerate(chunks, start=1):
-        filename = f"adminshow_companies_{i}.png"
-        image = _render_table_image(
-            title="Companies Table",
-            headers=[
-                "symbol",
-                "name",
-                "base",
-                "current",
-                "slope",
-                "drift",
-                "liquidity",
-                "buy_tick",
-                "sell_tick",
-                "net_tick",
-            ],
-            rows=chunk,
-        )
-        files.append(File(image, filename=filename))
-        embed = Embed(title="adminshow: companies")
-        embed.set_image(url=f"attachment://{filename}")
-        embed.set_footer(text=f"Page {i}/{len(chunks)} • Total {len(rows)}")
-        pages.append(embed)
-    return pages, files
+    @button(label="Edit", style=ButtonStyle.primary)
+    async def edit(self, interaction: Interaction, _button: Button) -> None:
+        await interaction.response.send_modal(AdminEditModal(self))
 
 
 def setup_adminshow(tree: app_commands.CommandTree) -> None:
-    @tree.command(name="adminshow", description="Admin: show raw data tables.")
+    @tree.command(name="adminshow", description="Admin: inspect/edit database rows.")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(target="Pick what data to show.")
     @app_commands.choices(
@@ -179,21 +301,15 @@ def setup_adminshow(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        if target == "users":
-            pages, files = _build_user_pages(get_users(interaction.guild.id))
-        elif target == "companies":
-            pages, files = _build_company_pages(get_companies(interaction.guild.id))
-        else:
+        if target not in {"users", "companies"}:
             await interaction.response.send_message(
                 f"Unknown target: `{target}`.",
                 ephemeral=True,
             )
             return
 
-        view = AdminShowPager(interaction.user.id, pages)
-        await interaction.response.send_message(
-            embed=pages[0],
-            files=files,
-            view=view,
-            ephemeral=True,
-        )
+        view = AdminShowPager(interaction.user.id, interaction.guild, target)
+        await view.reload_rows()
+        embed = await view.build_current_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.original_response()

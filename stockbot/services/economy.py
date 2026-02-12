@@ -1,8 +1,19 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from random import uniform
 
-from stockbot.config import DISPLAY_TIMEZONE, MARKET_CLOSE_HOUR
+from stockbot.config import (
+    DISPLAY_TIMEZONE,
+    DRIFT_NOISE_FREQUENCY,
+    DRIFT_NOISE_GAIN,
+    DRIFT_NOISE_LOW_FREQ_RATIO,
+    DRIFT_NOISE_LOW_GAIN,
+    MARKET_CLOSE_HOUR,
+)
+from stockbot.core.noise import (
+    normalized_frequency_to_cycles_per_tick,
+    perlin1d,
+    stable_seed,
+)
 from stockbot.db import (
     add_price_history,
     get_companies,
@@ -14,9 +25,13 @@ from stockbot.db import (
 
 
 def process_tick(tick_index: int, guild_ids: list[int]) -> None:
-    """Advance economy by one tick with simple base update and drift noise."""
+    """Advance economy by one tick with base update and 1D Perlin drift noise."""
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
+    fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(DRIFT_NOISE_FREQUENCY)
+    low_cycles_per_tick = fast_cycles_per_tick * max(0.0, DRIFT_NOISE_LOW_FREQ_RATIO)
+    fast_gain = max(0.0, DRIFT_NOISE_GAIN)
+    low_gain = max(0.0, DRIFT_NOISE_LOW_GAIN)
     try:
         display_tz = ZoneInfo(DISPLAY_TIMEZONE)
     except Exception:
@@ -33,17 +48,31 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
             symbol = company["symbol"]
             base_price = float(company["base_price"])
             slope = float(company["slope"])
-            drift_amount = abs(float(company["drift"]))
+            # Drift is stored as percent per tick (e.g. 1.5 means +/-1.5%).
+            drift_pct = abs(float(company["drift"]))
+            drift_ratio = drift_pct / 100.0
             liquidity = max(1.0, float(company.get("liquidity", 100.0)))
+            impact_power = max(0.1, float(company.get("impact_power", 1.0)))
             pending_buy = float(company.get("pending_buy", 0.0))
             pending_sell = float(company.get("pending_sell", 0.0))
             starting_tick = int(company.get("starting_tick", 0))
             last_tick = int(company.get("last_tick", starting_tick))
 
             ticks_since_last = max(1, tick_index - last_tick)
-            base_delta = (slope * ticks_since_last) + ((pending_buy - pending_sell) / liquidity)
+            flow = (pending_buy - pending_sell) / liquidity
+            nonlinear_impact = (abs(flow) ** impact_power) * (1.0 if flow >= 0 else -1.0)
+            base_delta = (slope * ticks_since_last) + nonlinear_impact
             next_base_price = max(0.01, base_price + base_delta)
-            drift_noise = uniform(-drift_amount, drift_amount)
+            seed = stable_seed(f"{guild_id}:{symbol}")
+            seed_low = stable_seed(f"{guild_id}:{symbol}:low")
+            phase_fast = (seed % 10007) / 10007.0
+            phase_low = (seed_low % 10007) / 10007.0
+            x_fast = (tick_index * fast_cycles_per_tick) + phase_fast
+            x_low = (tick_index * low_cycles_per_tick) + phase_low
+            noise_fast = perlin1d(x_fast, seed) * fast_gain
+            noise_low = perlin1d(x_low, seed_low) * low_gain
+            noise_unit = noise_fast + noise_low
+            drift_noise = noise_unit * drift_ratio * next_base_price
             price = round(
                 max(0.01, next_base_price + drift_noise),
                 2,
@@ -54,7 +83,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
                 symbol=symbol,
                 base_price=next_base_price,
                 slope=slope,
-                drift=drift_amount,
+                drift=drift_pct,
                 pending_buy=0.0,
                 pending_sell=0.0,
                 current_price=price,
