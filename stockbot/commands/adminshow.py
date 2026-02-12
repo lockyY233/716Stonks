@@ -6,10 +6,13 @@ from stockbot.commands.company_graphs import (
     build_player_impact_curve,
     build_price_projection_curve,
 )
+from stockbot.core.commodity_rarity import rarity_color
 from stockbot.db import (
+    get_commodities,
     get_companies,
     get_users,
     update_company_admin_fields,
+    update_commodity_admin_fields,
     update_user_admin_fields,
 )
 
@@ -35,7 +38,12 @@ def _parse_kv_updates(raw: str) -> tuple[dict[str, str], str | None]:
 
 class AdminEditModal(Modal):
     def __init__(self, parent_view: "AdminShowPager") -> None:
-        title = "Edit User Fields" if parent_view.target == "users" else "Edit Company Fields"
+        if parent_view.target == "users":
+            title = "Edit User Fields"
+        elif parent_view.target == "companies":
+            title = "Edit Company Fields"
+        else:
+            title = "Edit Commodity Fields"
         super().__init__(title=title)
         self._parent_view = parent_view
         defaults = parent_view.current_edit_defaults()
@@ -61,11 +69,18 @@ class AdminEditModal(Modal):
                 user_id=int(row["user_id"]),
                 updates=updates,
             )
-        else:
+        elif self._parent_view.target == "companies":
             row = self._parent_view.current_row()
             ok = update_company_admin_fields(
                 guild_id=self._parent_view.guild.id,
                 symbol=str(row["symbol"]),
+                updates=updates,
+            )
+        else:
+            row = self._parent_view.current_row()
+            ok = update_commodity_admin_fields(
+                guild_id=self._parent_view.guild.id,
+                name=str(row["name"]),
                 updates=updates,
             )
 
@@ -135,8 +150,10 @@ class AdminShowPager(View):
     async def reload_rows(self) -> None:
         if self.target == "users":
             self._rows = get_users(self.guild.id)
-        else:
+        elif self.target == "companies":
             self._rows = get_companies(self.guild.id)
+        else:
+            self._rows = get_commodities(self.guild.id)
         if self._rows:
             self._index = max(0, min(self._index, len(self._rows) - 1))
         else:
@@ -168,6 +185,16 @@ class AdminShowPager(View):
                 [
                     f"bank={float(row.get('bank', 0.0)):.2f}",
                     f"rank={row.get('rank', '')}",
+                ]
+            )
+        if self.target == "commodities":
+            return "\n".join(
+                [
+                    f"name={row.get('name', '')}",
+                    f"price={float(row.get('price', 0.0)):.2f}",
+                    f"rarity={row.get('rarity', 'common')}",
+                    f"image_url={row.get('image_url', '')}",
+                    f"description={row.get('description', '')}",
                 ]
             )
         return "\n".join(
@@ -203,9 +230,9 @@ class AdminShowPager(View):
         )
         if member is not None:
             embed.set_thumbnail(url=member.display_avatar.url)
-        for key in ("user_id", "display_name", "bank", "rank", "joined_at"):
+        for key in ("user_id", "display_name", "bank", "networth", "rank", "joined_at"):
             value = row.get(key)
-            if key == "bank" and value is not None:
+            if key in {"bank", "networth"} and value is not None:
                 text = f"{float(value):.2f}"
             else:
                 text = str(value)
@@ -249,13 +276,36 @@ class AdminShowPager(View):
         embed.set_footer(text=f"Page {self._index + 1}/{len(self._rows)}")
         return embed
 
+    async def _build_commodity_embed(self, row: dict) -> Embed:
+        name = str(row.get("name", ""))
+        price = float(row.get("price", 0.0))
+        rarity = str(row.get("rarity", "common"))
+        image_url = str(row.get("image_url", "") or "")
+        description = str(row.get("description", "") or "")
+        embed = Embed(
+            title=f"adminshow: commodity {self._index + 1}/{len(self._rows)}",
+            description=f"**{name}**",
+            color=rarity_color(rarity),
+        )
+        embed.add_field(name="name", value=name, inline=True)
+        embed.add_field(name="price", value=f"{price:.2f}", inline=True)
+        embed.add_field(name="rarity", value=rarity, inline=True)
+        embed.add_field(name="image_url", value=image_url or "-", inline=False)
+        embed.add_field(name="description", value=description or "-", inline=False)
+        if image_url:
+            embed.set_image(url=image_url)
+        embed.set_footer(text=f"Page {self._index + 1}/{len(self._rows)}")
+        return embed
+
     async def build_current_embed(self) -> Embed:
         if not self._rows:
             return Embed(title=f"adminshow: {self.target}", description="No rows found.")
         row = self.current_row()
         if self.target == "users":
             return await self._build_user_embed(row)
-        return await self._build_company_embed(row)
+        if self.target == "companies":
+            return await self._build_company_embed(row)
+        return await self._build_commodity_embed(row)
 
     async def refresh_message(self) -> None:
         if self.message is None:
@@ -291,6 +341,7 @@ def setup_adminshow(tree: app_commands.CommandTree) -> None:
         target=[
             app_commands.Choice(name="users", value="users"),
             app_commands.Choice(name="companies", value="companies"),
+            app_commands.Choice(name="commodities", value="commodities"),
         ]
     )
     async def adminshow(interaction: Interaction, target: str) -> None:
@@ -301,7 +352,7 @@ def setup_adminshow(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        if target not in {"users", "companies"}:
+        if target not in {"users", "companies", "commodities"}:
             await interaction.response.send_message(
                 f"Unknown target: `{target}`.",
                 ephemeral=True,

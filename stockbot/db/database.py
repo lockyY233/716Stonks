@@ -21,6 +21,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 joined_at TEXT NOT NULL,
                 bank REAL NOT NULL,
+                networth REAL NOT NULL DEFAULT 0,
                 display_name TEXT NOT NULL DEFAULT '',
                 rank TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
@@ -81,13 +82,39 @@ def init_db() -> None:
                 close_price REAL NOT NULL,
                 PRIMARY KEY (guild_id, symbol, date)
             );
+
+            CREATE TABLE IF NOT EXISTS commodities (
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                price REAL NOT NULL,
+                rarity TEXT NOT NULL DEFAULT 'common',
+                image_url TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_commodities (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                commodity_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, commodity_name),
+                FOREIGN KEY (guild_id, user_id)
+                    REFERENCES users (guild_id, user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (guild_id, commodity_name)
+                    REFERENCES commodities (guild_id, name)
+                    ON DELETE CASCADE
+            );
             """
         )
         _ensure_users_bank_type(conn)
         _ensure_rank_column(conn)
         _ensure_display_name_column(conn)
+        _ensure_networth_column(conn)
         _ensure_company_columns(conn)
         _ensure_price_history_columns(conn)
+        _ensure_commodities_tables(conn)
 
 
 def _ensure_rank_column(conn: sqlite3.Connection) -> None:
@@ -129,6 +156,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id INTEGER NOT NULL,
             joined_at TEXT NOT NULL,
             bank REAL NOT NULL,
+            networth REAL NOT NULL DEFAULT 0,
             display_name TEXT NOT NULL DEFAULT '',
             rank TEXT NOT NULL,
             PRIMARY KEY (guild_id, user_id)
@@ -139,6 +167,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id,
             joined_at,
             bank,
+            networth,
             display_name,
             rank
         )
@@ -147,6 +176,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             user_id,
             joined_at,
             bank,
+            0 AS networth,
             '' AS display_name,
             rank
         FROM users;
@@ -155,6 +185,55 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
         ALTER TABLE users_new RENAME TO users;
         """
     )
+
+
+def _ensure_networth_column(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(users);").fetchall()
+    }
+    if "networth" not in columns:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN networth REAL NOT NULL DEFAULT 0;"
+        )
+
+
+def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS commodities (
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            rarity TEXT NOT NULL DEFAULT 'common',
+            image_url TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (guild_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_commodities (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            commodity_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, commodity_name),
+            FOREIGN KEY (guild_id, user_id)
+                REFERENCES users (guild_id, user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (guild_id, commodity_name)
+                REFERENCES commodities (guild_id, name)
+                ON DELETE CASCADE
+        );
+        """
+    )
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(commodities);").fetchall()
+    }
+    if "rarity" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN rarity TEXT NOT NULL DEFAULT 'common';"
+        )
 
 
 def _ensure_company_columns(conn: sqlite3.Connection) -> None:

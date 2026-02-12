@@ -36,7 +36,7 @@ class HelpView(View):
             interaction,
             title="/buy",
             usage="/buy",
-            detail="Buy shares of a company (opens an interactive flow).",
+            detail="Buy shares of a company or buy commodities (interactive flow).",
         )
 
     @button(label="/sell", style=ButtonStyle.secondary)
@@ -71,8 +71,8 @@ class HelpView(View):
         await self._send_detail(
             interaction,
             title="/list",
-            usage="/list target:companies or /list target:players",
-            detail="List available companies or registered players (paged).",
+            usage="/list target:companies|commodities|players",
+            detail="List available companies, commodities, or players (paged).",
         )
 
     @button(label="/hello", style=ButtonStyle.secondary)

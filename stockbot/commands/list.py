@@ -1,7 +1,7 @@
 from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import View, button
 
-from stockbot.db import get_companies, get_users
+from stockbot.db import get_commodities, get_companies, get_users
 
 
 _PAGE_SIZE = 10
@@ -95,12 +95,45 @@ def _build_player_pages(players: list[dict]) -> list[Embed]:
             bank = float(player["bank"])
             display_name = player.get("display_name", "")
             label = display_name if display_name else f"<@{user_id}>"
-            lines.append(f"**#{i}** {label} — `${bank:.2f}`")
+            networth = float(player.get("networth", 0.0))
+            lines.append(f"**#{i}** {label} — `${bank:.2f}` | Networth `${networth:.2f}`")
 
         page_num = len(pages) + 1
         total_pages = (total + _PAGE_SIZE - 1) // _PAGE_SIZE
         embed = Embed(
             title="Players",
+            description="\n".join(lines),
+        )
+        embed.set_footer(text=f"Page {page_num}/{total_pages} • Total {total}")
+        pages.append(embed)
+
+    return pages
+
+
+def _build_commodities_pages(commodities: list[dict]) -> list[Embed]:
+    if not commodities:
+        return [
+            Embed(
+                title="Commodities",
+                description="No commodities found yet.",
+            )
+        ]
+
+    pages: list[Embed] = []
+    total = len(commodities)
+    for start in range(0, total, _PAGE_SIZE):
+        chunk = commodities[start : start + _PAGE_SIZE]
+        lines = []
+        for commodity in chunk:
+            name = str(commodity.get("name", "Unknown"))
+            price = float(commodity.get("price", 0.0))
+            rarity = str(commodity.get("rarity", "common")).title()
+            lines.append(f"**{name}** — ${price:.2f} ({rarity})")
+
+        page_num = len(pages) + 1
+        total_pages = (total + _PAGE_SIZE - 1) // _PAGE_SIZE
+        embed = Embed(
+            title="Commodities",
             description="\n".join(lines),
         )
         embed.set_footer(text=f"Page {page_num}/{total_pages} • Total {total}")
@@ -115,6 +148,7 @@ def setup_list(tree: app_commands.CommandTree) -> None:
     @app_commands.choices(
         target=[
             app_commands.Choice(name="companies", value="companies"),
+            app_commands.Choice(name="commodities", value="commodities"),
             app_commands.Choice(name="players", value="players"),
         ]
     )
@@ -137,6 +171,12 @@ def setup_list(tree: app_commands.CommandTree) -> None:
         if target == "players":
             rows = get_users(interaction.guild.id)
             pages = _build_player_pages(rows)
+            view = CompaniesPager(interaction.user.id, pages)
+            await interaction.response.send_message(embed=pages[0], view=view)
+            return
+        if target == "commodities":
+            rows = get_commodities(interaction.guild.id)
+            pages = _build_commodities_pages(rows)
             view = CompaniesPager(interaction.user.id, pages)
             await interaction.response.send_message(embed=pages[0], view=view)
             return

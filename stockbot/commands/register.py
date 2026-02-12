@@ -6,8 +6,7 @@ from discord import Embed, File, Interaction, app_commands
 from discord.utils import get as get_role
 from discord.ui import View, button
 
-from stockbot.config import START_BALANCE, STONKERS_ROLE_NAME
-from stockbot.core.ranks import Rank
+from stockbot.config import DEFAULT_RANK, START_BALANCE, STONKERS_ROLE_NAME
 from stockbot.db import register_user
 
 REGISTER_REQUIRED_MESSAGE = "You are not registered yet. Use /register first."
@@ -29,7 +28,7 @@ async def _build_register_response(interaction: Interaction) -> tuple[Embed, Fil
         joined_at=joined_at,
         bank=START_BALANCE,
         display_name=interaction.user.display_name,
-        rank=Rank.PRIVATE.value,
+        rank=DEFAULT_RANK,
     )
 
     role_note = None
@@ -54,7 +53,7 @@ async def _build_register_response(interaction: Interaction) -> tuple[Embed, Fil
         )
         embed.add_field(
             name="︽ **Rank**",
-            value=Rank.PRIVATE.value.title(),
+            value=DEFAULT_RANK,
             inline=True,
         )
         embed.add_field(

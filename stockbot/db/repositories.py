@@ -22,10 +22,10 @@ def register_user(
 
         conn.execute(
             """
-            INSERT INTO users (guild_id, user_id, joined_at, bank, display_name, rank)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (guild_id, user_id, joined_at, bank, networth, display_name, rank)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, joined_at, bank, display_name, rank),
+            (guild_id, user_id, joined_at, bank, 0.0, display_name, rank),
         )
         return True
 
@@ -34,7 +34,7 @@ def get_user(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, display_name, rank
+            SELECT guild_id, user_id, joined_at, bank, networth, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
@@ -47,12 +47,182 @@ def get_users(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT user_id, bank, display_name, rank, joined_at
+            SELECT user_id, bank, networth, display_name, rank, joined_at
             FROM users
             WHERE guild_id = ?
-            ORDER BY bank DESC, user_id ASC
+            ORDER BY networth DESC, bank DESC, user_id ASC
             """,
             (guild_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def add_commodity(
+    guild_id: int,
+    name: str,
+    price: float,
+    rarity: str,
+    image_url: str,
+    description: str,
+) -> bool:
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM commodities WHERE guild_id = ? AND name = ? COLLATE NOCASE",
+            (guild_id, name),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            """
+            INSERT INTO commodities (guild_id, name, price, rarity, image_url, description)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, name, max(0.01, float(price)), rarity, image_url, description),
+        )
+        return True
+
+
+def get_commodities(guild_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT name, price, rarity, image_url, description
+            FROM commodities
+            WHERE guild_id = ?
+            ORDER BY name
+            """,
+            (guild_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_commodity(guild_id: int, name: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT name, price, rarity, image_url, description
+            FROM commodities
+            WHERE guild_id = ? AND name = ? COLLATE NOCASE
+            """,
+            (guild_id, name),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+
+def get_user_commodities(guild_id: int, user_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT uc.commodity_name AS name, uc.quantity, c.price, c.rarity, c.image_url, c.description
+            FROM user_commodities uc
+            JOIN commodities c
+              ON c.guild_id = uc.guild_id
+             AND c.name = uc.commodity_name
+            WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
+            ORDER BY uc.commodity_name
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def upsert_user_commodity(
+    guild_id: int,
+    user_id: int,
+    commodity_name: str,
+    quantity_delta: int,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_commodities (guild_id, user_id, commodity_name, quantity)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, commodity_name)
+            DO UPDATE SET quantity = quantity + excluded.quantity
+            """,
+            (guild_id, user_id, commodity_name, quantity_delta),
+        )
+        conn.execute(
+            """
+            DELETE FROM user_commodities
+            WHERE guild_id = ? AND user_id = ? AND commodity_name = ? AND quantity <= 0
+            """,
+            (guild_id, user_id, commodity_name),
+        )
+
+
+def update_user_networth(
+    guild_id: int,
+    user_id: int,
+    new_networth: float,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET networth = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (max(0.0, float(new_networth)), guild_id, user_id),
+        )
+
+
+def recalc_user_networth(guild_id: int, user_id: int) -> float:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(uc.quantity * c.price), 0.0) AS total
+            FROM user_commodities uc
+            JOIN commodities c
+              ON c.guild_id = uc.guild_id
+             AND c.name = uc.commodity_name
+            WHERE uc.guild_id = ? AND uc.user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        total = float(row["total"]) if row is not None else 0.0
+        conn.execute(
+            """
+            UPDATE users
+            SET networth = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (total, guild_id, user_id),
+        )
+        return total
+
+
+def recalc_all_networth(guild_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET networth = COALESCE((
+                SELECT SUM(uc.quantity * c.price)
+                FROM user_commodities uc
+                JOIN commodities c
+                  ON c.guild_id = uc.guild_id
+                 AND c.name = uc.commodity_name
+                WHERE uc.guild_id = users.guild_id
+                  AND uc.user_id = users.user_id
+            ), 0.0)
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+
+
+def get_top_users_by_networth(guild_id: int, limit: int = 3) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, display_name, bank, networth
+            FROM users
+            WHERE guild_id = ?
+            ORDER BY networth DESC, bank DESC, user_id ASC
+            LIMIT ?
+            """,
+            (guild_id, max(1, int(limit))),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -336,6 +506,44 @@ def update_company_admin_fields(
         return cur.rowcount > 0
 
 
+def update_commodity_admin_fields(
+    guild_id: int,
+    name: str,
+    updates: dict[str, str],
+) -> bool:
+    allowed = {
+        "name": str,
+        "price": float,
+        "rarity": str,
+        "image_url": str,
+        "description": str,
+    }
+    sets: list[str] = []
+    values: list[object] = []
+    for key, raw in updates.items():
+        caster = allowed.get(key)
+        if caster is None:
+            continue
+        value = caster(raw) if caster is not str else str(raw)
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return False
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE commodities
+            SET {", ".join(sets)}
+            WHERE guild_id = ? AND name = ? COLLATE NOCASE
+            """,
+            (*values, guild_id, name),
+        )
+        if cur.rowcount <= 0:
+            return False
+        return True
+
+
 def backfill_company_starting_ticks() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -433,11 +641,23 @@ def set_state_value(key: str, value: str) -> None:
         )
 
 
+def clear_state_prefix(prefix: str) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM app_state
+            WHERE key LIKE ?
+            """,
+            (f"{prefix}%",),
+        )
+        return int(cur.rowcount)
+
+
 def get_user_status(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         user = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, display_name, rank
+            SELECT guild_id, user_id, joined_at, bank, networth, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
@@ -566,6 +786,13 @@ def wipe_users(guild_id: int) -> None:
             """,
             (guild_id,),
         )
+        conn.execute(
+            """
+            DELETE FROM user_commodities
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
 
 
 def wipe_companies(guild_id: int) -> None:
@@ -594,6 +821,20 @@ def wipe_companies(guild_id: int) -> None:
         conn.execute(
             """
             DELETE FROM holdings
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM commodities
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM user_commodities
             WHERE guild_id = ?
             """,
             (guild_id,),

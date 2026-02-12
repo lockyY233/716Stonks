@@ -15,6 +15,8 @@ from stockbot.config.settings import (
     TRADING_LIMITS,
     TRADING_LIMITS_PERIOD,
     TRADING_FEES,
+    RANK_INCOME,
+    DEFAULT_RANK,
 )
 
 __all__ = [
@@ -34,4 +36,6 @@ __all__ = [
     "TRADING_LIMITS",
     "TRADING_LIMITS_PERIOD",
     "TRADING_FEES",
+    "RANK_INCOME",
+    "DEFAULT_RANK",
 ]

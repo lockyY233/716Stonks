@@ -2,8 +2,8 @@ from discord import ButtonStyle, Interaction
 from discord.ui import Modal, TextInput, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
-from stockbot.db import get_company
-from stockbot.services.trading import perform_buy, perform_sell
+from stockbot.db import get_commodity, get_company
+from stockbot.services.trading import perform_buy, perform_buy_commodity, perform_sell
 
 
 class BuySharesModal(Modal):
@@ -117,6 +117,76 @@ class ChooseBuySymbolModal(Modal):
         )
 
 
+class BuyCommodityQuantityModal(Modal):
+    def __init__(self, commodity_name: str) -> None:
+        super().__init__(title=f"Buy Commodity - {commodity_name}")
+        self.commodity_name = commodity_name
+        self.quantity = TextInput(label="Quantity", placeholder="Enter amount", required=True)
+        self.add_item(self.quantity)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        try:
+            quantity = int(self.quantity.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "Quantity must be a whole number.",
+                ephemeral=True,
+            )
+            return
+        _ok, message = await perform_buy_commodity(interaction, self.commodity_name, quantity)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+class ChooseBuyCommodityModal(Modal):
+    def __init__(self) -> None:
+        super().__init__(title="Buy - Choose Commodity")
+        self.name = TextInput(label="Commodity name", placeholder="e.g. Gold", required=True)
+        self.add_item(self.name)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Please use this command in a server.",
+                ephemeral=True,
+            )
+            return
+        commodity_name = self.name.value.strip()
+        commodity = get_commodity(interaction.guild.id, commodity_name)
+        if commodity is None:
+            await interaction.response.send_message(
+                f"Commodity `{commodity_name}` not found.",
+                ephemeral=True,
+            )
+            return
+        price = float(commodity["price"])
+        await interaction.response.send_message(
+            f"Buy commodity {commodity['name']} @ 💰**${price:.2f}** each. Enter quantity:",
+            view=BuyCommodityConfirmView(str(commodity["name"])),
+            ephemeral=True,
+        )
+
+
+class BuyCommodityConfirmView(View):
+    def __init__(self, commodity_name: str) -> None:
+        super().__init__()
+        self.commodity_name = commodity_name
+
+    @button(label="Buy 1", style=ButtonStyle.green)
+    async def buy_one(self, interaction: Interaction, _button) -> None:
+        _ok, message = await perform_buy_commodity(interaction, self.commodity_name, 1)
+        if message == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(message, view=RegisterNowView(), ephemeral=True)
+            return
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @button(label="Buy Quantity", style=ButtonStyle.blurple)
+    async def buy_many(self, interaction: Interaction, _button) -> None:
+        await interaction.response.send_modal(BuyCommodityQuantityModal(self.commodity_name))
+
+
 class ChooseSellSymbolModal(Modal):
     def __init__(self) -> None:
         super().__init__(title="Sell - Choose Stock")
@@ -150,6 +220,10 @@ class BuyStockStart(View):
     @button(label="Stocks", style=ButtonStyle.green)
     async def choose_stock(self, interaction: Interaction, _button) -> None:
         await interaction.response.send_modal(ChooseBuySymbolModal())
+
+    @button(label="Commodities", style=ButtonStyle.blurple)
+    async def choose_commodity(self, interaction: Interaction, _button) -> None:
+        await interaction.response.send_modal(ChooseBuyCommodityModal())
 
 # Selling stocks Button under buy
 class SellStockStart(View):

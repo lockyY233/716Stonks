@@ -5,6 +5,7 @@ from discord import Interaction
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE
 from stockbot.config import TRADING_FEES, TRADING_LIMITS, TRADING_LIMITS_PERIOD
 from stockbot.db import (
+    get_commodity,
     get_company,
     get_state_value,
     get_user,
@@ -12,7 +13,9 @@ from stockbot.db import (
     set_holding,
     set_state_value,
     update_company_trade_volume,
+    update_user_networth,
     update_user_bank,
+    upsert_user_commodity,
     upsert_holding,
 )
 
@@ -191,3 +194,44 @@ async def perform_sell(
             f"(gross ${gross_gain:.2f}, fee ${fee:.2f} on profit).",
         )
     return True, f"Sold {shares} shares of {symbol_upper} for ${net_gain:.2f}."
+
+
+async def perform_buy_commodity(
+    interaction: Interaction,
+    commodity_name: str,
+    quantity: int,
+) -> tuple[bool, str]:
+    if interaction.guild is None:
+        return False, "Please use this command in a server."
+
+    if quantity <= 0:
+        return False, "Quantity must be a positive integer."
+
+    user = get_user(interaction.guild.id, interaction.user.id)
+    if user is None:
+        return False, REGISTER_REQUIRED_MESSAGE
+
+    commodity = get_commodity(interaction.guild.id, commodity_name)
+    if commodity is None:
+        return False, f"Commodity `{commodity_name}` not found."
+
+    price = float(commodity["price"])
+    total_cost = round(price * quantity, 2)
+    if float(user["bank"]) < total_cost:
+        return False, f"Not enough funds. Need ${total_cost:.2f}, you have ${float(user['bank']):.2f}."
+
+    new_bank = float(user["bank"]) - total_cost
+    update_user_bank(interaction.guild.id, interaction.user.id, new_bank)
+    upsert_user_commodity(
+        interaction.guild.id,
+        interaction.user.id,
+        str(commodity["name"]),
+        quantity,
+    )
+    new_networth = float(user.get("networth", 0.0)) + total_cost
+    update_user_networth(interaction.guild.id, interaction.user.id, new_networth)
+    return (
+        True,
+        f"Bought {quantity}x {commodity['name']} for ${total_cost:.2f}. "
+        f"Commodity networth now ${new_networth:.2f}.",
+    )
