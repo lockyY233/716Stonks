@@ -52,3 +52,21 @@ SETUP_SYSTEMD=1 ./scripts/deploy.sh
 ### VS Code task
 
 Run the “Deploy to VPS” task. It uses `.env.deploy` for the VPS settings.
+
+## Dashboard (Live Stocks)
+
+Run a lightweight live dashboard web app:
+
+```bash
+python scripts/dashboard_web.py
+```
+
+Defaults:
+- Host: `127.0.0.1`
+- Port: `8082`
+- DB path: `data/stockbot.db`
+
+Optional env overrides:
+- `DASHBOARD_HOST`
+- `DASHBOARD_PORT`
+- `DASHBOARD_DB_PATH`

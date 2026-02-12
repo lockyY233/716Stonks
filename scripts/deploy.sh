@@ -15,6 +15,7 @@ VPS_HOST="${VPS_HOST:-your.vps.ip}"
 VPS_PORT="${VPS_PORT:-22}"
 VPS_DIR="${VPS_DIR:-/home/${VPS_USER}/apps/716Stonks}"
 APP_NAME="${APP_NAME:-716Stonks}"
+DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-716Stonks-dashboard.service}"
 PYTHON="${PYTHON:-python3}"
 
 RSYNC_EXCLUDES=(
@@ -126,4 +127,13 @@ UNIT
 
   \$SUDO systemctl restart "${APP_NAME}.service"
   \$SUDO systemctl --no-pager --full status "${APP_NAME}.service"
+
+  if [ -n "${DASHBOARD_SERVICE}" ]; then
+    if \$SUDO systemctl cat "${DASHBOARD_SERVICE}" >/dev/null 2>&1; then
+      \$SUDO systemctl restart "${DASHBOARD_SERVICE}"
+      \$SUDO systemctl --no-pager --full status "${DASHBOARD_SERVICE}"
+    else
+      echo "Skipping dashboard restart: ${DASHBOARD_SERVICE} not found."
+    fi
+  fi
 SSH
