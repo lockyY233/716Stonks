@@ -21,6 +21,8 @@ DRIFT_NOISE_LOW_GAIN = 3                    # Low band gain as additional multip
 TRADING_LIMITS = 40                        # Max shares a player can trade (buy+sell combined) per limit period; <=0 disables
 TRADING_LIMITS_PERIOD = 60                  # Reset window in ticks for trading limits; must be >0 when limits enabled
 TRADING_FEES = 1                         # Fee as % of realized profit on sell transactions (profit only)
+COMMODITIES_LIMIT = 5                      # Max total commodity units a player can hold across all commodities; <=0 disables
+PAWN_SELL_RATE = 75                        # Pawn payout rate (% of commodity price when selling to bank)
 
 # Rank income paid at market close (once per local date per guild).
 RANK_INCOME = {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -11,6 +12,13 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, g, jsonify, render_template_string, request
 
+# Ensure project root is importable when running as a standalone script via systemd.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME
+from stockbot.services.perks import evaluate_user_perks
 
 @dataclass(frozen=True)
 class _CfgSpec:
@@ -34,6 +42,8 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "TRADING_LIMITS": _CfgSpec(40, int, "Max shares traded per period; <=0 disables limits."),
     "TRADING_LIMITS_PERIOD": _CfgSpec(60, int, "Tick window length for trading-limit reset."),
     "TRADING_FEES": _CfgSpec(1.0, float, "Sell fee percentage applied to realized profit."),
+    "COMMODITIES_LIMIT": _CfgSpec(5, int, "Max total commodity units a player can hold; <=0 disables."),
+    "PAWN_SELL_RATE": _CfgSpec(75.0, float, "Pawn payout percentage when selling commodities to bank."),
 }
 
 AUTH_REQUIRED_HTML = """<!doctype html>
@@ -142,6 +152,7 @@ MAIN_HTML = """<!doctype html>
           <button id="showCompanies" class="active">Show Companies</button>
           <button id="showCommodities">Show Commodities</button>
           <button id="showPlayers">Show Players</button>
+          <button id="showPerks">Show Perks</button>
           <button id="showFeedback">Feedback</button>
           <button id="showBankActions">Bank Actions</button>
           <button id="showActionHistory">Action History</button>
@@ -236,6 +247,7 @@ MAIN_HTML = """<!doctype html>
       if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
       if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
       if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
+      if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
       if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
       if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
       if (currentTab === "actionHistory") document.getElementById("showActionHistory").classList.add("active");
@@ -259,29 +271,72 @@ MAIN_HTML = """<!doctype html>
         <th>Symbol</th><th>Name</th><th>Trend</th><th>Current</th><th>Base</th><th>Change vs Base</th><th>Slope</th><th>Action</th>
       </tr>`;
       const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addCompanyBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Company</button>
+        </td>
+      </tr>`;
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty">No companies found.</td></tr>';
-        return;
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No companies found.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map(r => {
+          const current = Number(r.current_price), base = Number(r.base_price);
+          const pct = base !== 0 ? ((current - base) / base) * 100 : 0;
+          const cls = pct >= 0 ? "up" : "down";
+          const sign = pct >= 0 ? "+" : "";
+          const spark = sparklineSvg(Array.isArray(r.history_prices) ? r.history_prices : [], 170, 36, pct >= 0 ? "#22c55e" : "#ef4444");
+          return `<tr data-symbol="${esc(r.symbol)}">
+            <td class="mono" data-company-open="${esc(r.symbol)}" style="cursor:pointer;"><strong>${esc(r.symbol)}</strong></td>
+            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${esc(r.name || "")}</td>
+            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${spark}</td>
+            <td class="mono">${fmtMoney(current)}</td>
+            <td><input class="mono" data-company-base="${esc(r.symbol)}" type="number" step="0.01" value="${Number(base).toFixed(2)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
+            <td class="mono ${cls}">${sign}${pct.toFixed(2)}%</td>
+            <td><input class="mono" data-company-slope="${esc(r.symbol)}" type="number" step="0.0001" value="${fmtNum(r.slope)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
+            <td>
+              <button data-company-save="${esc(r.symbol)}" style="padding:6px 10px;">Save</button>
+            </td>
+          </tr>`;
+        }).join("");
       }
-      tbody.innerHTML = rows.map(r => {
-        const current = Number(r.current_price), base = Number(r.base_price);
-        const pct = base !== 0 ? ((current - base) / base) * 100 : 0;
-        const cls = pct >= 0 ? "up" : "down";
-        const sign = pct >= 0 ? "+" : "";
-        const spark = sparklineSvg(Array.isArray(r.history_prices) ? r.history_prices : [], 170, 36, pct >= 0 ? "#22c55e" : "#ef4444");
-        return `<tr data-symbol="${esc(r.symbol)}">
-          <td class="mono" data-company-open="${esc(r.symbol)}" style="cursor:pointer;"><strong>${esc(r.symbol)}</strong></td>
-          <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${esc(r.name || "")}</td>
-          <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${spark}</td>
-          <td class="mono">${fmtMoney(current)}</td>
-          <td><input class="mono" data-company-base="${esc(r.symbol)}" type="number" step="0.01" value="${Number(base).toFixed(2)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
-          <td class="mono ${cls}">${sign}${pct.toFixed(2)}%</td>
-          <td><input class="mono" data-company-slope="${esc(r.symbol)}" type="number" step="0.0001" value="${fmtNum(r.slope)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
-          <td>
-            <button data-company-save="${esc(r.symbol)}" style="padding:6px 10px;">Save</button>
-          </td>
-        </tr>`;
-      }).join("");
+      const addBtn = document.getElementById("addCompanyBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const symbol = (window.prompt("Symbol (e.g. ATEST):", "") || "").trim().toUpperCase();
+          if (!symbol) return;
+          const name = (window.prompt("Company name:", symbol) || "").trim();
+          if (!name) return;
+          const baseRaw = window.prompt("Base price:", "1.00");
+          if (baseRaw === null) return;
+          const slopeRaw = window.prompt("Slope:", "0.0000");
+          if (slopeRaw === null) return;
+          const base = Number(baseRaw);
+          const slope = Number(slopeRaw);
+          if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(slope)) {
+            alert("Invalid base/slope.");
+            return;
+          }
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/company"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol, name, base_price: base, slope }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              await loadCompanies();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
       document.querySelectorAll("[data-company-open]").forEach((el) => {
         el.addEventListener("click", () => {
           const sym = el.getAttribute("data-company-open");
@@ -327,21 +382,64 @@ MAIN_HTML = """<!doctype html>
     function renderCommodities(rows) {
       document.getElementById("tableTitle").textContent = "Commodities";
       document.getElementById("thead").innerHTML = `<tr>
-        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Description</th>
+        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Tags</th><th>Description</th>
       </tr>`;
       const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="6" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addCommodityBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Commodity</button>
+        </td>
+      </tr>`;
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No commodities found.</td></tr>';
-        return;
+        tbody.innerHTML = controlRow + '<tr><td colspan="6" class="empty">No commodities found.</td></tr>';
+      } else {
+        const fallback = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='9' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-commodity="${esc(r.name)}">
+          <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
+          <td><strong>${esc(r.name)}</strong></td>
+          <td class="mono">${fmtMoney(r.price)}</td>
+          <td>${esc((r.rarity || "common").toUpperCase())}</td>
+          <td>${esc(String((r.tags || []).join(", ")))}</td>
+          <td>${esc(r.description || "")}</td>
+        </tr>`).join("");
       }
-      const fallback = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='9' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
-      tbody.innerHTML = rows.map((r) => `<tr class="clickable" data-commodity="${esc(r.name)}">
-        <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
-        <td><strong>${esc(r.name)}</strong></td>
-        <td class="mono">${fmtMoney(r.price)}</td>
-        <td>${esc((r.rarity || "common").toUpperCase())}</td>
-        <td>${esc(r.description || "")}</td>
-      </tr>`).join("");
+      const addBtn = document.getElementById("addCommodityBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const name = (window.prompt("Commodity name:", "") || "").trim();
+          if (!name) return;
+          const priceRaw = window.prompt("Price:", "1.00");
+          if (priceRaw === null) return;
+          const rarity = (window.prompt("Rarity (common/uncommon/rare/legendary/exotic):", "common") || "common").trim().toLowerCase();
+          const image_url = (window.prompt("Image URL (optional):", "") || "").trim();
+          const tags = (window.prompt("Tags (comma-separated, optional):", "") || "").trim();
+          const description = (window.prompt("Description (optional):", "") || "").trim();
+          const price = Number(priceRaw);
+          if (!Number.isFinite(price) || price <= 0) {
+            alert("Invalid price.");
+            return;
+          }
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/commodity"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, price, rarity, image_url, tags, description }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              await loadCommodities();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
       document.querySelectorAll("tr[data-commodity]").forEach((tr) => {
         tr.addEventListener("click", () => {
           const name = tr.getAttribute("data-commodity");
@@ -378,17 +476,164 @@ MAIN_HTML = """<!doctype html>
         });
       });
     }
+    async function renderPerks(rows) {
+      document.getElementById("tableTitle").textContent = "Perks";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Name</th><th>Enabled</th><th>Priority</th><th>Stack Mode</th><th>Max Stacks</th><th>Requirements</th><th>Effects</th><th>Description</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addPerkBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Perk</button>
+          <span style="margin-left:10px;" class="muted">Preview user:</span>
+          <select id="perkPreviewUser" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;min-width:220px;"></select>
+          <button id="perkPreviewRefresh" style="padding:6px 10px;">Refresh Preview</button>
+          <div id="perkPreviewBox" class="muted" style="margin-top:8px;"></div>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No perks found.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-perk-id="${esc(String(r.id || ""))}">
+          <td><strong>${esc(r.name || "")}</strong></td>
+          <td>${Number(r.enabled || 0) ? "Yes" : "No"}</td>
+          <td class="mono">${esc(String(r.priority ?? 100))}</td>
+          <td>${esc(String(r.stack_mode || "add"))}</td>
+          <td class="mono">${esc(String(r.max_stacks ?? 1))}</td>
+          <td class="mono">${esc(String(r.requirements_count ?? 0))}</td>
+          <td class="mono">${esc(String(r.effects_count ?? 0))}</td>
+          <td>${esc(String(r.description || ""))}</td>
+        </tr>`).join("");
+      }
+      await loadPerkPreviewUsers();
+      bindPerkPreviewRefresh();
+      const addBtn = document.getElementById("addPerkBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const name = (window.prompt("Perk name:", "") || "").trim();
+          if (!name) return;
+          const description = (window.prompt("Description (optional):", "") || "").trim();
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/perk"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, description }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              const data = await res.json();
+              const id = Number(data.id || 0);
+              if (id > 0) {
+                gotoWithAuth(`/perk/${id}`);
+                return;
+              }
+              await loadPerks();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("tr[data-perk-id]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const id = tr.getAttribute("data-perk-id");
+          if (!id) return;
+          gotoWithAuth(`/perk/${encodeURIComponent(id)}`);
+        });
+      });
+    }
+    async function loadPerkPreviewUsers() {
+      const select = document.getElementById("perkPreviewUser");
+      if (!select) return;
+      try {
+        const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
+        if (!res.ok) {
+          select.innerHTML = '<option value="">(No users)</option>';
+          return;
+        }
+        const data = await res.json();
+        const players = Array.isArray(data.players) ? data.players : [];
+        if (!players.length) {
+          select.innerHTML = '<option value="">(No users)</option>';
+          const box = document.getElementById("perkPreviewBox");
+          if (box) box.textContent = "No players available for preview.";
+          return;
+        }
+        const old = String(select.value || "");
+        select.innerHTML = players.map((p) => {
+          const uid = String(p.user_id || "");
+          const name = String(p.display_name || `User ${uid}`);
+          return `<option value="${esc(uid)}">${esc(name)} (${esc(uid)})</option>`;
+        }).join("");
+        if (old && [...select.options].some((o) => o.value === old)) {
+          select.value = old;
+        }
+        await loadPerkPreview();
+      } catch (_e) {
+        select.innerHTML = '<option value="">(Failed to load)</option>';
+      }
+    }
+    function bindPerkPreviewRefresh() {
+      const btn = document.getElementById("perkPreviewRefresh");
+      const select = document.getElementById("perkPreviewUser");
+      if (!btn || !select) return;
+      btn.onclick = async () => { await loadPerkPreview(); };
+      select.onchange = async () => { await loadPerkPreview(); };
+    }
+    async function loadPerkPreview() {
+      const select = document.getElementById("perkPreviewUser");
+      const box = document.getElementById("perkPreviewBox");
+      if (!select || !box) return;
+      const userId = String(select.value || "");
+      if (!userId) {
+        box.textContent = "Select a player to preview.";
+        return;
+      }
+      box.textContent = "Loading preview...";
+      try {
+        const res = await fetch(withAuthToken(`/api/perk-preview?user_id=${encodeURIComponent(userId)}`), { cache: "no-store" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          box.textContent = String(data.error || "Failed to load preview.");
+          return;
+        }
+        const matched = Array.isArray(data.matched_perks) ? data.matched_perks : [];
+        const header = `Rank: ${data.rank} · Income $${Number(data.base_income || 0).toFixed(2)} -> $${Number(data.final_income || 0).toFixed(2)} · Limits ${Number(data.base_trade_limits || 0).toFixed(0)} -> ${Number(data.final_trade_limits || 0).toFixed(0)} · Networth $${Number(data.base_networth || 0).toFixed(2)} -> $${Number(data.final_networth || 0).toFixed(2)}`;
+        if (!matched.length) {
+          box.textContent = `${header} · No triggered perks.`;
+          return;
+        }
+        const lines = matched.map((m) => {
+          const disp = String(m.display || "").trim();
+          if (disp) return `${m.name}(x${m.stacks}) (${disp})`;
+          return `${m.name}(x${m.stacks}) (income ${Number(m.add || 0).toFixed(2)}, x${Number(m.mul || 1).toFixed(2)})`;
+        });
+        box.textContent = `${header} · Triggered: ${lines.join(" | ")}`;
+      } catch (_e) {
+        box.textContent = "Failed to load preview.";
+      }
+    }
     function renderActionHistory(rows) {
       document.getElementById("tableTitle").textContent = "Action History";
       document.getElementById("thead").innerHTML = `<tr>
         <th>When (UTC)</th><th>User</th><th>Action</th><th>Target</th><th>Qty</th><th>Unit</th><th>Total</th><th>Details</th>
       </tr>`;
       const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="purgeActionHistoryBtn" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Purge All History</button>
+        </td>
+      </tr>`;
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty">No player actions recorded yet.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr>
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No player actions recorded yet.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr>
         <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
         <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
         <td>${esc(String(r.action_type || "").toUpperCase())}</td>
@@ -398,6 +643,33 @@ MAIN_HTML = """<!doctype html>
         <td class="mono">${fmtMoney(r.total_amount || 0)}</td>
         <td>${esc(r.details || "")}</td>
       </tr>`).join("");
+      }
+      const purgeBtn = document.getElementById("purgeActionHistoryBtn");
+      if (purgeBtn) {
+        purgeBtn.addEventListener("click", async () => {
+          const ok = window.confirm("Purge all action history? This cannot be undone.");
+          if (!ok) return;
+          purgeBtn.disabled = true;
+          const old = purgeBtn.textContent;
+          purgeBtn.textContent = "Purging...";
+          try {
+            const res = await fetch(withAuthToken("/api/action-history"), { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              purgeBtn.textContent = err.error || "Failed";
+              purgeBtn.disabled = false;
+              return;
+            }
+            await loadActionHistory();
+          } catch (_e) {
+            purgeBtn.textContent = "Failed";
+            purgeBtn.disabled = false;
+            return;
+          }
+          purgeBtn.textContent = old;
+          purgeBtn.disabled = false;
+        });
+      }
     }
     function renderFeedback(rows) {
       document.getElementById("tableTitle").textContent = "Feedback";
@@ -658,6 +930,12 @@ MAIN_HTML = """<!doctype html>
       renderPlayers(data.players || []);
       document.getElementById("last").textContent = fmtEtDate();
     }
+    async function loadPerks() {
+      const res = await fetch(withAuthToken("/api/perks"), { cache: "no-store" });
+      const data = await res.json();
+      await renderPerks(data.perks || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
     async function loadActionHistory() {
       const res = await fetch(withAuthToken("/api/action-history"), { cache: "no-store" });
       const data = await res.json();
@@ -726,6 +1004,7 @@ MAIN_HTML = """<!doctype html>
         if (currentTab === "companies") await loadCompanies();
         else if (currentTab === "commodities") await loadCommodities();
         else if (currentTab === "players") await loadPlayers();
+        else if (currentTab === "perks") await loadPerks();
         else if (currentTab === "feedback") await loadFeedback();
         else if (currentTab === "bankActions") await loadBankActions();
         else if (currentTab === "actionHistory") await loadActionHistory();
@@ -750,6 +1029,7 @@ MAIN_HTML = """<!doctype html>
     document.getElementById("showCompanies").addEventListener("click", () => { currentTab = "companies"; setButtons(); tick(); });
     document.getElementById("showCommodities").addEventListener("click", () => { currentTab = "commodities"; setButtons(); tick(); });
     document.getElementById("showPlayers").addEventListener("click", () => { currentTab = "players"; setButtons(); tick(); });
+    document.getElementById("showPerks").addEventListener("click", () => { currentTab = "perks"; setButtons(); tick(); });
     document.getElementById("showFeedback").addEventListener("click", () => { currentTab = "feedback"; setButtons(); tick(); });
     document.getElementById("showBankActions").addEventListener("click", () => { currentTab = "bankActions"; setButtons(); tick(); });
     document.getElementById("showActionHistory").addEventListener("click", () => { currentTab = "actionHistory"; setButtons(); tick(); });
@@ -842,6 +1122,7 @@ DETAIL_HTML = """<!doctype html>
         <div><label>Description</label><textarea id="description"></textarea></div>
       </div>
       <button id="saveBtn">Save</button>
+      <button id="deleteBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Company</button>
       <div class="muted" id="msg" style="margin-top:8px;"></div>
     </div>
   </div>
@@ -982,7 +1263,34 @@ DETAIL_HTML = """<!doctype html>
       }
     }
 
+    async function removeCompany() {
+      const ok = window.confirm(`Delete company ${SYMBOL}? This cannot be undone.`);
+      if (!ok) return;
+      const btn = el("deleteBtn");
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Deleting...";
+      try {
+        const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}`), {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(()=>({error:"Delete failed"}));
+          el("msg").textContent = err.error || "Delete failed.";
+          btn.disabled = false;
+          btn.textContent = old;
+          return;
+        }
+        window.location.href = withAuthToken("/");
+      } catch (_e) {
+        el("msg").textContent = "Delete failed.";
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
     el("saveBtn").addEventListener("click", save);
+    el("deleteBtn").addEventListener("click", removeCompany);
     el("viewToggle").addEventListener("click", () => {
       showRecent = !showRecent;
       refreshChart();
@@ -1040,6 +1348,9 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
         <div><label>Rarity</label><input id="rarity" /></div>
         <div><label>Image URL</label><input id="image_url" /></div>
       </div>
+      <div class="row one">
+        <div><label>Tags (comma-separated)</label><input id="tags" /></div>
+      </div>
       <div class="row">
         <div><label>Thumbnail Preview</label><img id="preview" class="preview" alt="Commodity thumbnail" /></div>
         <div></div>
@@ -1079,6 +1390,7 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       el("price").value = Number(c.price).toFixed(2);
       el("rarity").value = c.rarity || "common";
       el("image_url").value = c.image_url || "";
+      el("tags").value = String((c.tags || []).join(", "));
       el("description").value = c.description || "";
       syncPreview();
     }
@@ -1088,6 +1400,7 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
         price: Number(el("price").value),
         rarity: el("rarity").value,
         image_url: el("image_url").value,
+        tags: el("tags").value,
         description: el("description").value,
       };
       const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}/update`), {
@@ -1339,6 +1652,419 @@ APP_CONFIG_DETAIL_HTML = """<!doctype html>
 </html>
 """
 
+PERK_DETAIL_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Perk {{ perk_id }} · 716Stonks</title>
+  <style>
+    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 1100px; margin: 20px auto; padding: 0 14px; display:grid; grid-template-columns: 1fr; gap: 12px; }
+    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .title { font-size:1.2rem; font-weight:700; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+    .row.one { grid-template-columns:1fr; }
+    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    textarea { min-height: 86px; resize: vertical; }
+    button { padding:8px 11px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
+    button:hover { background: var(--btnH); }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #1f2937; padding: 7px 6px; text-align: left; }
+    th { color: var(--muted); font-size:.84rem; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    @media (max-width: 760px) {
+      .row { grid-template-columns: 1fr; }
+      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="top">
+        <div class="title">Perk Editor · #{{ perk_id }}</div>
+        <a id="backLink" href="/">Back to Dashboard</a>
+      </div>
+      <div class="row">
+        <div><label>Name</label><input id="name" /></div>
+        <div><label>Priority</label><input id="priority" type="number" step="1" /></div>
+      </div>
+      <div class="row">
+        <div><label>Enabled (1/0)</label><input id="enabled" type="number" step="1" min="0" max="1" /></div>
+        <div><label>Stack Mode</label><select id="stack_mode"><option value="add">add</option><option value="override">override</option><option value="max_only">max_only</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Max Stacks</label><input id="max_stacks" type="number" step="1" min="1" /></div>
+        <div></div>
+      </div>
+      <div class="row one">
+        <div><label>Description</label><textarea id="description"></textarea></div>
+      </div>
+      <button id="savePerkBtn">Save Perk</button>
+      <button id="deletePerkBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Perk</button>
+      <div id="msg" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="top"><div class="title">Requirements</div></div>
+      <table>
+        <thead><tr><th>ID</th><th>Group</th><th>Type</th><th>Commodity</th><th>Op</th><th>Value</th><th>Action</th></tr></thead>
+        <tbody id="reqRows"><tr><td colspan="7" class="muted">Loading...</td></tr></tbody>
+      </table>
+      <div class="row" style="margin-top:10px;">
+        <div><label>Group</label><input id="new_req_group" type="number" step="1" value="1" /></div>
+        <div><label>Type</label><select id="new_req_type"><option value="commodity_qty">commodity_qty</option><option value="tag_qty">tag_qty</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Commodity Name</label><select id="new_req_commodity"></select></div>
+        <div><label>Operator</label><select id="new_req_operator"><option>>=</option><option>></option><option><=</option><option><</option><option>==</option><option>!=</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Value (quantity)</label><input id="new_req_value" type="number" step="1" min="0" value="1" /></div>
+        <div><button id="addReqBtn" style="margin-top:25px;">+ Add Requirement</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="top"><div class="title">Effects</div></div>
+      <table>
+        <thead><tr><th>ID</th><th>Target</th><th>Mode</th><th>Value</th><th>Scale Src</th><th>Scale Key</th><th>Scale Factor</th><th>Cap</th><th>Action</th></tr></thead>
+        <tbody id="effectRows"><tr><td colspan="9" class="muted">Loading...</td></tr></tbody>
+      </table>
+      <div class="row" style="margin-top:10px;">
+        <div><label>Target Stat</label><select id="new_eff_target"><option value="income">income</option><option value="trade_limits">trade_limits</option><option value="networth">networth</option></select></div>
+        <div><label>Value Mode</label><select id="new_eff_mode"><option value="flat">flat</option><option value="multiplier">multiplier</option><option value="per_item">per_item</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Value</label><input id="new_eff_value" type="number" step="0.01" value="0" /></div>
+        <div><label>Scale Source</label><select id="new_eff_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Scale Key (commodity name)</label><select id="new_eff_key"></select></div>
+        <div><label>Scale Factor</label><input id="new_eff_factor" type="number" step="0.01" value="0" /></div>
+      </div>
+      <div class="row">
+        <div><label>Cap (0=none)</label><input id="new_eff_cap" type="number" step="0.01" value="0" /></div>
+        <div><button id="addEffBtn" style="margin-top:25px;">+ Add Effect</button></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PERK_ID = Number({{ perk_id|tojson }});
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    let commodityNames = [];
+    let commodityTags = [];
+    function el(id){ return document.getElementById(id); }
+    function esc(text) {
+      return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function wireBackLink() {
+      const back = el("backLink");
+      if (back) back.href = withAuthToken("/");
+    }
+    function commoditySelectOptions(selectedName) {
+      const selected = String(selectedName || "");
+      const names = [...commodityNames];
+      if (selected && !names.some((n) => n.toLowerCase() === selected.toLowerCase())) {
+        names.push(selected);
+      }
+      names.sort((a, b) => a.localeCompare(b));
+      if (!names.length) return '<option value="">(No commodities)</option>';
+      return names.map((name) => {
+        const isSel = String(name) === selected ? " selected" : "";
+        return `<option value="${esc(name)}"${isSel}>${esc(name)}</option>`;
+      }).join("");
+    }
+    function scaleKeySelectOptions(selectedName) {
+      return commoditySelectOptions(selectedName);
+    }
+    function requirementKeyOptions(reqType, selectedName) {
+      const selected = String(selectedName || "");
+      const fromType = String(reqType || "commodity_qty");
+      const values = fromType === "tag_qty" ? [...commodityTags] : [...commodityNames];
+      if (selected && !values.some((n) => n.toLowerCase() === selected.toLowerCase())) {
+        values.push(selected);
+      }
+      values.sort((a, b) => a.localeCompare(b));
+      if (!values.length) return '<option value="">(None)</option>';
+      return values.map((v) => `<option value="${esc(v)}"${String(v) === selected ? " selected" : ""}>${esc(v)}</option>`).join("");
+    }
+    async function loadCommodityNames() {
+      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const rows = Array.isArray(data.commodities) ? data.commodities : [];
+      commodityNames = rows
+        .map((r) => String(r.name || "").trim())
+        .filter((n) => n.length > 0);
+      commodityTags = Array.from(new Set(
+        rows
+          .flatMap((r) => Array.isArray(r.tags) ? r.tags : [])
+          .map((t) => String(t || "").trim())
+          .filter((t) => t.length > 0)
+      ));
+      const select = el("new_req_commodity");
+      if (select) {
+        const current = String(select.value || "");
+        const reqType = String(el("new_req_type")?.value || "commodity_qty");
+        select.innerHTML = requirementKeyOptions(reqType, current);
+      }
+      const effSelect = el("new_eff_key");
+      if (effSelect) {
+        const current = String(effSelect.value || "");
+        effSelect.innerHTML = scaleKeySelectOptions(current);
+      }
+    }
+    async function load() {
+      await loadCommodityNames();
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}`), { cache: "no-store" });
+      if (!res.ok) {
+        el("msg").textContent = "Perk not found.";
+        return;
+      }
+      const data = await res.json();
+      const p = data.perk || {};
+      el("name").value = p.name || "";
+      el("description").value = p.description || "";
+      el("enabled").value = Number(p.enabled || 0);
+      el("priority").value = Number(p.priority || 100);
+      el("stack_mode").value = p.stack_mode || "add";
+      el("max_stacks").value = Number(p.max_stacks || 1);
+      renderRequirements(Array.isArray(data.requirements) ? data.requirements : []);
+      renderEffects(Array.isArray(data.effects) ? data.effects : []);
+      const newSelect = el("new_req_commodity");
+      if (newSelect && !newSelect.value && commodityNames.length) {
+        newSelect.value = commodityNames[0];
+      }
+      const newEffSelect = el("new_eff_key");
+      if (newEffSelect && !newEffSelect.value && commodityNames.length) {
+        newEffSelect.value = commodityNames[0];
+      }
+    }
+    function renderRequirements(rows) {
+      const tbody = el("reqRows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="muted">No requirements yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-req-id="${esc(String(r.id))}">
+        <td class="mono">${esc(String(r.id))}</td>
+        <td><input data-req-group="${esc(String(r.id))}" type="number" step="1" value="${esc(String(r.group_id || 1))}" /></td>
+        <td><select data-req-type="${esc(String(r.id))}"><option value="commodity_qty"${String(r.req_type || "commodity_qty") === "commodity_qty" ? " selected" : ""}>commodity_qty</option><option value="tag_qty"${String(r.req_type || "") === "tag_qty" ? " selected" : ""}>tag_qty</option></select></td>
+        <td><select data-req-commodity="${esc(String(r.id))}">${requirementKeyOptions(String(r.req_type || "commodity_qty"), String(r.commodity_name || ""))}</select></td>
+        <td><input data-req-operator="${esc(String(r.id))}" value="${esc(String(r.operator || ">="))}" /></td>
+        <td><input data-req-value="${esc(String(r.id))}" type="number" step="1" min="0" value="${esc(String(Number(r.value || 1).toFixed(0)))}" /></td>
+        <td><button data-req-save="${esc(String(r.id))}">Save</button> <button data-req-del="${esc(String(r.id))}" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
+      </tr>`).join("");
+      document.querySelectorAll("select[data-req-type]").forEach((sel) => {
+        sel.addEventListener("change", () => {
+          const reqId = sel.getAttribute("data-req-type");
+          if (!reqId) return;
+          const keySel = document.querySelector(`select[data-req-commodity="${CSS.escape(reqId)}"]`);
+          if (!keySel) return;
+          const current = String(keySel.value || "");
+          keySel.innerHTML = requirementKeyOptions(String(sel.value || "commodity_qty"), current);
+        });
+      });
+      document.querySelectorAll("button[data-req-save]").forEach((btn) => {
+        btn.addEventListener("click", () => updateRequirement(btn.getAttribute("data-req-save")));
+      });
+      document.querySelectorAll("button[data-req-del]").forEach((btn) => {
+        btn.addEventListener("click", () => deleteRequirement(btn.getAttribute("data-req-del")));
+      });
+    }
+    function renderEffects(rows) {
+      const tbody = el("effectRows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted">No effects yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-eff-id="${esc(String(r.id))}">
+        <td class="mono">${esc(String(r.id))}</td>
+        <td><input data-eff-target="${esc(String(r.id))}" value="${esc(String(r.target_stat || "income"))}" /></td>
+        <td><input data-eff-mode="${esc(String(r.id))}" value="${esc(String(r.value_mode || "flat"))}" /></td>
+        <td><input data-eff-value="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.value || 0))}" /></td>
+        <td><input data-eff-source="${esc(String(r.id))}" value="${esc(String(r.scale_source || "none"))}" /></td>
+        <td><select data-eff-key="${esc(String(r.id))}">${scaleKeySelectOptions(String(r.scale_key || ""))}</select></td>
+        <td><input data-eff-factor="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.scale_factor || 0))}" /></td>
+        <td><input data-eff-cap="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.cap || 0))}" /></td>
+        <td><button data-eff-save="${esc(String(r.id))}">Save</button> <button data-eff-del="${esc(String(r.id))}" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
+      </tr>`).join("");
+      document.querySelectorAll("button[data-eff-save]").forEach((btn) => {
+        btn.addEventListener("click", () => updateEffect(btn.getAttribute("data-eff-save")));
+      });
+      document.querySelectorAll("button[data-eff-del]").forEach((btn) => {
+        btn.addEventListener("click", () => deleteEffect(btn.getAttribute("data-eff-del")));
+      });
+    }
+    async function savePerk() {
+      const payload = {
+        name: el("name").value.trim(),
+        description: el("description").value,
+        enabled: Number(el("enabled").value),
+        priority: Number(el("priority").value),
+        stack_mode: el("stack_mode").value,
+        max_stacks: Number(el("max_stacks").value),
+      };
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Save failed" }));
+        el("msg").textContent = err.error || "Save failed.";
+        return;
+      }
+      el("msg").textContent = "Perk saved.";
+      await load();
+    }
+    async function deletePerk() {
+      if (!window.confirm("Delete this perk?")) return;
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}`), { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Delete failed" }));
+        el("msg").textContent = err.error || "Delete failed.";
+        return;
+      }
+      window.location.href = withAuthToken("/");
+    }
+    async function addRequirement() {
+      const payload = {
+        group_id: Number(el("new_req_group").value),
+        req_type: el("new_req_type").value,
+        commodity_name: el("new_req_commodity").value.trim(),
+        operator: el("new_req_operator").value,
+        value: Number(el("new_req_value").value),
+      };
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Add failed" }));
+        el("msg").textContent = err.error || "Add requirement failed.";
+        return;
+      }
+      await load();
+    }
+    async function updateRequirement(reqId) {
+      if (!reqId) return;
+      const payload = {
+        group_id: Number(document.querySelector(`input[data-req-group="${CSS.escape(reqId)}"]`).value),
+        req_type: document.querySelector(`input[data-req-type="${CSS.escape(reqId)}"]`).value,
+        commodity_name: document.querySelector(`select[data-req-commodity="${CSS.escape(reqId)}"]`).value,
+        operator: document.querySelector(`input[data-req-operator="${CSS.escape(reqId)}"]`).value,
+        value: Number(document.querySelector(`input[data-req-value="${CSS.escape(reqId)}"]`).value),
+      };
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements/${encodeURIComponent(reqId)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Update failed" }));
+        el("msg").textContent = err.error || "Update requirement failed.";
+        return;
+      }
+      await load();
+    }
+    async function deleteRequirement(reqId) {
+      if (!reqId || !window.confirm("Delete this requirement?")) return;
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements/${encodeURIComponent(reqId)}`), { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Delete failed" }));
+        el("msg").textContent = err.error || "Delete requirement failed.";
+        return;
+      }
+      await load();
+    }
+    async function addEffect() {
+      const payload = {
+        target_stat: el("new_eff_target").value,
+        value_mode: el("new_eff_mode").value,
+        value: Number(el("new_eff_value").value),
+        scale_source: el("new_eff_source").value,
+        scale_key: el("new_eff_key").value.trim(),
+        scale_factor: Number(el("new_eff_factor").value),
+        cap: Number(el("new_eff_cap").value),
+      };
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Add failed" }));
+        el("msg").textContent = err.error || "Add effect failed.";
+        return;
+      }
+      await load();
+    }
+    async function updateEffect(effectId) {
+      if (!effectId) return;
+      const payload = {
+        target_stat: document.querySelector(`input[data-eff-target="${CSS.escape(effectId)}"]`).value,
+        value_mode: document.querySelector(`input[data-eff-mode="${CSS.escape(effectId)}"]`).value,
+        value: Number(document.querySelector(`input[data-eff-value="${CSS.escape(effectId)}"]`).value),
+        scale_source: document.querySelector(`input[data-eff-source="${CSS.escape(effectId)}"]`).value,
+        scale_key: document.querySelector(`select[data-eff-key="${CSS.escape(effectId)}"]`).value,
+        scale_factor: Number(document.querySelector(`input[data-eff-factor="${CSS.escape(effectId)}"]`).value),
+        cap: Number(document.querySelector(`input[data-eff-cap="${CSS.escape(effectId)}"]`).value),
+      };
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects/${encodeURIComponent(effectId)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Update failed" }));
+        el("msg").textContent = err.error || "Update effect failed.";
+        return;
+      }
+      await load();
+    }
+    async function deleteEffect(effectId) {
+      if (!effectId || !window.confirm("Delete this effect?")) return;
+      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects/${encodeURIComponent(effectId)}`), { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Delete failed" }));
+        el("msg").textContent = err.error || "Delete effect failed.";
+        return;
+      }
+      await load();
+    }
+    el("savePerkBtn").addEventListener("click", savePerk);
+    el("deletePerkBtn").addEventListener("click", deletePerk);
+    el("addReqBtn").addEventListener("click", addRequirement);
+    el("addEffBtn").addEventListener("click", addEffect);
+    const newReqType = el("new_req_type");
+    if (newReqType) {
+      newReqType.addEventListener("change", () => {
+        const sel = el("new_req_commodity");
+        if (!sel) return;
+        sel.innerHTML = requirementKeyOptions(String(newReqType.value || "commodity_qty"), String(sel.value || ""));
+      });
+    }
+    wireBackLink();
+    load();
+  </script>
+</body>
+</html>
+"""
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -1441,14 +2167,16 @@ def create_app() -> Flask:
         return f"config:{name}"
 
     def _normalize_config(name: str, value):
-        if name in {"START_BALANCE", "DRIFT_NOISE_FREQUENCY", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES", "TREND_MULTIPLIER"}:
+        if name in {"START_BALANCE", "DRIFT_NOISE_FREQUENCY", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES", "TREND_MULTIPLIER", "PAWN_SELL_RATE"}:
             number = float(value)
             if name == "DRIFT_NOISE_FREQUENCY":
                 return max(0.0, min(1.0, number))
+            if name == "PAWN_SELL_RATE":
+                return max(0.0, min(100.0, number))
             if name in {"START_BALANCE", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES"}:
                 return max(0.0, number)
             return number
-        if name in {"TICK_INTERVAL", "MARKET_CLOSE_HOUR", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID"}:
+        if name in {"TICK_INTERVAL", "MARKET_CLOSE_HOUR", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID", "COMMODITIES_LIMIT"}:
             if name == "ANNOUNCEMENT_CHANNEL_ID":
                 text = str(value).strip()
                 if text == "":
@@ -1466,6 +2194,8 @@ def create_app() -> Flask:
                 return max(0, min(23, number))
             if name == "TRADING_LIMITS_PERIOD":
                 return max(1, number)
+            if name == "COMMODITIES_LIMIT":
+                return max(0, number)
             return number
         text = str(value).strip()
         return text or str(APP_CONFIG_SPECS[name].default)
@@ -1485,6 +2215,149 @@ def create_app() -> Flask:
                         """,
                         (_config_key(name), str(_normalize_config(name, spec.default))),
                     )
+
+    def _ensure_perk_tables() -> None:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS perks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    stack_mode TEXT NOT NULL DEFAULT 'add',
+                    max_stacks INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS perk_requirements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    perk_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL DEFAULT 1,
+                    req_type TEXT NOT NULL DEFAULT 'commodity_qty',
+                    commodity_name TEXT NOT NULL DEFAULT '',
+                    operator TEXT NOT NULL DEFAULT '>=',
+                    value INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (perk_id)
+                        REFERENCES perks (id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS perk_effects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    perk_id INTEGER NOT NULL,
+                    effect_type TEXT NOT NULL DEFAULT 'stat_mod',
+                    target_stat TEXT NOT NULL DEFAULT 'income',
+                    value_mode TEXT NOT NULL DEFAULT 'flat',
+                    value REAL NOT NULL DEFAULT 0,
+                    scale_source TEXT NOT NULL DEFAULT 'none',
+                    scale_key TEXT NOT NULL DEFAULT '',
+                    scale_factor REAL NOT NULL DEFAULT 0,
+                    cap REAL NOT NULL DEFAULT 0,
+                    FOREIGN KEY (perk_id)
+                        REFERENCES perks (id)
+                        ON DELETE CASCADE
+                );
+                """
+            )
+            perk_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(perks);").fetchall()
+            }
+            if "income_multiplier" in perk_cols:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS perks_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        priority INTEGER NOT NULL DEFAULT 100,
+                        stack_mode TEXT NOT NULL DEFAULT 'add',
+                        max_stacks INTEGER NOT NULL DEFAULT 1
+                    );
+                    INSERT INTO perks_new (id, guild_id, name, description, enabled, priority, stack_mode, max_stacks)
+                    SELECT id, guild_id, name, description, enabled, 100, 'add', 1
+                    FROM perks;
+                    DROP TABLE perks;
+                    ALTER TABLE perks_new RENAME TO perks;
+                    """
+                )
+            else:
+                if "priority" not in perk_cols:
+                    conn.execute("ALTER TABLE perks ADD COLUMN priority INTEGER NOT NULL DEFAULT 100;")
+                if "stack_mode" not in perk_cols:
+                    conn.execute("ALTER TABLE perks ADD COLUMN stack_mode TEXT NOT NULL DEFAULT 'add';")
+                if "max_stacks" not in perk_cols:
+                    conn.execute("ALTER TABLE perks ADD COLUMN max_stacks INTEGER NOT NULL DEFAULT 1;")
+
+            req_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(perk_requirements);").fetchall()
+            }
+            if req_cols and "required_qty" in req_cols:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS perk_requirements_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        perk_id INTEGER NOT NULL,
+                        group_id INTEGER NOT NULL DEFAULT 1,
+                        req_type TEXT NOT NULL DEFAULT 'commodity_qty',
+                        commodity_name TEXT NOT NULL DEFAULT '',
+                        operator TEXT NOT NULL DEFAULT '>=',
+                        value INTEGER NOT NULL DEFAULT 1,
+                        FOREIGN KEY (perk_id)
+                            REFERENCES perks (id)
+                            ON DELETE CASCADE
+                    );
+                    INSERT INTO perk_requirements_new (id, perk_id, group_id, req_type, commodity_name, operator, value)
+                    SELECT id, perk_id, 1, 'commodity_qty', commodity_name, '>=', required_qty
+                    FROM perk_requirements;
+                    DROP TABLE perk_requirements;
+                    ALTER TABLE perk_requirements_new RENAME TO perk_requirements;
+                    """
+                )
+
+    def _ensure_commodity_tags_table() -> None:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS commodity_tags (
+                    guild_id INTEGER NOT NULL,
+                    commodity_name TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, commodity_name, tag),
+                    FOREIGN KEY (guild_id, commodity_name)
+                        REFERENCES commodities (guild_id, name)
+                        ON DELETE CASCADE
+                );
+                """
+            )
+
+    def _parse_tags(raw: object) -> list[str]:
+        text = str(raw or "")
+        parts = [p.strip().lower() for p in text.split(",")]
+        tags: list[str] = []
+        for tag in parts:
+            if not tag:
+                continue
+            if tag not in tags:
+                tags.append(tag)
+        return tags
+
+    def _sanitize_stack_mode(raw: object) -> str:
+        mode = str(raw or "add").strip().lower()
+        if mode not in {"add", "override", "max_only"}:
+            return "add"
+        return mode
+
+    def _sanitize_operator(raw: object) -> str:
+        op = str(raw or ">=").strip()
+        if op not in {">", ">=", "<", "<=", "==", "!="}:
+            return ">="
+        return op
 
     def _get_config(name: str):
         spec = APP_CONFIG_SPECS[name]
@@ -1528,6 +2401,15 @@ def create_app() -> Flask:
         backup_dir = db_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         return backup_dir
+
+    def _pick_default_guild_id(conn: sqlite3.Connection) -> int:
+        for table in ("companies", "users", "commodities"):
+            row = conn.execute(
+                f"SELECT guild_id FROM {table} ORDER BY guild_id DESC LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                return int(row["guild_id"])
+        return 0
 
     def _human_size(size: int) -> str:
         units = ["B", "KB", "MB", "GB", "TB"]
@@ -1583,6 +2465,8 @@ def create_app() -> Flask:
         return ticks_remaining * tick_interval
 
     _ensure_config_defaults()
+    _ensure_perk_tables()
+    _ensure_commodity_tags_table()
 
     @app.before_request
     def _auth_gate():
@@ -1669,6 +2553,10 @@ def create_app() -> Flask:
     @app.get("/app-config/<config_name>")
     def app_config_page(config_name: str):
         return render_template_string(APP_CONFIG_DETAIL_HTML, config_name=config_name)
+
+    @app.get("/perk/<int:perk_id>")
+    def perk_page(perk_id: int):
+        return render_template_string(PERK_DETAIL_HTML, perk_id=perk_id)
 
     @app.get("/api/stocks")
     def api_stocks():
@@ -1764,7 +2652,23 @@ def create_app() -> Flask:
                 ORDER BY name
                 """
             ).fetchall()
-        return jsonify({"commodities": [dict(r) for r in rows]})
+            tag_rows = conn.execute(
+                """
+                SELECT commodity_name, tag
+                FROM commodity_tags
+                ORDER BY commodity_name, tag
+                """
+            ).fetchall()
+        tag_map: dict[str, list[str]] = {}
+        for row in tag_rows:
+            cname = str(row["commodity_name"])
+            tag_map.setdefault(cname.lower(), []).append(str(row["tag"]))
+        out: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            item["tags"] = tag_map.get(str(item.get("name", "")).lower(), [])
+            out.append(item)
+        return jsonify({"commodities": out})
 
     @app.get("/api/commodity/<name>")
     def api_commodity(name: str):
@@ -1779,7 +2683,18 @@ def create_app() -> Flask:
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Commodity not found"}), 404
-        return jsonify({"commodity": dict(row)})
+            tag_rows = conn.execute(
+                """
+                SELECT tag
+                FROM commodity_tags
+                WHERE commodity_name = ? COLLATE NOCASE
+                ORDER BY tag
+                """,
+                (name,),
+            ).fetchall()
+        item = dict(row)
+        item["tags"] = [str(r["tag"]) for r in tag_rows]
+        return jsonify({"commodity": item})
 
     @app.get("/api/players")
     def api_players():
@@ -1822,6 +2737,75 @@ def create_app() -> Flask:
             players.append(row)
         return jsonify({"players": players})
 
+    @app.get("/api/perks")
+    def api_perks():
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    p.id,
+                    p.guild_id,
+                    p.name,
+                    p.description,
+                    p.enabled,
+                    p.priority,
+                    p.stack_mode,
+                    p.max_stacks,
+                    (
+                        SELECT COUNT(*)
+                        FROM perk_requirements pr
+                        WHERE pr.perk_id = p.id
+                    ) AS requirements_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM perk_effects pe
+                        WHERE pe.perk_id = p.id
+                    ) AS effects_count
+                FROM perks p
+                ORDER BY p.priority ASC, p.id ASC
+                """
+            ).fetchall()
+        return jsonify({"perks": [dict(r) for r in rows]})
+
+    @app.get("/api/perk/<int:perk_id>")
+    def api_perk(perk_id: int):
+        with _connect() as conn:
+            perk_row = conn.execute(
+                """
+                SELECT id, guild_id, name, description, enabled, priority, stack_mode, max_stacks
+                FROM perks
+                WHERE id = ?
+                """,
+                (perk_id,),
+            ).fetchone()
+            if perk_row is None:
+                return jsonify({"error": "Perk not found"}), 404
+            req_rows = conn.execute(
+                """
+                SELECT id, perk_id, group_id, req_type, commodity_name, operator, value
+                FROM perk_requirements
+                WHERE perk_id = ?
+                ORDER BY group_id ASC, id ASC
+                """,
+                (perk_id,),
+            ).fetchall()
+            effect_rows = conn.execute(
+                """
+                SELECT id, perk_id, effect_type, target_stat, value_mode, value, scale_source, scale_key, scale_factor, cap
+                FROM perk_effects
+                WHERE perk_id = ?
+                ORDER BY id ASC
+                """,
+                (perk_id,),
+            ).fetchall()
+        return jsonify(
+            {
+                "perk": dict(perk_row),
+                "requirements": [dict(r) for r in req_rows],
+                "effects": [dict(r) for r in effect_rows],
+            }
+        )
+
     @app.get("/api/action-history")
     def api_action_history():
         with _connect() as conn:
@@ -1847,6 +2831,12 @@ def create_app() -> Flask:
                 """
             ).fetchall()
         return jsonify({"actions": [dict(r) for r in rows]})
+
+    @app.delete("/api/action-history")
+    def api_action_history_delete():
+        with _connect() as conn:
+            cur = conn.execute("DELETE FROM action_history")
+        return jsonify({"ok": True, "deleted": int(cur.rowcount)})
 
     @app.get("/api/feedback")
     def api_feedback():
@@ -1921,6 +2911,58 @@ def create_app() -> Flask:
 
         return jsonify({"player": player})
 
+    @app.get("/api/perk-preview")
+    def api_perk_preview():
+        user_raw = (request.args.get("user_id") or "").strip()
+        if not user_raw:
+            return jsonify({"error": "user_id is required"}), 400
+        try:
+            user_id = int(user_raw)
+        except ValueError:
+            return jsonify({"error": "Invalid user_id"}), 400
+
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id, user_id, display_name, rank
+                FROM users
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(row["guild_id"])
+            rank = str(row["rank"] or DEFAULT_RANK)
+            display_name = str(row["display_name"] or f"User {user_id}")
+
+        lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
+        base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
+        base_trade_limits = int(_get_config("TRADING_LIMITS"))
+        result = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=base_income,
+            base_trade_limits=base_trade_limits,
+            base_networth=None,
+        )
+        matched = list(result.get("matched_perks", []))
+        return jsonify(
+            {
+                "user_id": str(user_id),
+                "display_name": display_name,
+                "rank": rank,
+                "base_income": float(result["base"]["income"]),
+                "final_income": float(result["final"]["income"]),
+                "base_trade_limits": float(result["base"]["trade_limits"]),
+                "final_trade_limits": float(result["final"]["trade_limits"]),
+                "base_networth": float(result["base"]["networth"]),
+                "final_networth": float(result["final"]["networth"]),
+                "matched_perks": matched,
+            }
+        )
+
     @app.get("/api/app-configs")
     def api_app_configs():
         configs = []
@@ -1982,6 +3024,58 @@ def create_app() -> Flask:
                 (next_value, datetime.now(timezone.utc).isoformat(), symbol),
             )
         return jsonify({"ok": True, field: next_value})
+
+    @app.post("/api/company")
+    def api_company_create():
+        data = request.get_json(silent=True) or {}
+        symbol = str(data.get("symbol", "")).strip().upper()
+        name = str(data.get("name", "")).strip()
+        if not symbol or not name:
+            return jsonify({"error": "symbol and name are required"}), 400
+        try:
+            base_price = max(0.01, float(data.get("base_price", 1.0)))
+            slope = float(data.get("slope", 0.0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid base_price/slope"}), 400
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        tick_raw = _state_get("last_tick")
+        try:
+            tick = max(0, int(tick_raw)) if tick_raw is not None else 0
+        except ValueError:
+            tick = 0
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM companies
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                """,
+                (guild_id, symbol),
+            ).fetchone()
+            if existing is not None:
+                return jsonify({"error": f"Company `{symbol}` already exists"}), 409
+            conn.execute(
+                """
+                INSERT INTO companies (
+                    guild_id, symbol, name, location, industry, founded_year, description, evaluation,
+                    base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell,
+                    starting_tick, current_price, last_tick, updated_at
+                )
+                VALUES (?, ?, ?, '', '', 2000, '', '', ?, ?, 0.0, 100.0, 1.0, 0.0, 0.0, ?, ?, ?, ?)
+                """,
+                (guild_id, symbol, name, base_price, slope, tick, base_price, tick, now_iso),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO price_history (guild_id, symbol, tick_index, ts, price)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, symbol, tick, now_iso, base_price),
+            )
+        return jsonify({"ok": True, "symbol": symbol})
 
     @app.post("/api/company/<symbol>/update")
     def api_company_update(symbol: str):
@@ -2050,6 +3144,53 @@ def create_app() -> Flask:
             )
         return jsonify({"ok": True})
 
+    @app.delete("/api/company/<symbol>")
+    def api_company_delete(symbol: str):
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id, symbol
+                FROM companies
+                WHERE symbol = ? COLLATE NOCASE
+                LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Company not found"}), 404
+            guild_id = int(row["guild_id"])
+            real_symbol = str(row["symbol"])
+
+            conn.execute(
+                """
+                DELETE FROM companies
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                """,
+                (guild_id, real_symbol),
+            )
+            conn.execute(
+                """
+                DELETE FROM price_history
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                """,
+                (guild_id, real_symbol),
+            )
+            conn.execute(
+                """
+                DELETE FROM daily_close
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                """,
+                (guild_id, real_symbol),
+            )
+            conn.execute(
+                """
+                DELETE FROM holdings
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                """,
+                (guild_id, real_symbol),
+            )
+        return jsonify({"ok": True, "deleted": real_symbol})
+
     @app.post("/api/commodity/<name>/update")
     def api_commodity_update(name: str):
         data = request.get_json(silent=True) or {}
@@ -2070,14 +3211,13 @@ def create_app() -> Flask:
             except (TypeError, ValueError):
                 return jsonify({"error": f"Invalid value for {key}"}), 400
             updates[key] = value
-        if not updates:
+        tags_in_payload = "tags" in data
+        if not updates and not tags_in_payload:
             return jsonify({"error": "No valid fields provided"}), 400
         if "price" in updates:
             updates["price"] = max(0.01, float(updates["price"]))
+        tags = _parse_tags(data.get("tags", ""))
 
-        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
-        values = list(updates.values())
-        values.append(name)
         with _connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM commodities WHERE name = ? COLLATE NOCASE",
@@ -2085,11 +3225,87 @@ def create_app() -> Flask:
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Commodity not found"}), 404
+            guild_row = conn.execute(
+                """
+                SELECT guild_id, name
+                FROM commodities
+                WHERE name = ? COLLATE NOCASE
+                """,
+                (name,),
+            ).fetchone()
+            if guild_row is None:
+                return jsonify({"error": "Commodity not found"}), 404
+            guild_id = int(guild_row["guild_id"])
+            old_name = str(guild_row["name"])
+            next_name = str(updates.get("name", old_name))
+            if updates:
+                set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+                values = list(updates.values())
+                values.append(name)
+                conn.execute(
+                    f"UPDATE commodities SET {set_clause} WHERE name = ? COLLATE NOCASE",
+                    values,
+                )
             conn.execute(
-                f"UPDATE commodities SET {set_clause} WHERE name = ? COLLATE NOCASE",
-                values,
+                """
+                DELETE FROM commodity_tags
+                WHERE guild_id = ? AND commodity_name = ? COLLATE NOCASE
+                """,
+                (guild_id, old_name),
             )
+            for tag in tags:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO commodity_tags (guild_id, commodity_name, tag)
+                    VALUES (?, ?, ?)
+                    """,
+                    (guild_id, next_name, tag),
+                )
         return jsonify({"ok": True})
+
+    @app.post("/api/commodity")
+    def api_commodity_create():
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        try:
+            price = max(0.01, float(data.get("price", 1.0)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid price"}), 400
+        rarity = str(data.get("rarity", "common")).strip().lower() or "common"
+        image_url = str(data.get("image_url", "")).strip()
+        description = str(data.get("description", "")).strip()
+        tags = _parse_tags(data.get("tags", ""))
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM commodities
+                WHERE guild_id = ? AND name = ? COLLATE NOCASE
+                """,
+                (guild_id, name),
+            ).fetchone()
+            if existing is not None:
+                return jsonify({"error": f"Commodity `{name}` already exists"}), 409
+            conn.execute(
+                """
+                INSERT INTO commodities (guild_id, name, price, rarity, image_url, description)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, name, price, rarity, image_url, description),
+            )
+            for tag in tags:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO commodity_tags (guild_id, commodity_name, tag)
+                    VALUES (?, ?, ?)
+                    """,
+                    (guild_id, name, tag),
+                )
+        return jsonify({"ok": True, "name": name})
 
     @app.post("/api/player/<int:user_id>/update")
     def api_player_update(user_id: int):
@@ -2153,6 +3369,243 @@ def create_app() -> Flask:
                 (f"trade_used:{guild_id}:{user_id}:%",),
             )
         return jsonify({"ok": True, "cleared": int(cur.rowcount)})
+
+    @app.post("/api/perk")
+    def api_perk_create():
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        description = str(data.get("description", "")).strip()
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            cur = conn.execute(
+                """
+                INSERT INTO perks (guild_id, name, description, enabled, priority, stack_mode, max_stacks)
+                VALUES (?, ?, ?, 1, 100, 'add', 1)
+                """,
+                (guild_id, name, description),
+            )
+            perk_id = int(cur.lastrowid)
+        return jsonify({"ok": True, "id": perk_id})
+
+    @app.post("/api/perk/<int:perk_id>/update")
+    def api_perk_update(perk_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        if "name" in data:
+            name = str(data.get("name", "")).strip()
+            if not name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            updates["name"] = name
+        if "description" in data:
+            updates["description"] = str(data.get("description", ""))
+        if "enabled" in data:
+            try:
+                updates["enabled"] = 1 if int(data.get("enabled")) != 0 else 0
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid enabled value"}), 400
+        if "priority" in data:
+            try:
+                updates["priority"] = int(data.get("priority"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid priority"}), 400
+        if "stack_mode" in data:
+            updates["stack_mode"] = _sanitize_stack_mode(data.get("stack_mode"))
+        if "max_stacks" in data:
+            try:
+                updates["max_stacks"] = max(1, int(data.get("max_stacks")))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid max_stacks"}), 400
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values())
+        values.append(perk_id)
+        with _connect() as conn:
+            cur = conn.execute(
+                f"UPDATE perks SET {set_clause} WHERE id = ?",
+                values,
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Perk not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/perk/<int:perk_id>")
+    def api_perk_delete(perk_id: int):
+        with _connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM perks WHERE id = ?",
+                (perk_id,),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Perk not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.post("/api/perk/<int:perk_id>/requirements")
+    def api_perk_requirement_create(perk_id: int):
+        data = request.get_json(silent=True) or {}
+        try:
+            group_id = max(1, int(data.get("group_id", 1)))
+            value = max(0, int(float(data.get("value", 1))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid group/value"}), 400
+        req_type = str(data.get("req_type", "commodity_qty")).strip().lower() or "commodity_qty"
+        commodity_name = str(data.get("commodity_name", "")).strip()
+        operator = _sanitize_operator(data.get("operator", ">="))
+        if req_type not in {"commodity_qty", "tag_qty"}:
+            return jsonify({"error": "Unsupported req_type"}), 400
+        if not commodity_name:
+            return jsonify({"error": "commodity_name/tag is required"}), 400
+        with _connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM perks WHERE id = ?",
+                (perk_id,),
+            ).fetchone()
+            if exists is None:
+                return jsonify({"error": "Perk not found"}), 404
+            cur = conn.execute(
+                """
+                INSERT INTO perk_requirements (perk_id, group_id, req_type, commodity_name, operator, value)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (perk_id, group_id, req_type, commodity_name, operator, value),
+            )
+        return jsonify({"ok": True, "id": int(cur.lastrowid)})
+
+    @app.post("/api/perk/<int:perk_id>/requirements/<int:req_id>/update")
+    def api_perk_requirement_update(perk_id: int, req_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        if "group_id" in data:
+            try:
+                updates["group_id"] = max(1, int(data.get("group_id")))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid group_id"}), 400
+        if "req_type" in data:
+            req_type = str(data.get("req_type", "")).strip().lower()
+            if req_type not in {"commodity_qty", "tag_qty"}:
+                return jsonify({"error": "Unsupported req_type"}), 400
+            updates["req_type"] = req_type
+        if "commodity_name" in data:
+            updates["commodity_name"] = str(data.get("commodity_name", "")).strip()
+        if "operator" in data:
+            updates["operator"] = _sanitize_operator(data.get("operator"))
+        if "value" in data:
+            try:
+                updates["value"] = max(0, int(float(data.get("value"))))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid value"}), 400
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values())
+        values.extend([req_id, perk_id])
+        with _connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE perk_requirements
+                SET {set_clause}
+                WHERE id = ? AND perk_id = ?
+                """,
+                values,
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Requirement not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/perk/<int:perk_id>/requirements/<int:req_id>")
+    def api_perk_requirement_delete(perk_id: int, req_id: int):
+        with _connect() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM perk_requirements
+                WHERE id = ? AND perk_id = ?
+                """,
+                (req_id, perk_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Requirement not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.post("/api/perk/<int:perk_id>/effects")
+    def api_perk_effect_create(perk_id: int):
+        data = request.get_json(silent=True) or {}
+        target_stat = str(data.get("target_stat", "income")).strip().lower() or "income"
+        value_mode = str(data.get("value_mode", "flat")).strip().lower() or "flat"
+        scale_source = str(data.get("scale_source", "none")).strip().lower() or "none"
+        scale_key = str(data.get("scale_key", "")).strip()
+        try:
+            value = float(data.get("value", 0))
+            scale_factor = float(data.get("scale_factor", 0))
+            cap = float(data.get("cap", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid numeric effect fields"}), 400
+
+        with _connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM perks WHERE id = ?",
+                (perk_id,),
+            ).fetchone()
+            if exists is None:
+                return jsonify({"error": "Perk not found"}), 404
+            cur = conn.execute(
+                """
+                INSERT INTO perk_effects (
+                    perk_id, effect_type, target_stat, value_mode, value,
+                    scale_source, scale_key, scale_factor, cap
+                )
+                VALUES (?, 'stat_mod', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (perk_id, target_stat, value_mode, value, scale_source, scale_key, scale_factor, cap),
+            )
+        return jsonify({"ok": True, "id": int(cur.lastrowid)})
+
+    @app.post("/api/perk/<int:perk_id>/effects/<int:effect_id>/update")
+    def api_perk_effect_update(perk_id: int, effect_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        for text_key in {"target_stat", "value_mode", "scale_source", "scale_key"}:
+            if text_key in data:
+                updates[text_key] = str(data.get(text_key, "")).strip().lower()
+        for num_key in {"value", "scale_factor", "cap"}:
+            if num_key in data:
+                try:
+                    updates[num_key] = float(data.get(num_key))
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"Invalid {num_key}"}), 400
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values())
+        values.extend([effect_id, perk_id])
+        with _connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE perk_effects
+                SET {set_clause}
+                WHERE id = ? AND perk_id = ?
+                """,
+                values,
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Effect not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/perk/<int:perk_id>/effects/<int:effect_id>")
+    def api_perk_effect_delete(perk_id: int, effect_id: int):
+        with _connect() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM perk_effects
+                WHERE id = ? AND perk_id = ?
+                """,
+                (effect_id, perk_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Effect not found"}), 404
+        return jsonify({"ok": True})
 
     @app.get("/api/bank-requests")
     def api_bank_requests():

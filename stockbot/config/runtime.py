@@ -15,6 +15,8 @@ from stockbot.config.settings import (
     STONKERS_ROLE_NAME,
     TICK_INTERVAL,
     TRADING_FEES,
+    COMMODITIES_LIMIT,
+    PAWN_SELL_RATE,
     TRADING_LIMITS,
     TRADING_LIMITS_PERIOD,
     TREND_MULTIPLIER,
@@ -100,6 +102,16 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         cast=float,
         description="Sell fee percentage applied to realized profit.",
     ),
+    "COMMODITIES_LIMIT": AppConfigSpec(
+        default=int(COMMODITIES_LIMIT),
+        cast=int,
+        description="Max total commodity units a player can hold; <=0 disables.",
+    ),
+    "PAWN_SELL_RATE": AppConfigSpec(
+        default=float(PAWN_SELL_RATE),
+        cast=float,
+        description="Pawn payout percentage when selling commodities to bank.",
+    ),
 }
 
 
@@ -138,6 +150,10 @@ def _normalize(name: str, value: Any) -> Any:
         return max(1, int(value))
     if name == "TRADING_FEES":
         return max(0.0, float(value))
+    if name == "COMMODITIES_LIMIT":
+        return max(0, int(value))
+    if name == "PAWN_SELL_RATE":
+        return max(0.0, min(100.0, float(value)))
     return value
 
 

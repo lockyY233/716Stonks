@@ -1,0 +1,428 @@
+from __future__ import annotations
+
+import math
+
+import discord
+from discord import Interaction
+
+from stockbot.config.runtime import get_app_config
+from stockbot.db.database import get_connection
+from stockbot.db.repositories import get_state_value, set_state_value
+
+
+def _cmp(actual: float, operator: str, expected: float) -> bool:
+    if operator == ">":
+        return actual > expected
+    if operator == ">=":
+        return actual >= expected
+    if operator == "<":
+        return actual < expected
+    if operator == "<=":
+        return actual <= expected
+    if operator == "==":
+        return abs(actual - expected) < 1e-9
+    if operator == "!=":
+        return abs(actual - expected) >= 1e-9
+    return actual >= expected
+
+
+def _stack_count(actual: float, operator: str, expected: float) -> int:
+    if expected <= 0:
+        return 1
+    if operator in {">", ">="}:
+        return max(0, int(math.floor(actual / expected)))
+    if _cmp(actual, operator, expected):
+        return 1
+    return 0
+
+
+def _scaled_value(
+    effect: dict,
+    commodity_qty_by_name: dict[str, int],
+) -> float:
+    source = str(effect.get("scale_source", "none") or "none").strip().lower()
+    if source == "commodity_qty":
+        key = str(effect.get("scale_key", "") or "").strip().lower()
+        return float(commodity_qty_by_name.get(key, 0))
+    return 0.0
+
+
+def apply_income_perks(
+    guild_id: int,
+    user_id: int,
+    base_income: float,
+) -> tuple[float, dict]:
+    result = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=base_income,
+        base_trade_limits=0,
+    )
+    return float(result["final"]["income"]), {"matched_perks": list(result["matched_perks"])}
+
+
+def evaluate_user_perks(
+    guild_id: int,
+    user_id: int,
+    *,
+    base_income: float = 0.0,
+    base_trade_limits: int | None = None,
+    base_networth: float | None = None,
+) -> dict:
+    """
+    Evaluate perk requirements and aggregate effect modifiers for supported stats:
+    - income
+    - trade_limits
+    - networth
+    """
+    if base_trade_limits is None:
+        base_trade_limits = int(get_app_config("TRADING_LIMITS"))
+
+    with get_connection() as conn:
+        holdings_rows = conn.execute(
+            """
+            SELECT commodity_name, quantity
+            FROM user_commodities
+            WHERE guild_id = ? AND user_id = ? AND quantity > 0
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+        commodity_qty_by_name = {
+            str(r["commodity_name"]).strip().lower(): int(r["quantity"])
+            for r in holdings_rows
+        }
+        tag_qty_rows = conn.execute(
+            """
+            SELECT ct.tag AS tag, COALESCE(SUM(uc.quantity), 0) AS qty
+            FROM commodity_tags ct
+            LEFT JOIN user_commodities uc
+              ON uc.guild_id = ct.guild_id
+             AND uc.user_id = ?
+             AND uc.commodity_name = ct.commodity_name
+            WHERE ct.guild_id = ?
+            GROUP BY ct.tag
+            """,
+            (user_id, guild_id),
+        ).fetchall()
+        qty_by_tag = {
+            str(r["tag"]).strip().lower(): int(r["qty"] or 0)
+            for r in tag_qty_rows
+            if str(r["tag"]).strip()
+        }
+        if base_networth is None:
+            networth_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(uc.quantity * c.price), 0.0) AS total
+                FROM user_commodities uc
+                JOIN commodities c
+                  ON c.guild_id = uc.guild_id
+                 AND c.name = uc.commodity_name
+                WHERE uc.guild_id = ? AND uc.user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            base_networth = float(networth_row["total"]) if networth_row is not None else 0.0
+
+        perks_rows = conn.execute(
+            """
+            SELECT id, name, description, enabled, priority, stack_mode, max_stacks
+            FROM perks
+            WHERE guild_id = ? AND enabled = 1
+            ORDER BY priority ASC, id ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+        perks = [dict(r) for r in perks_rows]
+        if not perks:
+            final_trade_limits = max(0, int(round(float(base_trade_limits))))
+            return {
+                "base": {
+                    "income": float(base_income),
+                    "trade_limits": float(base_trade_limits),
+                    "networth": float(base_networth),
+                },
+                "final": {
+                    "income": float(base_income),
+                    "trade_limits": float(final_trade_limits),
+                    "networth": float(base_networth),
+                },
+                "matched_perks": [],
+            }
+
+        perk_ids = [int(p["id"]) for p in perks]
+        placeholders = ",".join(["?"] * len(perk_ids))
+
+        req_rows = conn.execute(
+            f"""
+            SELECT id, perk_id, group_id, req_type, commodity_name, operator, value
+            FROM perk_requirements
+            WHERE perk_id IN ({placeholders})
+            ORDER BY perk_id, group_id, id
+            """,
+            tuple(perk_ids),
+        ).fetchall()
+        effect_rows = conn.execute(
+            f"""
+            SELECT id, perk_id, effect_type, target_stat, value_mode, value, scale_source, scale_key, scale_factor, cap
+            FROM perk_effects
+            WHERE perk_id IN ({placeholders})
+            ORDER BY perk_id, id
+            """,
+            tuple(perk_ids),
+        ).fetchall()
+
+    req_by_perk: dict[int, list[dict]] = {}
+    for row in req_rows:
+        req_by_perk.setdefault(int(row["perk_id"]), []).append(dict(row))
+    effects_by_perk: dict[int, list[dict]] = {}
+    for row in effect_rows:
+        effects_by_perk.setdefault(int(row["perk_id"]), []).append(dict(row))
+
+    tracked_stats = ("income", "trade_limits", "networth")
+    stat_add = {k: 0.0 for k in tracked_stats}
+    stat_mul = {k: 1.0 for k in tracked_stats}
+    matched: list[dict] = []
+
+    for perk in perks:
+        perk_id = int(perk["id"])
+        stack_mode = str(perk.get("stack_mode", "add") or "add").strip().lower()
+        max_stacks = max(1, int(perk.get("max_stacks", 1) or 1))
+
+        reqs = req_by_perk.get(perk_id, [])
+        group_rows: dict[int, list[dict]] = {}
+        for req in reqs:
+            group_rows.setdefault(int(req.get("group_id", 1) or 1), []).append(req)
+
+        matched_group_stacks: list[int] = []
+        for _group_id, rows in group_rows.items():
+            group_ok = True
+            stack_candidates: list[int] = []
+            for req in rows:
+                req_type = str(req.get("req_type", "commodity_qty") or "commodity_qty").strip().lower()
+                op = str(req.get("operator", ">=") or ">=").strip()
+                expected = int(float(req.get("value", 1) or 1))
+                if expected < 0:
+                    expected = 0
+                actual = 0.0
+                if req_type == "commodity_qty":
+                    c_name = str(req.get("commodity_name", "") or "").strip().lower()
+                    actual = float(commodity_qty_by_name.get(c_name, 0))
+                elif req_type == "tag_qty":
+                    tag = str(req.get("commodity_name", "") or "").strip().lower()
+                    actual = float(qty_by_tag.get(tag, 0))
+                else:
+                    group_ok = False
+                    break
+
+                if not _cmp(actual, op, expected):
+                    group_ok = False
+                    break
+                stack_candidates.append(_stack_count(actual, op, expected))
+
+            if group_ok:
+                group_stack = min(stack_candidates) if stack_candidates else 1
+                matched_group_stacks.append(max(1, group_stack))
+
+        # No requirements means always active.
+        if not group_rows:
+            matched_group_stacks = [1]
+
+        if not matched_group_stacks:
+            continue
+
+        stacks = min(max(matched_group_stacks), max_stacks)
+        if stack_mode in {"override", "max_only"}:
+            stacks = 1
+
+        perk_add = {k: 0.0 for k in tracked_stats}
+        perk_mul = {k: 1.0 for k in tracked_stats}
+        effect_display_parts: list[str] = []
+        for effect in effects_by_perk.get(perk_id, []):
+            target_stat = str(effect.get("target_stat", "") or "").strip().lower()
+            if target_stat not in tracked_stats:
+                continue
+            value_mode = str(effect.get("value_mode", "flat") or "flat").strip().lower()
+            value = float(effect.get("value", 0) or 0.0)
+            scale_factor = float(effect.get("scale_factor", 0) or 0.0)
+            cap = float(effect.get("cap", 0) or 0.0)
+            scaled = _scaled_value(effect, commodity_qty_by_name)
+
+            if value_mode == "flat":
+                contrib = value
+                if cap > 0:
+                    contrib = max(-cap, min(cap, contrib))
+                perk_add[target_stat] += contrib * stacks
+                if abs(contrib) > 1e-9:
+                    sign = "+" if contrib >= 0 else "-"
+                    effect_display_parts.append(f"{target_stat} {sign}{abs(contrib):.2f}")
+            elif value_mode == "multiplier":
+                one = max(0.0, value)
+                perk_mul[target_stat] *= one ** stacks
+                if abs(one - 1.0) > 1e-9:
+                    effect_display_parts.append(f"{target_stat} x{one:.2f}")
+            elif value_mode == "per_item":
+                contrib = value + (scale_factor * scaled)
+                if cap > 0:
+                    contrib = max(-cap, min(cap, contrib))
+                perk_add[target_stat] += contrib * stacks
+                base_str = ""
+                if abs(value) > 1e-9:
+                    sign = "+" if value >= 0 else "-"
+                    base_str = f"{target_stat} {sign}{abs(value):.2f}"
+                scale_str = ""
+                if abs(scale_factor) > 1e-9:
+                    scale_str = f"x{scale_factor:.2f} per item after"
+                if base_str and scale_str:
+                    effect_display_parts.append(f"{base_str}, {scale_str}")
+                elif base_str:
+                    effect_display_parts.append(base_str)
+                elif scale_str:
+                    effect_display_parts.append(f"{target_stat} {scale_str}")
+
+        has_change = any(abs(perk_add[k]) > 1e-9 or abs(perk_mul[k] - 1.0) > 1e-9 for k in tracked_stats)
+        if not has_change:
+            continue
+
+        for key in tracked_stats:
+            stat_add[key] += perk_add[key]
+            stat_mul[key] *= perk_mul[key]
+        matched.append(
+            {
+                "perk_id": perk_id,
+                "name": str(perk.get("name", f"perk#{perk_id}")),
+                "description": str(perk.get("description", "")),
+                "stacks": stacks,
+                "add": perk_add["income"],
+                "mul": perk_mul["income"],
+                "adds": dict(perk_add),
+                "muls": dict(perk_mul),
+                "display": " | ".join(effect_display_parts),
+            }
+        )
+
+    final_income = max(0.0, (float(base_income) + stat_add["income"]) * stat_mul["income"])
+    final_trade_limits = max(0.0, (float(base_trade_limits) + stat_add["trade_limits"]) * stat_mul["trade_limits"])
+    final_networth = max(0.0, (float(base_networth) + stat_add["networth"]) * stat_mul["networth"])
+    return {
+        "base": {
+            "income": float(base_income),
+            "trade_limits": float(base_trade_limits),
+            "networth": float(base_networth),
+        },
+        "final": {
+            "income": float(final_income),
+            "trade_limits": float(int(round(final_trade_limits))),
+            "networth": float(final_networth),
+        },
+        "matched_perks": matched,
+    }
+
+
+def _perk_state_key(guild_id: int, user_id: int, perk_id: int) -> str:
+    return f"perk_active:{guild_id}:{user_id}:{perk_id}"
+
+
+async def _pick_announcement_channel(
+    guild: discord.Guild,
+    client: discord.Client,
+) -> discord.abc.Messageable | None:
+    preferred_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
+    if preferred_channel_id > 0:
+        channel = guild.get_channel(preferred_channel_id) or client.get_channel(preferred_channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(preferred_channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
+        if isinstance(channel, (discord.TextChannel, discord.Thread)) and channel.guild.id == guild.id:
+            return channel
+
+    if guild.system_channel is not None:
+        return guild.system_channel
+    for channel in guild.text_channels:
+        return channel
+    return None
+
+
+async def check_and_announce_perk_activations(
+    interaction: Interaction,
+    target_user_id: int | None = None,
+) -> None:
+    if interaction.guild is None:
+        return
+
+    guild_id = interaction.guild.id
+    user_id = int(target_user_id or interaction.user.id)
+
+    eval_result = evaluate_user_perks(guild_id, user_id, base_income=0.0)
+    matched = list(eval_result.get("matched_perks", []))
+    current_ids = {int(row.get("perk_id", 0)) for row in matched if int(row.get("perk_id", 0)) > 0}
+    current_names = {
+        int(row.get("perk_id", 0)): str(row.get("name", "Unknown"))
+        for row in matched
+        if int(row.get("perk_id", 0)) > 0
+    }
+    current_descriptions = {
+        int(row.get("perk_id", 0)): str(row.get("description", "")).strip()
+        for row in matched
+        if int(row.get("perk_id", 0)) > 0
+    }
+    current_displays = {
+        int(row.get("perk_id", 0)): str(row.get("display", "")).strip()
+        for row in matched
+        if int(row.get("perk_id", 0)) > 0
+    }
+
+    prefix = f"perk_active:{guild_id}:{user_id}:"
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT key, value
+            FROM app_state
+            WHERE key LIKE ?
+            """,
+            (f"{prefix}%",),
+        ).fetchall()
+    active_ids: set[int] = set()
+    for row in rows:
+        key = str(row["key"])
+        val = str(row["value"])
+        if val != "1":
+            continue
+        try:
+            active_ids.add(int(key.rsplit(":", 1)[-1]))
+        except (TypeError, ValueError):
+            continue
+
+    newly_activated_ids = [perk_id for perk_id in sorted(current_ids) if perk_id not in active_ids]
+
+    for perk_id in current_ids:
+        set_state_value(_perk_state_key(guild_id, user_id, perk_id), "1")
+    for perk_id in active_ids:
+        if perk_id not in current_ids:
+            set_state_value(_perk_state_key(guild_id, user_id, perk_id), "0")
+
+    if not newly_activated_ids:
+        return
+
+    channel = await _pick_announcement_channel(interaction.guild, interaction.client)
+    if channel is None:
+        return
+    perk_names = [current_names.get(perk_id, f"perk#{perk_id}") for perk_id in newly_activated_ids]
+    blocks: list[str] = []
+    for perk_id, perk_name in zip(newly_activated_ids, perk_names):
+        desc = current_descriptions.get(perk_id) or "No description."
+        modifier = current_displays.get(perk_id) or "No modifier."
+        blocks.append(
+            "**PERK ACTIVATED!!**:\n"
+            f"**{perk_name}**\n"
+            f"*{desc}*\n"
+            "**MODIFIERS**:\n"
+            f"{modifier}"
+        )
+    try:
+        await channel.send(
+            f"<@{user_id}>\n" + "\n\n".join(blocks)
+        )
+    except Exception:
+        return

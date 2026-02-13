@@ -10,7 +10,9 @@ from stockbot.db import (
     get_company,
     get_state_value,
     get_user,
+    get_user_commodities,
     get_user_shares,
+    recalc_user_networth,
     set_holding,
     set_state_value,
     update_company_trade_volume,
@@ -19,6 +21,7 @@ from stockbot.db import (
     upsert_user_commodity,
     upsert_holding,
 )
+from stockbot.services.perks import check_and_announce_perk_activations, evaluate_user_perks
 
 
 def _limit_bucket_key(guild_id: int, user_id: int, bucket_index: int) -> str:
@@ -62,6 +65,24 @@ def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tupl
     if period <= 0:
         return False, "Trading limits misconfigured: TRADING_LIMITS_PERIOD must be > 0."
 
+    evaluated = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=limit,
+        base_networth=0.0,
+    )
+    limit = int(evaluated["final"]["trade_limits"])
+    if limit <= 0:
+        period_minutes = (period * tick_interval) / 60.0
+        return (
+            False,
+            (
+                f"Trade limit reached for this period. Remaining: 0 shares "
+                f"(limit {limit} per {period_minutes:.2f} minutes)."
+            ),
+        )
+
     tick = _get_current_tick()
     bucket = tick // period
     key = _limit_bucket_key(guild_id, user_id, bucket)
@@ -83,12 +104,22 @@ def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tupl
 
 
 def _current_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, float, int]:
-    limit = int(get_app_config("TRADING_LIMITS"))
+    base_limit = int(get_app_config("TRADING_LIMITS"))
     period = int(get_app_config("TRADING_LIMITS_PERIOD"))
     tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
     period_minutes = (period * tick_interval) / 60.0 if period > 0 else 0.0
-    if limit <= 0 or period <= 0:
-        return False, limit, 0, period_minutes, 0
+    if base_limit <= 0 or period <= 0:
+        return False, base_limit, 0, period_minutes, 0
+    evaluated = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=base_limit,
+        base_networth=0.0,
+    )
+    limit = int(evaluated["final"]["trade_limits"])
+    if limit <= 0:
+        return True, 0, 0, period_minutes, 0
 
     tick = _get_current_tick()
     bucket = tick // period
@@ -97,6 +128,16 @@ def _current_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, 
     used = int(float(used_raw)) if used_raw is not None else 0
     remaining = max(0, limit - used)
     return True, limit, used, period_minutes, remaining
+
+
+def _commodity_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, int]:
+    limit = int(get_app_config("COMMODITIES_LIMIT"))
+    holdings = get_user_commodities(guild_id, user_id)
+    used = sum(max(0, int(row.get("quantity", 0))) for row in holdings)
+    if limit <= 0:
+        return False, limit, used, 0
+    remaining = max(0, limit - used)
+    return True, limit, used, remaining
 
 
 async def perform_buy(
@@ -301,6 +342,16 @@ async def perform_buy_commodity(
     if commodity is None:
         return False, f"Commodity `{commodity_name}` not found."
 
+    enabled, limit, _used, remaining = _commodity_limit_status(
+        interaction.guild.id,
+        interaction.user.id,
+    )
+    if enabled and quantity > remaining:
+        return (
+            False,
+            f"Commodity limit reached. Remaining slots: {remaining}/{limit} units.",
+        )
+
     price = float(commodity["price"])
     total_cost = round(price * quantity, 2)
     if float(user["bank"]) < total_cost:
@@ -328,10 +379,79 @@ async def perform_buy_commodity(
         details="",
         created_at=datetime.now(timezone.utc).isoformat(),
     )
+    await check_and_announce_perk_activations(interaction)
     return (
         True,
         f"Bought {quantity}x {commodity['name']} for ${total_cost:.2f}. "
         f"Commodity networth now ${new_networth:.2f}.",
+    )
+
+
+async def perform_pawn_commodity(
+    interaction: Interaction,
+    commodity_name: str,
+    quantity: int,
+) -> tuple[bool, str]:
+    if interaction.guild is None:
+        return False, "Please use this command in a server."
+
+    if quantity <= 0:
+        return False, "Quantity must be a positive integer."
+
+    user = get_user(interaction.guild.id, interaction.user.id)
+    if user is None:
+        return False, REGISTER_REQUIRED_MESSAGE
+
+    commodity = get_commodity(interaction.guild.id, commodity_name)
+    if commodity is None:
+        return False, f"Commodity `{commodity_name}` not found."
+
+    holdings = get_user_commodities(interaction.guild.id, interaction.user.id)
+    match = next(
+        (row for row in holdings if str(row.get("name", "")).lower() == str(commodity.get("name", "")).lower()),
+        None,
+    )
+    owned_qty = int(match.get("quantity", 0)) if match is not None else 0
+    if owned_qty < quantity:
+        return False, f"You only own {owned_qty}x {commodity['name']}."
+
+    rate_pct = max(0.0, min(100.0, float(get_app_config("PAWN_SELL_RATE"))))
+    rate = rate_pct / 100.0
+    price = float(commodity["price"])
+    gross_value = price * quantity
+    payout = round(gross_value * rate, 2)
+
+    new_bank = float(user["bank"]) + payout
+    update_user_bank(interaction.guild.id, interaction.user.id, new_bank)
+    upsert_user_commodity(
+        interaction.guild.id,
+        interaction.user.id,
+        str(commodity["name"]),
+        -quantity,
+    )
+    networth = recalc_user_networth(interaction.guild.id, interaction.user.id)
+
+    add_action_history(
+        guild_id=interaction.guild.id,
+        user_id=interaction.user.id,
+        action_type="pawn",
+        target_type="commodity",
+        target_symbol=str(commodity["name"]),
+        quantity=float(quantity),
+        unit_price=price * rate,
+        total_amount=payout,
+        details=f"market_price={price:.2f};pawn_rate={rate_pct:.2f}%",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    await check_and_announce_perk_activations(interaction)
+
+    return (
+        True,
+        (
+            f"Pawned {quantity}x {commodity['name']} at {rate_pct:.2f}% for **${payout:.2f}** "
+            f"(market value ${gross_value:.2f}).\n"
+            f"New balance: ${new_bank:.2f} | Commodity networth: ${networth:.2f}"
+        ),
     )
 
 

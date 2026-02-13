@@ -24,6 +24,7 @@ from stockbot.db import (
     update_user_bank,
 )
 from stockbot.services.economy import process_ticks
+from stockbot.services.perks import apply_income_perks
 
 
 class StockBot(discord.Client):
@@ -218,12 +219,14 @@ class StockBot(discord.Client):
             user_id = int(row["user_id"])
             bank = float(row.get("bank", 0.0))
             rank = str(row.get("rank", DEFAULT_RANK))
-            income = lookup.get(rank.lower(), default_income)
+            base_income = lookup.get(rank.lower(), default_income)
+            income, _perk_meta = apply_income_perks(guild_id, user_id, base_income)
             if income <= 0:
                 continue
             update_user_bank(guild_id, user_id, bank + income)
 
         set_state_value(payout_state_key, local_date)
+        return
 
     async def _pick_announcement_channel(
         self,

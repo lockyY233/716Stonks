@@ -2,10 +2,17 @@ from datetime import datetime, timezone
 
 import discord
 from discord import ButtonStyle, Embed, Interaction, app_commands
-from discord.ui import Button, Modal, TextInput, View, button
+from discord.ui import Button, Modal, Select, TextInput, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
-from stockbot.db import add_action_history, create_bank_request, get_user, repay_user_loan
+from stockbot.db import (
+    add_action_history,
+    create_bank_request,
+    get_user,
+    get_user_commodities,
+    repay_user_loan,
+)
+from stockbot.services.trading import perform_pawn_commodity
 
 
 class LoanRequestModal(Modal):
@@ -185,9 +192,115 @@ class BankMenuView(View):
     async def pay_loan(self, interaction: Interaction, _button: Button) -> None:
         await interaction.response.send_modal(PayLoanModal(self._guild_id, self._user_id))
 
+    @button(label="Pawn", style=ButtonStyle.red)
+    async def pawn(self, interaction: Interaction, _button: Button) -> None:
+        owned = get_user_commodities(self._guild_id, self._user_id)
+        if not owned:
+            await interaction.response.send_message(
+                "You do not own any commodities to pawn.",
+                ephemeral=True,
+            )
+            return
+        embed = Embed(
+            title="Bank Service: Pawn",
+            description=(
+                "Select a commodity you own, then choose whether to pawn 1 or all units.\n"
+                "Pawn value follows the configured pawn rate."
+            ),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=PawnCommodityView(owned),
+            ephemeral=True,
+        )
+
     @button(label="More Services Soon", style=ButtonStyle.secondary, disabled=True)
     async def coming_soon(self, interaction: Interaction, _button: Button) -> None:
         await interaction.response.defer()
+
+
+class PawnCommoditySelect(Select):
+    def __init__(self, owned_rows: list[dict]) -> None:
+        options: list[discord.SelectOption] = []
+        for row in owned_rows[:25]:
+            name = str(row.get("name", "Unknown"))
+            qty = int(row.get("quantity", 0))
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=name,
+                    description=f"Owned: {qty}",
+                )
+            )
+        super().__init__(
+            placeholder="Select commodity to pawn",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, PawnCommodityView):
+            await interaction.response.defer()
+            return
+        parent.selected_name = self.values[0]
+        parent.pawn_one.disabled = False
+        parent.pawn_all.disabled = False
+        await interaction.response.edit_message(view=parent)
+
+
+class PawnCommodityView(View):
+    def __init__(self, owned_rows: list[dict]) -> None:
+        super().__init__(timeout=300)
+        self.selected_name: str | None = None
+        self._owned_qty_by_name: dict[str, int] = {
+            str(row.get("name", "")): int(row.get("quantity", 0)) for row in owned_rows
+        }
+        self.add_item(PawnCommoditySelect(owned_rows))
+
+    @button(label="Pawn 1", style=ButtonStyle.red, disabled=True)
+    async def pawn_one(self, interaction: Interaction, _button: Button) -> None:
+        if not self.selected_name:
+            await interaction.response.send_message(
+                "Select a commodity first.",
+                ephemeral=True,
+            )
+            return
+        ok, msg = await perform_pawn_commodity(interaction, self.selected_name, 1)
+        if msg == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(
+                msg,
+                view=RegisterNowView(),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @button(label="Pawn All", style=ButtonStyle.secondary, disabled=True)
+    async def pawn_all(self, interaction: Interaction, _button: Button) -> None:
+        if not self.selected_name:
+            await interaction.response.send_message(
+                "Select a commodity first.",
+                ephemeral=True,
+            )
+            return
+        qty = max(0, self._owned_qty_by_name.get(self.selected_name, 0))
+        if qty <= 0:
+            await interaction.response.send_message(
+                "You no longer own this commodity.",
+                ephemeral=True,
+            )
+            return
+        ok, msg = await perform_pawn_commodity(interaction, self.selected_name, qty)
+        if msg == REGISTER_REQUIRED_MESSAGE:
+            await interaction.response.send_message(
+                msg,
+                view=RegisterNowView(),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 def setup_bank(tree: app_commands.CommandTree) -> None:

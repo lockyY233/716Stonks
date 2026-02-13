@@ -6,7 +6,7 @@ from discord.ui import Button, View, button
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
 from stockbot.config.runtime import get_app_config
 from stockbot.core.commodity_rarity import rarity_color
-from stockbot.db import get_commodities, get_state_value
+from stockbot.db import get_commodities, get_state_value, set_state_value
 from stockbot.services.trading import perform_buy_commodity
 
 
@@ -31,15 +31,20 @@ def _build_store(guild_id: int) -> list[dict]:
     store_rows: list[dict] = []
     for row in selected:
         entry = dict(row)
-        entry["in_stock"] = rng.random() < 0.75
+        stock_key = f"shop_sold:{guild_id}:{bucket}:{str(entry.get('name', '')).lower()}"
+        sold_raw = get_state_value(stock_key)
+        sold = int(sold_raw) if sold_raw and sold_raw.isdigit() else 0
+        entry["in_stock"] = sold < 1
+        entry["_stock_key"] = stock_key
         store_rows.append(entry)
     return store_rows
 
 
 class ShopPager(View):
-    def __init__(self, owner_id: int, rows: list[dict]) -> None:
+    def __init__(self, owner_id: int, guild_id: int, rows: list[dict]) -> None:
         super().__init__(timeout=300)
         self._owner_id = owner_id
+        self._guild_id = guild_id
         self._rows = rows
         self._index = 0
         self._sync_buttons()
@@ -109,6 +114,16 @@ class ShopPager(View):
             )
             return
 
+        stock_key = str(commodity.get("_stock_key", ""))
+        if stock_key:
+            sold_raw = get_state_value(stock_key)
+            sold = int(sold_raw) if sold_raw and sold_raw.isdigit() else 0
+            if sold >= 1:
+                commodity["in_stock"] = False
+                self._sync_buttons()
+                await interaction.response.edit_message(embed=self.build_embed(), view=self)
+                return
+
         _ok, message = await perform_buy_commodity(
             interaction,
             str(commodity.get("name", "")),
@@ -121,7 +136,14 @@ class ShopPager(View):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_message(message, ephemeral=True)
+        if _ok and stock_key:
+            set_state_value(stock_key, "1")
+            commodity["in_stock"] = False
+        self._sync_buttons()
+
+        # Always refresh the shop card first so stock state/button stays in sync.
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 def setup_shop(tree: app_commands.CommandTree) -> None:
@@ -142,7 +164,7 @@ def setup_shop(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        view = ShopPager(interaction.user.id, rows)
+        view = ShopPager(interaction.user.id, interaction.guild.id, rows)
         await interaction.response.send_message(
             embed=view.build_embed(),
             view=view,

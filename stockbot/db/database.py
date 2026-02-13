@@ -94,6 +94,16 @@ def init_db() -> None:
                 PRIMARY KEY (guild_id, name)
             );
 
+            CREATE TABLE IF NOT EXISTS commodity_tags (
+                guild_id INTEGER NOT NULL,
+                commodity_name TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (guild_id, commodity_name, tag),
+                FOREIGN KEY (guild_id, commodity_name)
+                    REFERENCES commodities (guild_id, name)
+                    ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS user_commodities (
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -143,6 +153,46 @@ def init_db() -> None:
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS perks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                stack_mode TEXT NOT NULL DEFAULT 'add',
+                max_stacks INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS perk_requirements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                perk_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL DEFAULT 1,
+                req_type TEXT NOT NULL DEFAULT 'commodity_qty',
+                commodity_name TEXT NOT NULL DEFAULT '',
+                operator TEXT NOT NULL DEFAULT '>=',
+                value INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (perk_id)
+                    REFERENCES perks (id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS perk_effects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                perk_id INTEGER NOT NULL,
+                effect_type TEXT NOT NULL DEFAULT 'stat_mod',
+                target_stat TEXT NOT NULL DEFAULT 'income',
+                value_mode TEXT NOT NULL DEFAULT 'flat',
+                value REAL NOT NULL DEFAULT 0,
+                scale_source TEXT NOT NULL DEFAULT 'none',
+                scale_key TEXT NOT NULL DEFAULT '',
+                scale_factor REAL NOT NULL DEFAULT 0,
+                cap REAL NOT NULL DEFAULT 0,
+                FOREIGN KEY (perk_id)
+                    REFERENCES perks (id)
+                    ON DELETE CASCADE
+            );
             """
         )
         _ensure_users_bank_type(conn)
@@ -155,6 +205,7 @@ def init_db() -> None:
         _ensure_commodities_tables(conn)
         _ensure_bank_requests_table(conn)
         _ensure_feedback_table(conn)
+        _ensure_perks_tables(conn)
 
 
 def _ensure_rank_column(conn: sqlite3.Connection) -> None:
@@ -265,6 +316,16 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (guild_id, name)
         );
 
+        CREATE TABLE IF NOT EXISTS commodity_tags (
+            guild_id INTEGER NOT NULL,
+            commodity_name TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (guild_id, commodity_name, tag),
+            FOREIGN KEY (guild_id, commodity_name)
+                REFERENCES commodities (guild_id, name)
+                ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS user_commodities (
             guild_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
@@ -322,6 +383,121 @@ def _ensure_feedback_table(conn: sqlite3.Connection) -> None:
         );
         """
     )
+
+
+def _ensure_perks_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS perks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            stack_mode TEXT NOT NULL DEFAULT 'add',
+            max_stacks INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS perk_requirements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            perk_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL DEFAULT 1,
+            req_type TEXT NOT NULL DEFAULT 'commodity_qty',
+            commodity_name TEXT NOT NULL DEFAULT '',
+            operator TEXT NOT NULL DEFAULT '>=',
+            value INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (perk_id)
+                REFERENCES perks (id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS perk_effects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            perk_id INTEGER NOT NULL,
+            effect_type TEXT NOT NULL DEFAULT 'stat_mod',
+            target_stat TEXT NOT NULL DEFAULT 'income',
+            value_mode TEXT NOT NULL DEFAULT 'flat',
+            value REAL NOT NULL DEFAULT 0,
+            scale_source TEXT NOT NULL DEFAULT 'none',
+            scale_key TEXT NOT NULL DEFAULT '',
+            scale_factor REAL NOT NULL DEFAULT 0,
+            cap REAL NOT NULL DEFAULT 0,
+            FOREIGN KEY (perk_id)
+                REFERENCES perks (id)
+                ON DELETE CASCADE
+        );
+        """
+    )
+
+    perks_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(perks);").fetchall()
+    }
+    if "income_multiplier" in perks_cols:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS perks_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                stack_mode TEXT NOT NULL DEFAULT 'add',
+                max_stacks INTEGER NOT NULL DEFAULT 1
+            );
+
+            INSERT INTO perks_new (id, guild_id, name, description, enabled, priority, stack_mode, max_stacks)
+            SELECT id, guild_id, name, description, enabled, 100, 'add', 1
+            FROM perks;
+
+            DROP TABLE perks;
+            ALTER TABLE perks_new RENAME TO perks;
+            """
+        )
+    else:
+        if "priority" not in perks_cols:
+            conn.execute(
+                "ALTER TABLE perks ADD COLUMN priority INTEGER NOT NULL DEFAULT 100;"
+            )
+        if "stack_mode" not in perks_cols:
+            conn.execute(
+                "ALTER TABLE perks ADD COLUMN stack_mode TEXT NOT NULL DEFAULT 'add';"
+            )
+        if "max_stacks" not in perks_cols:
+            conn.execute(
+                "ALTER TABLE perks ADD COLUMN max_stacks INTEGER NOT NULL DEFAULT 1;"
+            )
+
+    req_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(perk_requirements);").fetchall()
+    }
+    if req_cols and "required_qty" in req_cols:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS perk_requirements_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                perk_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL DEFAULT 1,
+                req_type TEXT NOT NULL DEFAULT 'commodity_qty',
+                commodity_name TEXT NOT NULL DEFAULT '',
+                operator TEXT NOT NULL DEFAULT '>=',
+                value INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (perk_id)
+                    REFERENCES perks (id)
+                    ON DELETE CASCADE
+            );
+
+            INSERT INTO perk_requirements_new (id, perk_id, group_id, req_type, commodity_name, operator, value)
+            SELECT id, perk_id, 1, 'commodity_qty', commodity_name, '>=', required_qty
+            FROM perk_requirements;
+
+            DROP TABLE perk_requirements;
+            ALTER TABLE perk_requirements_new RENAME TO perk_requirements;
+            """
+        )
 
 
 def _ensure_company_columns(conn: sqlite3.Connection) -> None:
