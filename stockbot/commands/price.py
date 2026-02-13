@@ -10,7 +10,7 @@ from discord.ui import View, button
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from stockbot.config import DISPLAY_TIMEZONE
+from stockbot.config.runtime import get_app_config
 from stockbot.commands.trade_views import BuyConfirmView, SellConfirmView
 from stockbot.db import (
     get_companies,
@@ -121,8 +121,9 @@ def setup_price(tree: app_commands.CommandTree) -> None:
                 sampled.append(rows[-1])
             rows = sampled
 
+        display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
         try:
-            tz = ZoneInfo(DISPLAY_TIMEZONE)
+            tz = ZoneInfo(display_timezone)
         except Exception:
             tz = timezone.utc
 

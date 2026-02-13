@@ -6,27 +6,31 @@ from discord import Embed, File, Interaction, app_commands
 from discord.utils import get as get_role
 from discord.ui import View, button
 
-from stockbot.config import DEFAULT_RANK, START_BALANCE, STONKERS_ROLE_NAME
+from stockbot.config import DEFAULT_RANK
+from stockbot.config.runtime import get_app_config
 from stockbot.db import register_user
 
 REGISTER_REQUIRED_MESSAGE = "You are not registered yet. Use /register first."
 
 
 async def _ensure_stonkers_role(guild: discord.Guild) -> discord.Role:
-    role = get_role(guild.roles, name=STONKERS_ROLE_NAME)
+    stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
+    role = get_role(guild.roles, name=stonkers_role_name)
     if role is None:
-        role = await guild.create_role(name=STONKERS_ROLE_NAME, reason="Auto role for registered users")
+        role = await guild.create_role(name=stonkers_role_name, reason="Auto role for registered users")
     return role
 
 
 async def _build_register_response(interaction: Interaction) -> tuple[Embed, File | None]:
+    start_balance = float(get_app_config("START_BALANCE"))
+    stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
     joined_at = datetime.now(timezone.utc).isoformat()
     joined_date = joined_at.split("T", maxsplit=1)[0]
     created = register_user(
         guild_id=interaction.guild.id,
         user_id=interaction.user.id,
         joined_at=joined_at,
-        bank=START_BALANCE,
+        bank=start_balance,
         display_name=interaction.user.display_name,
         rank=DEFAULT_RANK,
     )
@@ -40,7 +44,7 @@ async def _build_register_response(interaction: Interaction) -> tuple[Embed, Fil
             role = await _ensure_stonkers_role(interaction.guild)
             await member.add_roles(role, reason="User registered")
         except (discord.Forbidden, discord.HTTPException) as exc:
-            role_note = f"Could not assign `{STONKERS_ROLE_NAME}` role: {exc.__class__.__name__}"
+            role_note = f"Could not assign `{stonkers_role_name}` role: {exc.__class__.__name__}"
 
         embed = Embed(
             title=f"✅ Registered **SUCCESS** ✅",
@@ -48,7 +52,7 @@ async def _build_register_response(interaction: Interaction) -> tuple[Embed, Fil
         )
         embed.add_field(
             name="💳 **Balance**",
-            value=f"${START_BALANCE}",
+            value=f"${start_balance:.2f}",
             inline=True,
         )
         embed.add_field(

@@ -4,12 +4,7 @@ import matplotlib
 from discord import File
 from matplotlib import pyplot as plt
 
-from stockbot.config import (
-    DRIFT_NOISE_FREQUENCY,
-    DRIFT_NOISE_GAIN,
-    DRIFT_NOISE_LOW_FREQ_RATIO,
-    DRIFT_NOISE_LOW_GAIN,
-)
+from stockbot.config.runtime import get_app_config
 from stockbot.core.noise import (
     normalized_frequency_to_cycles_per_tick,
     perlin1d,
@@ -77,11 +72,15 @@ def build_price_projection_curve(
     ticks: int = 80,
 ) -> File:
     # Simulate no-trade future path from current settings with 1D Perlin noise.
+    drift_noise_frequency = float(get_app_config("DRIFT_NOISE_FREQUENCY"))
+    drift_noise_low_freq_ratio = float(get_app_config("DRIFT_NOISE_LOW_FREQ_RATIO"))
+    drift_noise_gain = float(get_app_config("DRIFT_NOISE_GAIN"))
+    drift_noise_low_gain = float(get_app_config("DRIFT_NOISE_LOW_GAIN"))
     drift_ratio = abs(float(drift)) / 100.0
-    fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(DRIFT_NOISE_FREQUENCY)
-    low_cycles_per_tick = fast_cycles_per_tick * max(0.0, DRIFT_NOISE_LOW_FREQ_RATIO)
-    fast_gain = max(0.0, DRIFT_NOISE_GAIN)
-    low_gain = max(0.0, DRIFT_NOISE_LOW_GAIN)
+    fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(drift_noise_frequency)
+    low_cycles_per_tick = fast_cycles_per_tick * max(0.0, drift_noise_low_freq_ratio)
+    fast_gain = max(0.0, drift_noise_gain)
+    low_gain = max(0.0, drift_noise_low_gain)
     seed_fast = stable_seed(symbol.upper())
     seed_low = stable_seed(f"{symbol.upper()}:low")
     phase_fast = (seed_fast % 10007) / 10007.0
@@ -128,7 +127,7 @@ def build_price_projection_curve(
     fig.text(
         0.02,
         0.01,
-        f"start={start_price:.2f}  slope={slope:.4f}/tick  drift=±{drift:.3f}%/tick  f={DRIFT_NOISE_FREQUENCY:.2f}  g={DRIFT_NOISE_GAIN:.2f}  low={DRIFT_NOISE_LOW_FREQ_RATIO:.2f}x/{DRIFT_NOISE_LOW_GAIN:.2f}  events:+10@20,-10@60",
+        f"start={start_price:.2f}  slope={slope:.4f}/tick  drift=±{drift:.3f}%/tick  f={drift_noise_frequency:.2f}  g={drift_noise_gain:.2f}  low={drift_noise_low_freq_ratio:.2f}x/{drift_noise_low_gain:.2f}  events:+10@20,-10@60",
         transform=fig.transFigure,
         va="bottom",
         ha="left",

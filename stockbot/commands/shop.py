@@ -4,14 +4,14 @@ from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import Button, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
-from stockbot.config import TRADING_LIMITS_PERIOD
+from stockbot.config.runtime import get_app_config
 from stockbot.core.commodity_rarity import rarity_color
 from stockbot.db import get_commodities, get_state_value
 from stockbot.services.trading import perform_buy_commodity
 
 
 def _current_limit_bucket() -> int:
-    period = max(1, int(TRADING_LIMITS_PERIOD))
+    period = max(1, int(get_app_config("TRADING_LIMITS_PERIOD")))
     raw = get_state_value("last_tick")
     tick = int(raw) if raw is not None else 0
     return max(0, tick // period)

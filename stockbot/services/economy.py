@@ -1,14 +1,7 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from stockbot.config import (
-    DISPLAY_TIMEZONE,
-    DRIFT_NOISE_FREQUENCY,
-    DRIFT_NOISE_GAIN,
-    DRIFT_NOISE_LOW_FREQ_RATIO,
-    DRIFT_NOISE_LOW_GAIN,
-    MARKET_CLOSE_HOUR,
-)
+from stockbot.config.runtime import get_app_config
 from stockbot.core.noise import (
     normalized_frequency_to_cycles_per_tick,
     perlin1d,
@@ -28,12 +21,18 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
     """Advance economy by one tick with base update and 1D Perlin drift noise."""
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
-    fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(DRIFT_NOISE_FREQUENCY)
-    low_cycles_per_tick = fast_cycles_per_tick * max(0.0, DRIFT_NOISE_LOW_FREQ_RATIO)
-    fast_gain = max(0.0, DRIFT_NOISE_GAIN)
-    low_gain = max(0.0, DRIFT_NOISE_LOW_GAIN)
+    drift_noise_frequency = float(get_app_config("DRIFT_NOISE_FREQUENCY"))
+    drift_noise_low_freq_ratio = float(get_app_config("DRIFT_NOISE_LOW_FREQ_RATIO"))
+    drift_noise_gain = float(get_app_config("DRIFT_NOISE_GAIN"))
+    drift_noise_low_gain = float(get_app_config("DRIFT_NOISE_LOW_GAIN"))
+    market_close_hour = int(get_app_config("MARKET_CLOSE_HOUR"))
+    display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
+    fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(drift_noise_frequency)
+    low_cycles_per_tick = fast_cycles_per_tick * max(0.0, drift_noise_low_freq_ratio)
+    fast_gain = max(0.0, drift_noise_gain)
+    low_gain = max(0.0, drift_noise_low_gain)
     try:
-        display_tz = ZoneInfo(DISPLAY_TIMEZONE)
+        display_tz = ZoneInfo(display_timezone)
     except Exception:
         display_tz = timezone.utc
     local_dt = now_dt.astimezone(display_tz)
@@ -99,7 +98,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
             )
 
             last_close_date = get_state_value(f"last_close_date:{guild_id}:{symbol}")
-            if last_close_date != local_date and local_hour >= MARKET_CLOSE_HOUR:
+            if last_close_date != local_date and local_hour >= market_close_hour:
                 upsert_daily_close(
                     guild_id=guild_id,
                     symbol=symbol,

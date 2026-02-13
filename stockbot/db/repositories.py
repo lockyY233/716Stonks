@@ -1,3 +1,5 @@
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from stockbot.config import DB_PATH
@@ -743,6 +745,22 @@ def set_holding(
             """,
             (guild_id, user_id, symbol, shares),
         )
+
+
+def create_database_backup(
+    *,
+    prefix: str = "stockbot",
+) -> str:
+    db_path = Path(DB_PATH)
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = backup_dir / f"{prefix}_{stamp}.db"
+
+    with get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
+        source_conn.backup(backup_conn)
+
+    return str(backup_path)
 
 
 def purge_all_data() -> None:

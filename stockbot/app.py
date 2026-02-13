@@ -6,17 +6,11 @@ from zoneinfo import ZoneInfo
 import discord
 
 from stockbot.commands import setup_commands
-from stockbot.config.settings import (
-    DEFAULT_RANK,
-    DISPLAY_TIMEZONE,
-    MARKET_CLOSE_HOUR,
-    RANK_INCOME,
-    STONKERS_ROLE_NAME,
-    TICK_INTERVAL,
-    TOKEN,
-)
+from stockbot.config.runtime import ensure_app_config_defaults, get_app_config
+from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME, TOKEN
 from stockbot.db import (
     backfill_company_starting_ticks,
+    create_database_backup,
     get_top_users_by_networth,
     get_state_value,
     get_users,
@@ -54,10 +48,8 @@ class StockBot(discord.Client):
             self._tick_task = asyncio.create_task(self._tick_loop())
 
     async def _tick_loop(self) -> None:
-        if TICK_INTERVAL <= 0:
-            return
-
         while not self.is_closed():
+            tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
             last_tick_raw = get_state_value("last_tick")
             last_tick = int(last_tick_raw) if last_tick_raw is not None else 0
             next_tick = last_tick + 1
@@ -69,18 +61,22 @@ class StockBot(discord.Client):
             set_state_value("last_tick_epoch", str(time.time()))
             await self._maybe_send_market_close_announcement()
 
-            await asyncio.sleep(TICK_INTERVAL)
+            await asyncio.sleep(tick_interval)
 
     async def _maybe_send_market_close_announcement(self) -> None:
+        display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
+        market_close_hour = int(get_app_config("MARKET_CLOSE_HOUR"))
+        stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         try:
-            tz = ZoneInfo(DISPLAY_TIMEZONE)
+            tz = ZoneInfo(display_timezone)
         except Exception:
             tz = timezone.utc
         now_local = datetime.now(timezone.utc).astimezone(tz)
-        if now_local.hour < MARKET_CLOSE_HOUR:
+        if now_local.hour < market_close_hour:
             return
 
         local_date = now_local.strftime("%Y-%m-%d")
+        await asyncio.to_thread(self._backup_database_if_needed, local_date)
         for guild in self.guilds:
             await asyncio.to_thread(self._apply_rank_income_for_guild, guild.id, local_date)
 
@@ -98,8 +94,8 @@ class StockBot(discord.Client):
             if channel is None:
                 continue
 
-            role = discord.utils.get(guild.roles, name=STONKERS_ROLE_NAME)
-            role_mention = role.mention if role is not None else f"@{STONKERS_ROLE_NAME}"
+            role = discord.utils.get(guild.roles, name=stonkers_role_name)
+            role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
             lines = []
             for idx, row in enumerate(top, start=1):
                 user_id = int(row["user_id"])
@@ -112,6 +108,16 @@ class StockBot(discord.Client):
             )
             await channel.send(content=f"{role_mention} market close update:", embed=embed)
             set_state_value(state_key, local_date)
+
+    def _backup_database_if_needed(self, local_date: str) -> None:
+        state_key = "db_backup_date"
+        if get_state_value(state_key) == local_date:
+            return
+        try:
+            create_database_backup(prefix="market_close")
+            set_state_value(state_key, local_date)
+        except Exception as exc:
+            print(f"[backup] failed to create market-close backup: {exc}")
 
     def _apply_rank_income_for_guild(self, guild_id: int, local_date: str) -> None:
         payout_state_key = f"rank_income_date:{guild_id}"
@@ -151,6 +157,7 @@ class StockBot(discord.Client):
 
 def run() -> None:
     init_db()
+    ensure_app_config_defaults()
     backfill_company_starting_ticks()
     bot = StockBot()
     bot.run(TOKEN)

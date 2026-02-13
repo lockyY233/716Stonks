@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from discord import Interaction
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE
-from stockbot.config import TRADING_FEES, TRADING_LIMITS, TRADING_LIMITS_PERIOD
+from stockbot.config.runtime import get_app_config
 from stockbot.db import (
     get_commodity,
     get_company,
@@ -53,8 +53,8 @@ def _get_current_tick() -> int:
 
 
 def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tuple[bool, str]:
-    limit = int(TRADING_LIMITS)
-    period = int(TRADING_LIMITS_PERIOD)
+    limit = int(get_app_config("TRADING_LIMITS"))
+    period = int(get_app_config("TRADING_LIMITS_PERIOD"))
     if limit <= 0:
         return True, ""
     if period <= 0:
@@ -167,7 +167,7 @@ async def perform_sell(
     avg_cost = (cost_basis_before / float(owned)) if owned > 0 else price
     cost_removed = avg_cost * shares
     realized_profit = max(0.0, gross_gain - cost_removed)
-    fee_ratio = max(0.0, float(TRADING_FEES)) / 100.0
+    fee_ratio = max(0.0, float(get_app_config("TRADING_FEES"))) / 100.0
     fee = realized_profit * fee_ratio
     net_gain = round(max(0.0, gross_gain - fee), 2)
 

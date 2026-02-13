@@ -70,3 +70,10 @@ Optional env overrides:
 - `DASHBOARD_HOST`
 - `DASHBOARD_PORT`
 - `DASHBOARD_DB_PATH`
+
+Features:
+- Main page shows live stock table + mini trends.
+- Left sidebar has quick controls for `base_price` and `slope`.
+- Click `Open` on a company to view `/company/<SYMBOL>`:
+  - live-updating chart
+  - editable parameters (`name`, `current_price`, `base_price`, `slope`, `drift`, `liquidity`, `impact_power`)
