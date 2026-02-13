@@ -24,10 +24,10 @@ def register_user(
 
         conn.execute(
             """
-            INSERT INTO users (guild_id, user_id, joined_at, bank, networth, display_name, rank)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (guild_id, user_id, joined_at, bank, networth, owe, display_name, rank)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, joined_at, bank, 0.0, display_name, rank),
+            (guild_id, user_id, joined_at, bank, 0.0, 0.0, display_name, rank),
         )
         return True
 
@@ -36,7 +36,7 @@ def get_user(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, networth, display_name, rank
+            SELECT guild_id, user_id, joined_at, bank, networth, owe, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
@@ -49,7 +49,7 @@ def get_users(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT user_id, bank, networth, display_name, rank, joined_at
+            SELECT user_id, bank, networth, owe, display_name, rank, joined_at
             FROM users
             WHERE guild_id = ?
             ORDER BY networth DESC, bank DESC, user_id ASC
@@ -439,6 +439,7 @@ def update_user_admin_fields(
 ) -> bool:
     allowed = {
         "bank": float,
+        "owe": float,
         "rank": str,
     }
     sets: list[str] = []
@@ -659,7 +660,7 @@ def get_user_status(guild_id: int, user_id: int) -> dict | None:
     with get_connection() as conn:
         user = conn.execute(
             """
-            SELECT guild_id, user_id, joined_at, bank, networth, display_name, rank
+            SELECT guild_id, user_id, joined_at, bank, networth, owe, display_name, rank
             FROM users
             WHERE guild_id = ? AND user_id = ?
             """,
@@ -745,6 +746,370 @@ def set_holding(
             """,
             (guild_id, user_id, symbol, shares),
         )
+
+
+def add_action_history(
+    guild_id: int,
+    user_id: int,
+    action_type: str,
+    target_type: str,
+    target_symbol: str,
+    quantity: float,
+    unit_price: float,
+    total_amount: float,
+    details: str,
+    created_at: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO action_history (
+                guild_id,
+                user_id,
+                action_type,
+                target_type,
+                target_symbol,
+                quantity,
+                unit_price,
+                total_amount,
+                details,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                action_type,
+                target_type,
+                target_symbol,
+                float(quantity),
+                float(unit_price),
+                float(total_amount),
+                details,
+                created_at,
+            ),
+        )
+
+
+def get_action_history(
+    guild_id: int,
+    limit: int = 300,
+) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ah.id,
+                ah.guild_id,
+                ah.user_id,
+                COALESCE(u.display_name, '') AS display_name,
+                ah.action_type,
+                ah.target_type,
+                ah.target_symbol,
+                ah.quantity,
+                ah.unit_price,
+                ah.total_amount,
+                ah.details,
+                ah.created_at
+            FROM action_history ah
+            LEFT JOIN users u
+              ON u.guild_id = ah.guild_id
+             AND u.user_id = ah.user_id
+            WHERE ah.guild_id = ?
+            ORDER BY ah.id DESC
+            LIMIT ?
+            """,
+            (guild_id, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def create_bank_request(
+    guild_id: int,
+    user_id: int,
+    request_type: str,
+    amount: float,
+    reason: str,
+    created_at: str,
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO bank_requests (
+                guild_id,
+                user_id,
+                request_type,
+                amount,
+                reason,
+                status,
+                decision_reason,
+                reviewed_by,
+                created_at,
+                reviewed_at,
+                processed_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending', '', 0, ?, '', '')
+            """,
+            (
+                guild_id,
+                user_id,
+                request_type,
+                max(0.0, float(amount)),
+                reason,
+                created_at,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def add_feedback(
+    guild_id: int,
+    message: str,
+    created_at: str,
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO feedback (
+                guild_id,
+                message,
+                created_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                guild_id,
+                message,
+                created_at,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_feedback(
+    guild_id: int | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    where = ""
+    values: list[object] = []
+    if guild_id is not None:
+        where = "WHERE guild_id = ?"
+        values.append(int(guild_id))
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, guild_id, message, created_at
+            FROM feedback
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (*values, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_bank_requests(
+    *,
+    guild_id: int | None = None,
+    status: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    where_parts: list[str] = []
+    values: list[object] = []
+    if guild_id is not None:
+        where_parts.append("br.guild_id = ?")
+        values.append(int(guild_id))
+    if status is not None:
+        where_parts.append("br.status = ?")
+        values.append(str(status))
+
+    where_clause = ""
+    if where_parts:
+        where_clause = "WHERE " + " AND ".join(where_parts)
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                br.id,
+                br.guild_id,
+                br.user_id,
+                COALESCE(u.display_name, '') AS display_name,
+                br.request_type,
+                br.amount,
+                br.reason,
+                br.status,
+                br.decision_reason,
+                br.reviewed_by,
+                br.created_at,
+                br.reviewed_at,
+                br.processed_at
+            FROM bank_requests br
+            LEFT JOIN users u
+              ON u.guild_id = br.guild_id
+             AND u.user_id = br.user_id
+            {where_clause}
+            ORDER BY br.id DESC
+            LIMIT ?
+            """,
+            (*values, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def set_bank_request_decision(
+    *,
+    request_id: int,
+    status: str,
+    reviewed_by: int,
+    decision_reason: str,
+    reviewed_at: str,
+) -> bool:
+    if status not in {"approved", "denied"}:
+        return False
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE bank_requests
+            SET status = ?,
+                decision_reason = ?,
+                reviewed_by = ?,
+                reviewed_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (
+                status,
+                decision_reason,
+                int(reviewed_by),
+                reviewed_at,
+                int(request_id),
+            ),
+        )
+        return cur.rowcount > 0
+
+
+def get_unprocessed_reviewed_bank_requests(
+    *,
+    guild_id: int | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    where_parts = ["status IN ('approved', 'denied')", "processed_at = ''"]
+    values: list[object] = []
+    if guild_id is not None:
+        where_parts.append("guild_id = ?")
+        values.append(int(guild_id))
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, guild_id, user_id, request_type, amount, reason, status, decision_reason, reviewed_by, created_at, reviewed_at, processed_at
+            FROM bank_requests
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (*values, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def mark_bank_request_processed(request_id: int, processed_at: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE bank_requests
+            SET processed_at = ?
+            WHERE id = ?
+            """,
+            (processed_at, int(request_id)),
+        )
+
+
+def apply_approved_loan(
+    *,
+    guild_id: int,
+    user_id: int,
+    amount: float,
+) -> bool:
+    delta = max(0.0, float(amount))
+    if delta <= 0:
+        return False
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT bank, owe
+            FROM users
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        if row is None:
+            return False
+        bank = float(row["bank"])
+        owe = float(row["owe"])
+        conn.execute(
+            """
+            UPDATE users
+            SET bank = ?,
+                owe = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (bank + delta, owe + delta, guild_id, user_id),
+        )
+        return True
+
+
+def repay_user_loan(
+    *,
+    guild_id: int,
+    user_id: int,
+    amount: float,
+) -> dict | None:
+    requested = max(0.0, float(amount))
+    if requested <= 0:
+        return None
+
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT bank, owe
+            FROM users
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+
+        bank = float(row["bank"])
+        owe = float(row["owe"])
+        paid = min(requested, bank, owe)
+        if paid <= 0:
+            return {
+                "paid": 0.0,
+                "bank_after": bank,
+                "owe_after": owe,
+            }
+
+        bank_after = bank - paid
+        owe_after = owe - paid
+        conn.execute(
+            """
+            UPDATE users
+            SET bank = ?,
+                owe = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (bank_after, owe_after, guild_id, user_id),
+        )
+        return {
+            "paid": paid,
+            "bank_after": bank_after,
+            "owe_after": owe_after,
+        }
 
 
 def create_database_backup(

@@ -184,6 +184,7 @@ class AdminShowPager(View):
             return "\n".join(
                 [
                     f"bank={float(row.get('bank', 0.0)):.2f}",
+                    f"owe={float(row.get('owe', 0.0)):.2f}",
                     f"rank={row.get('rank', '')}",
                 ]
             )
@@ -230,9 +231,9 @@ class AdminShowPager(View):
         )
         if member is not None:
             embed.set_thumbnail(url=member.display_avatar.url)
-        for key in ("user_id", "display_name", "bank", "networth", "rank", "joined_at"):
+        for key in ("user_id", "display_name", "bank", "networth", "owe", "rank", "joined_at"):
             value = row.get(key)
-            if key in {"bank", "networth"} and value is not None:
+            if key in {"bank", "networth", "owe"} and value is not None:
                 text = f"{float(value):.2f}"
             else:
                 text = str(value)

@@ -60,7 +60,6 @@ def build_player_impact_curve(
     buf.seek(0)
     return File(buf, filename=f"{symbol.lower()}_impact_curve.png")
 
-
 def build_price_projection_curve(
     *,
     symbol: str,

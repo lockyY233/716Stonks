@@ -20,6 +20,9 @@ from stockbot.commands.wipe import setup_wipe
 from stockbot.commands.adminshow import setup_adminshow
 from stockbot.commands.desc import setup_desc
 from stockbot.commands.webadmin import setup_webadmin
+from stockbot.commands.bank import setup_bank
+from stockbot.commands.nextreset import setup_nextreset
+from stockbot.commands.feedback import setup_feedback
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -43,3 +46,6 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_adminshow(tree)
     setup_desc(tree)
     setup_webadmin(tree)
+    setup_bank(tree)
+    setup_nextreset(tree)
+    setup_feedback(tree)

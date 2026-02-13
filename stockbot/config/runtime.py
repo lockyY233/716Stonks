@@ -10,6 +10,7 @@ from stockbot.config.settings import (
     DRIFT_NOISE_LOW_FREQ_RATIO,
     DRIFT_NOISE_LOW_GAIN,
     MARKET_CLOSE_HOUR,
+    ANNOUNCEMENT_CHANNEL_ID,
     START_BALANCE,
     STONKERS_ROLE_NAME,
     TICK_INTERVAL,
@@ -58,6 +59,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         default=str(STONKERS_ROLE_NAME),
         cast=str,
         description="Role granted on registration and pinged on close updates.",
+    ),
+    "ANNOUNCEMENT_CHANNEL_ID": AppConfigSpec(
+        default=int(ANNOUNCEMENT_CHANNEL_ID),
+        cast=int,
+        description="Discord channel ID used for announcements; 0 means auto-pick.",
     ),
     "DRIFT_NOISE_FREQUENCY": AppConfigSpec(
         default=float(DRIFT_NOISE_FREQUENCY),
@@ -116,6 +122,8 @@ def _normalize(name: str, value: Any) -> Any:
     if name == "STONKERS_ROLE_NAME":
         text = str(value).strip()
         return text or str(STONKERS_ROLE_NAME)
+    if name == "ANNOUNCEMENT_CHANNEL_ID":
+        return max(0, int(value))
     if name == "DRIFT_NOISE_FREQUENCY":
         return max(0.0, min(1.0, float(value)))
     if name == "DRIFT_NOISE_GAIN":

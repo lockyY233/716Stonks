@@ -2,8 +2,14 @@ from discord import ButtonStyle, Interaction
 from discord.ui import Modal, TextInput, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
+from stockbot.config.runtime import get_app_config
 from stockbot.db import get_commodity, get_company
-from stockbot.services.trading import perform_buy, perform_buy_commodity, perform_sell
+from stockbot.services.trading import (
+    perform_buy,
+    perform_buy_commodity,
+    perform_sell,
+    preview_sell_transaction,
+)
 
 
 class BuySharesModal(Modal):
@@ -110,8 +116,14 @@ class ChooseBuySymbolModal(Modal):
             )
             return
         price = float(company.get("current_price", company["base_price"]))
+        fee_pct = max(0.0, float(get_app_config("TRADING_FEES")))
+        total = price
         await interaction.response.send_message(
-            f"Confirm buy action for {symbol} @ 💰**${price:.2f}**:",
+            (
+                f"Confirm buy action for {symbol} @ 💰**${price:.2f}**:\n"
+                f"Transaction fee: {fee_pct:.2f}% on realized sell profit only (buy fee: $0.00).\n"
+                f"Total (1 share): **${total:.2f}**"
+            ),
             view=BuyConfirmView(symbol),
             ephemeral=True,
         )
@@ -209,8 +221,27 @@ class ChooseSellSymbolModal(Modal):
             )
             return
         price = float(company.get("current_price", company["base_price"]))
+        preview = preview_sell_transaction(
+            interaction.guild.id,
+            interaction.user.id,
+            symbol,
+            shares=1,
+        )
+        if preview is None:
+            fee_line = "Transaction fee: calculated at execution time."
+            total_line = f"Total (1 share): **${price:.2f}** (gross)."
+        else:
+            fee_line = f"Transaction fee: {preview['fee_percent']:.2f}% => ${preview['fee']:.2f}."
+            total_line = (
+                f"Total (1 share): **${preview['net_gain']:.2f}** "
+                f"(gross ${preview['gross_gain']:.2f})."
+            )
         await interaction.response.send_message(
-            f"Confirm sell action for {symbol} @ 💰**${price:.2f}**:",
+            (
+                f"Confirm sell action for {symbol} @ 💰**${price:.2f}**:\n"
+                f"{fee_line}\n"
+                f"{total_line}"
+            ),
             view=SellConfirmView(symbol),
             ephemeral=True,
         )

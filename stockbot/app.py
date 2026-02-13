@@ -9,12 +9,16 @@ from stockbot.commands import setup_commands
 from stockbot.config.runtime import ensure_app_config_defaults, get_app_config
 from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME, TOKEN
 from stockbot.db import (
+    add_action_history,
+    apply_approved_loan,
     backfill_company_starting_ticks,
     create_database_backup,
+    get_unprocessed_reviewed_bank_requests,
     get_top_users_by_networth,
     get_state_value,
     get_users,
     init_db,
+    mark_bank_request_processed,
     recalc_all_networth,
     set_state_value,
     update_user_bank,
@@ -59,14 +63,87 @@ class StockBot(discord.Client):
             await asyncio.to_thread(process_ticks, tick_indices, guild_ids)
             set_state_value("last_tick", str(next_tick))
             set_state_value("last_tick_epoch", str(time.time()))
+            await self._process_bank_requests()
             await self._maybe_send_market_close_announcement()
 
             await asyncio.sleep(tick_interval)
+
+    async def _process_bank_requests(self) -> None:
+        rows = await asyncio.to_thread(
+            get_unprocessed_reviewed_bank_requests,
+            limit=200,
+        )
+        if not rows:
+            return
+
+        announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            request_id = int(row["id"])
+            guild_id = int(row["guild_id"])
+            user_id = int(row["user_id"])
+            status = str(row.get("status", ""))
+            amount = float(row.get("amount", 0.0))
+            request_type = str(row.get("request_type", "loan"))
+            decision_reason = str(row.get("decision_reason", "")).strip()
+
+            applied = False
+            if status == "approved" and request_type == "loan":
+                applied = await asyncio.to_thread(
+                    apply_approved_loan,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    amount=amount,
+                )
+                if applied:
+                    await asyncio.to_thread(
+                        add_action_history,
+                        guild_id,
+                        user_id,
+                        "loan_approved",
+                        "bank",
+                        "LOAN",
+                        amount,
+                        1.0,
+                        amount,
+                        decision_reason,
+                        now_iso,
+                    )
+
+            guild = self.get_guild(guild_id)
+            if guild is not None:
+                channel = await self._pick_announcement_channel(guild, announcement_channel_id)
+                if channel is not None:
+                    if status == "approved":
+                        if applied:
+                            message = (
+                                f"<@{user_id}> your bank loan request was approved for `${amount:.2f}`."
+                            )
+                        else:
+                            message = (
+                                f"<@{user_id}> your bank loan request was approved,"
+                                " but applying funds failed. Contact admin."
+                            )
+                    else:
+                        message = f"<@{user_id}> your bank request was denied."
+                    if decision_reason:
+                        message += f"\nReason: {decision_reason}"
+                    try:
+                        await channel.send(message)
+                    except Exception as exc:
+                        print(
+                            f"[announce] failed to send bank notification "
+                            f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')} "
+                            f"request_id={request_id}: {exc}"
+                        )
+
+            await asyncio.to_thread(mark_bank_request_processed, request_id, now_iso)
 
     async def _maybe_send_market_close_announcement(self) -> None:
         display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
         market_close_hour = int(get_app_config("MARKET_CLOSE_HOUR"))
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
+        announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
         try:
             tz = ZoneInfo(display_timezone)
         except Exception:
@@ -90,7 +167,7 @@ class StockBot(discord.Client):
                 set_state_value(state_key, local_date)
                 continue
 
-            channel = self._pick_announcement_channel(guild)
+            channel = await self._pick_announcement_channel(guild, announcement_channel_id)
             if channel is None:
                 continue
 
@@ -106,7 +183,13 @@ class StockBot(discord.Client):
                 title="Market Close: Commodity Networth Leaders",
                 description="\n".join(lines),
             )
-            await channel.send(content=f"{role_mention} market close update:", embed=embed)
+            try:
+                await channel.send(content=f"{role_mention} market close update:", embed=embed)
+            except Exception as exc:
+                print(
+                    f"[announce] failed to send market-close update "
+                    f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}: {exc}"
+                )
             set_state_value(state_key, local_date)
 
     def _backup_database_if_needed(self, local_date: str) -> None:
@@ -142,16 +225,32 @@ class StockBot(discord.Client):
 
         set_state_value(payout_state_key, local_date)
 
-    def _pick_announcement_channel(self, guild: discord.Guild) -> discord.abc.Messageable | None:
+    async def _pick_announcement_channel(
+        self,
+        guild: discord.Guild,
+        preferred_channel_id: int = 0,
+    ) -> discord.abc.Messageable | None:
+        # Explicit config: try this channel first.
+        if preferred_channel_id > 0:
+            channel = guild.get_channel(preferred_channel_id) or self.get_channel(preferred_channel_id)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(preferred_channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    channel = None
+            if isinstance(channel, (discord.TextChannel, discord.Thread)) and channel.guild.id == guild.id:
+                return channel
+            print(
+                f"[announce] configured ANNOUNCEMENT_CHANNEL_ID={preferred_channel_id} "
+                f"not usable in guild={guild.id}; falling back to auto-pick."
+            )
+
+        # Auto mode fallback.
         if guild.system_channel is not None:
-            perms = guild.system_channel.permissions_for(guild.me) if guild.me is not None else None
-            if perms is not None and perms.send_messages:
-                return guild.system_channel
+            return guild.system_channel
 
         for channel in guild.text_channels:
-            perms = channel.permissions_for(guild.me) if guild.me is not None else None
-            if perms is not None and perms.send_messages:
-                return channel
+            return channel
         return None
 
 

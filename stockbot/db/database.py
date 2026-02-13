@@ -22,6 +22,7 @@ def init_db() -> None:
                 joined_at TEXT NOT NULL,
                 bank REAL NOT NULL,
                 networth REAL NOT NULL DEFAULT 0,
+                owe REAL NOT NULL DEFAULT 0,
                 display_name TEXT NOT NULL DEFAULT '',
                 rank TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
@@ -106,15 +107,54 @@ def init_db() -> None:
                     REFERENCES commodities (guild_id, name)
                     ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS action_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_symbol TEXT NOT NULL DEFAULT '',
+                quantity REAL NOT NULL DEFAULT 0,
+                unit_price REAL NOT NULL DEFAULT 0,
+                total_amount REAL NOT NULL DEFAULT 0,
+                details TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bank_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                request_type TEXT NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                decision_reason TEXT NOT NULL DEFAULT '',
+                reviewed_by INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL DEFAULT '',
+                processed_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _ensure_users_bank_type(conn)
         _ensure_rank_column(conn)
         _ensure_display_name_column(conn)
         _ensure_networth_column(conn)
+        _ensure_owe_column(conn)
         _ensure_company_columns(conn)
         _ensure_price_history_columns(conn)
         _ensure_commodities_tables(conn)
+        _ensure_bank_requests_table(conn)
+        _ensure_feedback_table(conn)
 
 
 def _ensure_rank_column(conn: sqlite3.Connection) -> None:
@@ -157,6 +197,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             joined_at TEXT NOT NULL,
             bank REAL NOT NULL,
             networth REAL NOT NULL DEFAULT 0,
+            owe REAL NOT NULL DEFAULT 0,
             display_name TEXT NOT NULL DEFAULT '',
             rank TEXT NOT NULL,
             PRIMARY KEY (guild_id, user_id)
@@ -168,6 +209,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             joined_at,
             bank,
             networth,
+            owe,
             display_name,
             rank
         )
@@ -177,6 +219,7 @@ def _ensure_users_bank_type(conn: sqlite3.Connection) -> None:
             joined_at,
             bank,
             0 AS networth,
+            0 AS owe,
             '' AS display_name,
             rank
         FROM users;
@@ -195,6 +238,17 @@ def _ensure_networth_column(conn: sqlite3.Connection) -> None:
     if "networth" not in columns:
         conn.execute(
             "ALTER TABLE users ADD COLUMN networth REAL NOT NULL DEFAULT 0;"
+        )
+
+
+def _ensure_owe_column(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(users);").fetchall()
+    }
+    if "owe" not in columns:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN owe REAL NOT NULL DEFAULT 0;"
         )
 
 
@@ -234,6 +288,40 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE commodities ADD COLUMN rarity TEXT NOT NULL DEFAULT 'common';"
         )
+
+
+def _ensure_bank_requests_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS bank_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            request_type TEXT NOT NULL,
+            amount REAL NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            decision_reason TEXT NOT NULL DEFAULT '',
+            reviewed_by INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL DEFAULT '',
+            processed_at TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+
+
+def _ensure_feedback_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
 
 
 def _ensure_company_columns(conn: sqlite3.Connection) -> None:

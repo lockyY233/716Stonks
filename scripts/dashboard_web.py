@@ -26,6 +26,7 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "DISPLAY_TIMEZONE": _CfgSpec("America/New_York", str, "Timezone used for display and market-close checks."),
     "MARKET_CLOSE_HOUR": _CfgSpec(21, int, "Local hour (0-23) used for daily market close logic."),
     "STONKERS_ROLE_NAME": _CfgSpec("📈💰📊Stonkers", str, "Role granted on registration and pinged on close updates."),
+    "ANNOUNCEMENT_CHANNEL_ID": _CfgSpec(0, int, "Discord channel ID used for announcements; 0 means auto-pick."),
     "DRIFT_NOISE_FREQUENCY": _CfgSpec(0.7, float, "Normalized fast noise frequency [0,1]."),
     "DRIFT_NOISE_GAIN": _CfgSpec(0.8, float, "Fast noise gain multiplier."),
     "DRIFT_NOISE_LOW_FREQ_RATIO": _CfgSpec(0.08, float, "Low-band frequency ratio relative to fast frequency."),
@@ -100,7 +101,7 @@ MAIN_HTML = """<!doctype html>
     .tableWrap { overflow: auto; width: 100%; }
     .statsBar {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
       padding: 10px 14px 12px 14px;
       border-bottom: 1px solid var(--line);
@@ -141,6 +142,9 @@ MAIN_HTML = """<!doctype html>
           <button id="showCompanies" class="active">Show Companies</button>
           <button id="showCommodities">Show Commodities</button>
           <button id="showPlayers">Show Players</button>
+          <button id="showFeedback">Feedback</button>
+          <button id="showBankActions">Bank Actions</button>
+          <button id="showActionHistory">Action History</button>
           <button id="showConfigs">Show App Configs</button>
           <button id="showServerSettings">Server Settings</button>
           <a class="btn" href="{{ db_access_url }}" target="_blank" rel="noopener">Open Database Access</a>
@@ -157,6 +161,10 @@ MAIN_HTML = """<!doctype html>
         <div class="stat">
           <div class="statLabel">Until Close</div>
           <div class="statValue" id="statUntilClose">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Until Next Reset</div>
+          <div class="statValue" id="statUntilReset">-</div>
         </div>
         <div class="stat">
           <div class="statLabel">Companies</div>
@@ -183,6 +191,8 @@ MAIN_HTML = """<!doctype html>
     let pollTimer = null;
     let pollMs = 2000;
     let untilCloseSeconds = null;
+    let untilResetSeconds = null;
+    const ET_TIMEZONE = "America/New_York";
     const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
     function fmtMoney(v) { return "$" + Number(v).toFixed(2); }
     function fmtNum(v, d=4) { return Number(v).toFixed(d); }
@@ -195,6 +205,23 @@ MAIN_HTML = """<!doctype html>
     }
     function esc(text) {
       return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function fmtEtDate(value) {
+      const dt = value ? new Date(value) : new Date();
+      if (Number.isNaN(dt.getTime())) return String(value || "-");
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: ET_TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(dt);
+      const map = {};
+      parts.forEach((p) => { map[p.type] = p.value; });
+      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
     }
     function withAuthToken(url) {
       if (!URL_AUTH_TOKEN) return url;
@@ -209,6 +236,9 @@ MAIN_HTML = """<!doctype html>
       if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
       if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
       if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
+      if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
+      if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
+      if (currentTab === "actionHistory") document.getElementById("showActionHistory").classList.add("active");
       if (currentTab === "configs") document.getElementById("showConfigs").classList.add("active");
       if (currentTab === "serverSettings") document.getElementById("showServerSettings").classList.add("active");
     }
@@ -322,11 +352,11 @@ MAIN_HTML = """<!doctype html>
     function renderPlayers(rows) {
       document.getElementById("tableTitle").textContent = "Players";
       document.getElementById("thead").innerHTML = `<tr>
-        <th>User</th><th>Rank</th><th>Bank</th><th>Networth</th>
+        <th>User</th><th>Rank</th><th>Bank</th><th>Networth</th><th>Owe</th><th>Trading Limit</th>
       </tr>`;
       const tbody = document.getElementById("rows");
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No players found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No players found.</td></tr>';
         return;
       }
       tbody.innerHTML = rows.map((r) => `<tr class="clickable" data-user="${esc(r.user_id)}">
@@ -334,11 +364,148 @@ MAIN_HTML = """<!doctype html>
         <td>${esc(r.rank || "-")}</td>
         <td class="mono">${fmtMoney(r.bank)}</td>
         <td class="mono">${fmtMoney(r.networth)}</td>
+        <td class="mono">${fmtMoney(r.owe || 0)}</td>
+        <td class="mono">${
+          r.trade_limit_enabled
+            ? `${Number(r.trade_limit_remaining || 0)}/${Number(r.trade_limit_limit || 0)}`
+            : "Disabled"
+        }</td>
       </tr>`).join("");
       document.querySelectorAll("tr[data-user]").forEach((tr) => {
         tr.addEventListener("click", () => {
           const uid = tr.getAttribute("data-user");
           gotoWithAuth(`/player/${encodeURIComponent(uid)}`);
+        });
+      });
+    }
+    function renderActionHistory(rows) {
+      document.getElementById("tableTitle").textContent = "Action History";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>When (UTC)</th><th>User</th><th>Action</th><th>Target</th><th>Qty</th><th>Unit</th><th>Total</th><th>Details</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No player actions recorded yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr>
+        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
+        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
+        <td>${esc(String(r.action_type || "").toUpperCase())}</td>
+        <td>${esc(String(r.target_type || "").toUpperCase())}: <span class="mono">${esc(r.target_symbol || "-")}</span></td>
+        <td class="mono">${fmtNum(r.quantity || 0, 2)}</td>
+        <td class="mono">${fmtMoney(r.unit_price || 0)}</td>
+        <td class="mono">${fmtMoney(r.total_amount || 0)}</td>
+        <td>${esc(r.details || "")}</td>
+      </tr>`).join("");
+    }
+    function renderFeedback(rows) {
+      document.getElementById("tableTitle").textContent = "Feedback";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>ID</th><th>When (ET)</th><th>Message</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-feedback-id="${esc(String(r.id || ""))}">
+        <td class="mono">${esc(String(r.id || ""))}</td>
+        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
+        <td>${esc(r.message || "")}</td>
+        <td><button data-feedback-delete="${esc(String(r.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
+      </tr>`).join("");
+      document.querySelectorAll("button[data-feedback-delete]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-feedback-delete");
+          if (!id) return;
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = "Deleting...";
+          try {
+            const res = await fetch(withAuthToken(`/api/feedback/${encodeURIComponent(id)}`), { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              btn.textContent = err.error || "Failed";
+              btn.disabled = false;
+              return;
+            }
+            const tr = document.querySelector(`tr[data-feedback-id="${CSS.escape(id)}"]`);
+            if (tr) tr.remove();
+            if (!document.querySelector("tr[data-feedback-id]")) {
+              document.getElementById("rows").innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+            btn.disabled = false;
+            return;
+          }
+          btn.textContent = original;
+          btn.disabled = false;
+        });
+      });
+    }
+    function renderBankActions(rows) {
+      document.getElementById("tableTitle").textContent = "Bank Actions";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>ID</th><th>Created (UTC)</th><th>User</th><th>Type</th><th>Amount</th><th>Reason</th><th>Decision</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-bank-request="${esc(String(r.id))}">
+        <td class="mono">${esc(String(r.id))}</td>
+        <td class="mono">${esc(r.created_at || "-")}</td>
+        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
+        <td>${esc(String(r.request_type || "").toUpperCase())}</td>
+        <td class="mono">${fmtMoney(r.amount || 0)}</td>
+        <td>${esc(r.reason || "-")}</td>
+        <td>
+          <input data-bank-reason="${esc(String(r.id))}" placeholder="Optional reason..." style="width:100%;padding:6px 8px;margin-bottom:6px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button data-bank-approve="${esc(String(r.id))}" style="padding:6px 10px;background:#166534;border-color:#22c55e;">Approve</button>
+            <button data-bank-deny="${esc(String(r.id))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;">Deny</button>
+          </div>
+        </td>
+      </tr>`).join("");
+
+      document.querySelectorAll("button[data-bank-approve],button[data-bank-deny]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-bank-approve") || btn.getAttribute("data-bank-deny");
+          if (!id) return;
+          const isApprove = btn.hasAttribute("data-bank-approve");
+          const reasonInput = document.querySelector(`input[data-bank-reason="${CSS.escape(id)}"]`);
+          const reason = reasonInput ? String(reasonInput.value || "").trim() : "";
+          const url = isApprove
+            ? `/api/bank-requests/${encodeURIComponent(id)}/approve`
+            : `/api/bank-requests/${encodeURIComponent(id)}/deny`;
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = isApprove ? "Approving..." : "Denying...";
+          try {
+            const res = await fetch(withAuthToken(url), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ reason }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              btn.textContent = err.error || "Failed";
+            } else {
+              const tr = document.querySelector(`tr[data-bank-request="${CSS.escape(id)}"]`);
+              if (tr) tr.remove();
+              if (!document.querySelector("tr[data-bank-request]")) {
+                document.getElementById("rows").innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
+              }
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+          } finally {
+            btn.disabled = false;
+            if (btn.textContent !== "Failed") btn.textContent = original;
+          }
         });
       });
     }
@@ -477,19 +644,37 @@ MAIN_HTML = """<!doctype html>
       const res = await fetch(withAuthToken("/api/stocks"), { cache: "no-store" });
       const data = await res.json();
       renderCompanies(data.stocks || []);
-      document.getElementById("last").textContent = data.server_time_utc || new Date().toISOString();
+      document.getElementById("last").textContent = fmtEtDate(data.server_time_utc || "");
     }
     async function loadCommodities() {
       const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
       const data = await res.json();
       renderCommodities(data.commodities || []);
-      document.getElementById("last").textContent = new Date().toISOString();
+      document.getElementById("last").textContent = fmtEtDate();
     }
     async function loadPlayers() {
       const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
       const data = await res.json();
       renderPlayers(data.players || []);
-      document.getElementById("last").textContent = new Date().toISOString();
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadActionHistory() {
+      const res = await fetch(withAuthToken("/api/action-history"), { cache: "no-store" });
+      const data = await res.json();
+      renderActionHistory(data.actions || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadFeedback() {
+      const res = await fetch(withAuthToken("/api/feedback"), { cache: "no-store" });
+      const data = await res.json();
+      renderFeedback(data.feedback || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadBankActions() {
+      const res = await fetch(withAuthToken("/api/bank-requests?status=pending"), { cache: "no-store" });
+      const data = await res.json();
+      renderBankActions(data.requests || []);
+      document.getElementById("last").textContent = fmtEtDate();
     }
     async function loadHeaderStats() {
       try {
@@ -502,22 +687,33 @@ MAIN_HTML = """<!doctype html>
         } else {
           document.getElementById("statUntilClose").textContent = data.until_close || "-";
         }
+        if (Number.isFinite(Number(data.seconds_until_reset))) {
+          untilResetSeconds = Math.max(0, Number(data.seconds_until_reset));
+          document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
+        } else {
+          document.getElementById("statUntilReset").textContent = data.until_reset || "-";
+        }
         document.getElementById("statCompanies").textContent = String(data.company_count ?? "-");
         document.getElementById("statUsers").textContent = String(data.user_count ?? "-");
       } catch (_e) {}
     }
-    function startUntilCloseTicker() {
+    function startHeaderTicker() {
       setInterval(() => {
         if (!Number.isFinite(untilCloseSeconds)) return;
         untilCloseSeconds = Math.max(0, untilCloseSeconds - 1);
         document.getElementById("statUntilClose").textContent = fmtHMS(untilCloseSeconds);
+      }, 1000);
+      setInterval(() => {
+        if (!Number.isFinite(untilResetSeconds)) return;
+        untilResetSeconds = Math.max(0, untilResetSeconds - 1);
+        document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
       }, 1000);
     }
     async function loadConfigs() {
       const res = await fetch(withAuthToken("/api/app-configs"), { cache: "no-store" });
       const data = await res.json();
       renderConfigs(data.configs || []);
-      document.getElementById("last").textContent = new Date().toISOString();
+      document.getElementById("last").textContent = fmtEtDate();
     }
     async function tick() {
       const active = document.activeElement;
@@ -530,6 +726,9 @@ MAIN_HTML = """<!doctype html>
         if (currentTab === "companies") await loadCompanies();
         else if (currentTab === "commodities") await loadCommodities();
         else if (currentTab === "players") await loadPlayers();
+        else if (currentTab === "feedback") await loadFeedback();
+        else if (currentTab === "bankActions") await loadBankActions();
+        else if (currentTab === "actionHistory") await loadActionHistory();
         else if (currentTab === "configs") await loadConfigs();
         else return;
       } catch (_e) {}
@@ -551,12 +750,15 @@ MAIN_HTML = """<!doctype html>
     document.getElementById("showCompanies").addEventListener("click", () => { currentTab = "companies"; setButtons(); tick(); });
     document.getElementById("showCommodities").addEventListener("click", () => { currentTab = "commodities"; setButtons(); tick(); });
     document.getElementById("showPlayers").addEventListener("click", () => { currentTab = "players"; setButtons(); tick(); });
+    document.getElementById("showFeedback").addEventListener("click", () => { currentTab = "feedback"; setButtons(); tick(); });
+    document.getElementById("showBankActions").addEventListener("click", () => { currentTab = "bankActions"; setButtons(); tick(); });
+    document.getElementById("showActionHistory").addEventListener("click", () => { currentTab = "actionHistory"; setButtons(); tick(); });
     document.getElementById("showConfigs").addEventListener("click", () => { currentTab = "configs"; setButtons(); tick(); });
     document.getElementById("showServerSettings").addEventListener("click", () => { currentTab = "serverSettings"; setButtons(); renderServerSettings(); });
     setButtons();
     tick();
     syncPollInterval();
-    startUntilCloseTicker();
+    startHeaderTicker();
     setInterval(syncPollInterval, 30000);
   </script>
 </body>
@@ -647,6 +849,7 @@ DETAIL_HTML = """<!doctype html>
   <script>
     const SYMBOL = {{ symbol|tojson }};
     const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    const ET_TIMEZONE = "America/New_York";
     const RECENT_COUNT = 80;
     let showRecent = true;
     let historyAll = [];
@@ -659,6 +862,23 @@ DETAIL_HTML = """<!doctype html>
     function wireBackLink() {
       const back = el("backLink");
       if (back) back.href = withAuthToken("/");
+    }
+    function fmtEtDate(value) {
+      const dt = value ? new Date(value) : new Date();
+      if (Number.isNaN(dt.getTime())) return String(value || "-");
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: ET_TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(dt);
+      const map = {};
+      parts.forEach((p) => { map[p.type] = p.value; });
+      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
     }
 
     function drawLine(values) {
@@ -730,7 +950,7 @@ DETAIL_HTML = """<!doctype html>
       fillForm(data.company);
       historyAll = Array.isArray(data.history_prices) ? data.history_prices : [];
       refreshChart();
-      el("last").textContent = data.server_time_utc || new Date().toISOString();
+      el("last").textContent = fmtEtDate(data.server_time_utc || "");
     }
 
     async function save() {
@@ -934,8 +1154,12 @@ PLAYER_DETAIL_HTML = """<!doctype html>
         <div><label>Networth</label><input id="networth" type="number" step="0.01" /></div>
       </div>
       <div class="row">
+        <div><label>Owe</label><input id="owe" type="number" step="0.01" /></div>
         <div><label>Rank</label><input id="rank" /></div>
-        <div></div>
+      </div>
+      <div class="row">
+        <div><label>Current Trade Limit (read-only)</label><input id="trade_limit_status" readonly /></div>
+        <div><label>Trade Usage Action</label><button id="resetTradeBtn" type="button" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Reset Trade Usage</button></div>
       </div>
       <button id="saveBtn">Save</button>
       <div id="msg" class="muted" style="margin-top:8px;"></div>
@@ -963,12 +1187,21 @@ PLAYER_DETAIL_HTML = """<!doctype html>
       el("joined_at").value = p.joined_at || "";
       el("bank").value = Number(p.bank).toFixed(2);
       el("networth").value = Number(p.networth).toFixed(2);
+      el("owe").value = Number(p.owe || 0).toFixed(2);
       el("rank").value = p.rank || "";
+      if (p.trade_limit_enabled) {
+        el("trade_limit_status").value =
+          `${Number(p.trade_limit_remaining || 0)}/${Number(p.trade_limit_limit || 0)} shares remaining `
+          + `(${Number(p.trade_limit_used || 0)} used, ${Number(p.trade_limit_window_minutes || 0).toFixed(2)} min window)`;
+      } else {
+        el("trade_limit_status").value = "Disabled";
+      }
     }
     async function save() {
       const payload = {
         bank: Number(el("bank").value),
         networth: Number(el("networth").value),
+        owe: Number(el("owe").value),
         rank: el("rank").value,
       };
       const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/update`), {
@@ -984,7 +1217,29 @@ PLAYER_DETAIL_HTML = """<!doctype html>
       }
       await load();
     }
+    async function resetTradeUsage() {
+      const btn = el("resetTradeBtn");
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Resetting...";
+      try {
+        const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/reset-trade-usage`), {
+          method: "POST",
+        });
+        if (res.ok) {
+          el("msg").textContent = "Trade usage reset.";
+        } else {
+          const err = await res.json().catch(()=>({error:"Failed"}));
+          el("msg").textContent = err.error || "Reset failed.";
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+      await load();
+    }
     el("saveBtn").addEventListener("click", save);
+    el("resetTradeBtn").addEventListener("click", resetTradeUsage);
     wireBackLink();
     load();
   </script>
@@ -1193,7 +1448,17 @@ def create_app() -> Flask:
             if name in {"START_BALANCE", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES"}:
                 return max(0.0, number)
             return number
-        if name in {"TICK_INTERVAL", "MARKET_CLOSE_HOUR", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD"}:
+        if name in {"TICK_INTERVAL", "MARKET_CLOSE_HOUR", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID"}:
+            if name == "ANNOUNCEMENT_CHANNEL_ID":
+                text = str(value).strip()
+                if text == "":
+                    return 0
+                if text.startswith("+"):
+                    text = text[1:]
+                if not text.isdigit():
+                    raise ValueError("ANNOUNCEMENT_CHANNEL_ID must be a positive integer channel ID.")
+                return max(0, int(text))
+
             number = int(float(value))
             if name == "TICK_INTERVAL":
                 return max(1, number)
@@ -1243,6 +1508,12 @@ def create_app() -> Flask:
                 (_config_key(name), str(normalized)),
             )
         return normalized
+
+    def _config_value_for_json(name: str, value):
+        # Discord snowflakes exceed JS safe integer range; keep them as strings in JSON.
+        if name == "ANNOUNCEMENT_CHANNEL_ID":
+            return str(value)
+        return value
 
     def _create_database_backup_now(prefix: str = "manual") -> str:
         backup_dir = db_path.parent / "backups"
@@ -1297,6 +1568,19 @@ def create_app() -> Flask:
         if now_local >= close_local:
             close_local = close_local + timedelta(days=1)
         return max(0, int((close_local - now_local).total_seconds()))
+
+    def _until_reset_seconds() -> int:
+        period = max(1, int(_get_config("TRADING_LIMITS_PERIOD")))
+        tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
+        tick_raw = _state_get("last_tick")
+        try:
+            tick = max(0, int(tick_raw)) if tick_raw is not None else 0
+        except ValueError:
+            tick = 0
+        ticks_remaining = period - (tick % period)
+        if ticks_remaining <= 0:
+            ticks_remaining = period
+        return ticks_remaining * tick_interval
 
     _ensure_config_defaults()
 
@@ -1380,7 +1664,7 @@ def create_app() -> Flask:
 
     @app.get("/player/<int:user_id>")
     def player_page(user_id: int):
-        return render_template_string(PLAYER_DETAIL_HTML, user_id=user_id)
+        return render_template_string(PLAYER_DETAIL_HTML, user_id=str(user_id))
 
     @app.get("/app-config/<config_name>")
     def app_config_page(config_name: str):
@@ -1439,6 +1723,8 @@ def create_app() -> Flask:
             {
                 "until_close": _until_close_text(),
                 "seconds_until_close": _until_close_seconds(),
+                "until_reset": f"{_until_reset_seconds() / 60.0:.2f} min",
+                "seconds_until_reset": _until_reset_seconds(),
                 "company_count": company_count,
                 "user_count": user_count,
             }
@@ -1497,22 +1783,104 @@ def create_app() -> Flask:
 
     @app.get("/api/players")
     def api_players():
+        limit = int(_get_config("TRADING_LIMITS"))
+        period = max(1, int(_get_config("TRADING_LIMITS_PERIOD")))
+        tick_raw = _state_get("last_tick")
+        try:
+            tick = max(0, int(tick_raw)) if tick_raw is not None else 0
+        except ValueError:
+            tick = 0
+        bucket = tick // period
+
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT user_id, display_name, rank, bank, networth
+                SELECT guild_id, user_id, display_name, rank, bank, networth, owe
                 FROM users
                 ORDER BY networth DESC, bank DESC, user_id ASC
                 """
             ).fetchall()
-        return jsonify({"players": [dict(r) for r in rows]})
+        players: list[dict] = []
+        for r in rows:
+            row = dict(r)
+            row["user_id"] = str(row["user_id"])
+            guild_id = int(row.get("guild_id", 0))
+            user_id = row["user_id"]
+            if limit > 0:
+                used_raw = _state_get(f"trade_used:{guild_id}:{user_id}:{bucket}")
+                try:
+                    used = int(float(used_raw)) if used_raw is not None else 0
+                except ValueError:
+                    used = 0
+                row["trade_limit_enabled"] = True
+                row["trade_limit_limit"] = limit
+                row["trade_limit_remaining"] = max(0, limit - used)
+            else:
+                row["trade_limit_enabled"] = False
+                row["trade_limit_limit"] = 0
+                row["trade_limit_remaining"] = 0
+            players.append(row)
+        return jsonify({"players": players})
+
+    @app.get("/api/action-history")
+    def api_action_history():
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    ah.created_at,
+                    ah.user_id,
+                    COALESCE(u.display_name, '') AS display_name,
+                    ah.action_type,
+                    ah.target_type,
+                    ah.target_symbol,
+                    ah.quantity,
+                    ah.unit_price,
+                    ah.total_amount,
+                    ah.details
+                FROM action_history ah
+                LEFT JOIN users u
+                  ON u.guild_id = ah.guild_id
+                 AND u.user_id = ah.user_id
+                ORDER BY ah.id DESC
+                LIMIT 400
+                """
+            ).fetchall()
+        return jsonify({"actions": [dict(r) for r in rows]})
+
+    @app.get("/api/feedback")
+    def api_feedback():
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, message, created_at
+                FROM feedback
+                ORDER BY id DESC
+                LIMIT 500
+                """
+            ).fetchall()
+        return jsonify({"feedback": [dict(r) for r in rows]})
+
+    @app.delete("/api/feedback/<int:feedback_id>")
+    def api_feedback_delete(feedback_id: int):
+        with _connect() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM feedback
+                WHERE id = ?
+                """,
+                (feedback_id,),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Feedback not found"}), 404
+        return jsonify({"ok": True, "deleted": feedback_id})
 
     @app.get("/api/player/<int:user_id>")
     def api_player(user_id: int):
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT user_id, display_name, joined_at, rank, bank, networth
+                SELECT guild_id, user_id, display_name, joined_at, rank, bank, networth, owe
                 FROM users
                 WHERE user_id = ?
                 """,
@@ -1520,16 +1888,48 @@ def create_app() -> Flask:
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Player not found"}), 404
-        return jsonify({"player": dict(row)})
+        player = dict(row)
+        guild_id = int(player.get("guild_id", 0))
+        limit = int(_get_config("TRADING_LIMITS"))
+        period = int(_get_config("TRADING_LIMITS_PERIOD"))
+        tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
+        tick_raw = _state_get("last_tick")
+        try:
+            tick = max(0, int(tick_raw)) if tick_raw is not None else 0
+        except ValueError:
+            tick = 0
+
+        if limit > 0 and period > 0:
+            bucket = tick // period
+            used_raw = _state_get(f"trade_used:{guild_id}:{user_id}:{bucket}")
+            try:
+                used = int(float(used_raw)) if used_raw is not None else 0
+            except ValueError:
+                used = 0
+            remaining = max(0, limit - used)
+            player["trade_limit_enabled"] = True
+            player["trade_limit_limit"] = limit
+            player["trade_limit_used"] = used
+            player["trade_limit_remaining"] = remaining
+            player["trade_limit_window_minutes"] = (period * tick_interval) / 60.0
+        else:
+            player["trade_limit_enabled"] = False
+            player["trade_limit_limit"] = limit
+            player["trade_limit_used"] = 0
+            player["trade_limit_remaining"] = 0
+            player["trade_limit_window_minutes"] = 0.0
+
+        return jsonify({"player": player})
 
     @app.get("/api/app-configs")
     def api_app_configs():
         configs = []
         for name, spec in APP_CONFIG_SPECS.items():
+            value = _get_config(name)
             configs.append(
                 {
                     "name": name,
-                    "value": _get_config(name),
+                    "value": _config_value_for_json(name, value),
                     "default": _normalize_config(name, spec.default),
                     "type": spec.cast.__name__,
                     "description": spec.description,
@@ -1542,11 +1942,12 @@ def create_app() -> Flask:
         if config_name not in APP_CONFIG_SPECS:
             return jsonify({"error": "Unknown app config"}), 404
         spec = APP_CONFIG_SPECS[config_name]
+        value = _get_config(config_name)
         return jsonify(
             {
                 "config": {
                     "name": config_name,
-                    "value": _get_config(config_name),
+                    "value": _config_value_for_json(config_name, value),
                     "default": _normalize_config(config_name, spec.default),
                     "type": spec.cast.__name__,
                     "description": spec.description,
@@ -1704,6 +2105,11 @@ def create_app() -> Flask:
                 updates["networth"] = max(0.0, float(data.get("networth")))
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid value for networth"}), 400
+        if "owe" in data:
+            try:
+                updates["owe"] = max(0.0, float(data.get("owe")))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid value for owe"}), 400
         if "rank" in data:
             updates["rank"] = str(data.get("rank", "")).strip()
         if not updates:
@@ -1725,6 +2131,113 @@ def create_app() -> Flask:
             )
         return jsonify({"ok": True})
 
+    @app.post("/api/player/<int:user_id>/reset-trade-usage")
+    def api_player_reset_trade_usage(user_id: int):
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(row["guild_id"])
+            cur = conn.execute(
+                """
+                DELETE FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"trade_used:{guild_id}:{user_id}:%",),
+            )
+        return jsonify({"ok": True, "cleared": int(cur.rowcount)})
+
+    @app.get("/api/bank-requests")
+    def api_bank_requests():
+        status = (request.args.get("status") or "pending").strip().lower()
+        if status not in {"pending", "approved", "denied", "all"}:
+            return jsonify({"error": "Invalid status"}), 400
+        limit_raw = request.args.get("limit")
+        try:
+            limit = max(1, min(1000, int(limit_raw))) if limit_raw is not None else 300
+        except ValueError:
+            return jsonify({"error": "Invalid limit"}), 400
+
+        where_status = "" if status == "all" else "WHERE br.status = ?"
+        args: tuple[object, ...] = () if status == "all" else (status,)
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    br.id,
+                    br.guild_id,
+                    br.user_id,
+                    COALESCE(u.display_name, '') AS display_name,
+                    br.request_type,
+                    br.amount,
+                    br.reason,
+                    br.status,
+                    br.decision_reason,
+                    br.reviewed_by,
+                    br.created_at,
+                    br.reviewed_at,
+                    br.processed_at
+                FROM bank_requests br
+                LEFT JOIN users u
+                  ON u.guild_id = br.guild_id
+                 AND u.user_id = br.user_id
+                {where_status}
+                ORDER BY br.id DESC
+                LIMIT ?
+                """,
+                (*args, limit),
+            ).fetchall()
+        return jsonify({"requests": [dict(r) for r in rows]})
+
+    @app.post("/api/bank-requests/<int:request_id>/approve")
+    def api_bank_request_approve(request_id: int):
+        data = request.get_json(silent=True) or {}
+        reason = str(data.get("reason", "")).strip()
+        now = datetime.now(timezone.utc).isoformat()
+        with _connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE bank_requests
+                SET status = 'approved',
+                    decision_reason = ?,
+                    reviewed_by = 0,
+                    reviewed_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (reason, now, request_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Request not found or already reviewed"}), 404
+        return jsonify({"ok": True})
+
+    @app.post("/api/bank-requests/<int:request_id>/deny")
+    def api_bank_request_deny(request_id: int):
+        data = request.get_json(silent=True) or {}
+        reason = str(data.get("reason", "")).strip()
+        now = datetime.now(timezone.utc).isoformat()
+        with _connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE bank_requests
+                SET status = 'denied',
+                    decision_reason = ?,
+                    reviewed_by = 0,
+                    reviewed_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (reason, now, request_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Request not found or already reviewed"}), 404
+        return jsonify({"ok": True})
+
     @app.post("/api/app-config/<config_name>/update")
     def api_app_config_update(config_name: str):
         if config_name not in APP_CONFIG_SPECS:
@@ -1736,7 +2249,7 @@ def create_app() -> Flask:
             value = _set_config(config_name, data.get("value"))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid value"}), 400
-        return jsonify({"ok": True, "value": value})
+        return jsonify({"ok": True, "value": _config_value_for_json(config_name, value)})
 
     @app.post("/api/server-actions/backup")
     def api_server_action_backup():

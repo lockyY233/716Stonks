@@ -5,6 +5,7 @@ from discord import Interaction
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE
 from stockbot.config.runtime import get_app_config
 from stockbot.db import (
+    add_action_history,
     get_commodity,
     get_company,
     get_state_value,
@@ -55,6 +56,7 @@ def _get_current_tick() -> int:
 def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tuple[bool, str]:
     limit = int(get_app_config("TRADING_LIMITS"))
     period = int(get_app_config("TRADING_LIMITS_PERIOD"))
+    tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
     if limit <= 0:
         return True, ""
     if period <= 0:
@@ -67,13 +69,34 @@ def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tupl
     used = int(float(used_raw)) if used_raw is not None else 0
     if used + shares > limit:
         remaining = max(0, limit - used)
+        period_minutes = (period * tick_interval) / 60.0
         return (
             False,
-            f"Trade limit reached for this period. Remaining: {remaining} shares (limit {limit} per {period} ticks).",
+            (
+                f"Trade limit reached for this period. Remaining: {remaining} shares "
+                f"(limit {limit} per {period_minutes:.2f} minutes)."
+            ),
         )
 
     set_state_value(key, str(used + shares))
     return True, ""
+
+
+def _current_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, float, int]:
+    limit = int(get_app_config("TRADING_LIMITS"))
+    period = int(get_app_config("TRADING_LIMITS_PERIOD"))
+    tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
+    period_minutes = (period * tick_interval) / 60.0 if period > 0 else 0.0
+    if limit <= 0 or period <= 0:
+        return False, limit, 0, period_minutes, 0
+
+    tick = _get_current_tick()
+    bucket = tick // period
+    key = _limit_bucket_key(guild_id, user_id, bucket)
+    used_raw = get_state_value(key)
+    used = int(float(used_raw)) if used_raw is not None else 0
+    remaining = max(0, limit - used)
+    return True, limit, used, period_minutes, remaining
 
 
 async def perform_buy(
@@ -127,7 +150,44 @@ async def perform_buy(
         0.0,
         datetime.now(timezone.utc).isoformat(),
     )
-    return True, f"Bought {shares} shares of {symbol_upper} for ${total_cost:.2f}."
+    add_action_history(
+        guild_id=interaction.guild.id,
+        user_id=interaction.user.id,
+        action_type="buy",
+        target_type="stock",
+        target_symbol=symbol_upper,
+        quantity=float(shares),
+        unit_price=price,
+        total_amount=total_cost,
+        details="",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    limits_enabled, limit, _used, period_minutes, remaining = _current_limit_status(
+        interaction.guild.id,
+        interaction.user.id,
+    )
+    if limits_enabled:
+        limit_display = f"{remaining}/{limit} shares remaining this {period_minutes:.2f}-minute window."
+    else:
+        limit_display = "Disabled."
+
+    fee_ratio_pct = max(0.0, float(get_app_config("TRADING_FEES")))
+    fee_text = (
+        f"Transaction fee: {fee_ratio_pct:.2f}% on realized sell profit only (buy fee: $0.00)."
+    )
+    return (
+        True,
+        (
+            f"Bought {shares} shares of {symbol_upper} for \n"
+            f"==========\n"
+            f"💰**${total_cost:.2f}**.\n"
+            f"==========\n"
+            f"- Trading limit: "
+            f"**{limit_display}**\n"
+            f"- Transaction fee: "
+            f"{fee_ratio_pct:.2f}% => **$0.00** (buy fee disabled; applies on realized sell profit)."
+        ),
+    )
 
 
 async def perform_sell(
@@ -187,13 +247,39 @@ async def perform_sell(
         float(shares),
         datetime.now(timezone.utc).isoformat(),
     )
-    if fee > 0:
-        return (
-            True,
-            f"Sold {shares} shares of {symbol_upper} for ${net_gain:.2f} net "
-            f"(gross ${gross_gain:.2f}, fee ${fee:.2f} on profit).",
-        )
-    return True, f"Sold {shares} shares of {symbol_upper} for ${net_gain:.2f}."
+    add_action_history(
+        guild_id=interaction.guild.id,
+        user_id=interaction.user.id,
+        action_type="sell",
+        target_type="stock",
+        target_symbol=symbol_upper,
+        quantity=float(shares),
+        unit_price=price,
+        total_amount=net_gain,
+        details=(f"gross={gross_gain:.2f};fee={fee:.2f}" if fee > 0 else ""),
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    limits_enabled, limit, _used, period_minutes, remaining = _current_limit_status(
+        interaction.guild.id,
+        interaction.user.id,
+    )
+    if limits_enabled:
+        limit_display = f"{remaining}/{limit} shares remaining this {period_minutes:.2f}-minute window."
+    else:
+        limit_display = "Disabled."
+
+    fee_pct = fee_ratio * 100.0
+    return (
+        True,
+        (
+            f"Sold {shares} shares of {symbol_upper} for \n"
+            f"**${net_gain:.2f}** net (gross ${gross_gain:.2f}).\n"
+            f"- Trading limit: \n"
+            f"{limit_display}\n"
+            f"- Transaction fee: \n"
+            f"{fee_pct:.2f}% => **${fee:.2f}**."
+        ),
+    )
 
 
 async def perform_buy_commodity(
@@ -230,8 +316,62 @@ async def perform_buy_commodity(
     )
     new_networth = float(user.get("networth", 0.0)) + total_cost
     update_user_networth(interaction.guild.id, interaction.user.id, new_networth)
+    add_action_history(
+        guild_id=interaction.guild.id,
+        user_id=interaction.user.id,
+        action_type="buy",
+        target_type="commodity",
+        target_symbol=str(commodity["name"]),
+        quantity=float(quantity),
+        unit_price=price,
+        total_amount=total_cost,
+        details="",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
     return (
         True,
         f"Bought {quantity}x {commodity['name']} for ${total_cost:.2f}. "
         f"Commodity networth now ${new_networth:.2f}.",
     )
+
+
+def preview_sell_transaction(
+    guild_id: int,
+    user_id: int,
+    symbol: str,
+    shares: int = 1,
+) -> dict | None:
+    if shares <= 0:
+        return None
+
+    user = get_user(guild_id, user_id)
+    if user is None:
+        return None
+
+    company = get_company(guild_id, symbol.upper())
+    if company is None:
+        return None
+
+    owned = get_user_shares(guild_id, user_id, symbol.upper())
+    if owned < shares:
+        return None
+
+    price = float(company.get("current_price", company["base_price"]))
+    gross_gain = float(price * shares)
+    cost_basis_before = _get_cost_basis(guild_id, user_id, symbol.upper())
+    if cost_basis_before <= 0 and owned > 0:
+        cost_basis_before = float(owned) * price
+    avg_cost = (cost_basis_before / float(owned)) if owned > 0 else price
+    cost_removed = avg_cost * shares
+    realized_profit = max(0.0, gross_gain - cost_removed)
+    fee_ratio = max(0.0, float(get_app_config("TRADING_FEES"))) / 100.0
+    fee = realized_profit * fee_ratio
+    net_gain = max(0.0, gross_gain - fee)
+    return {
+        "shares": int(shares),
+        "unit_price": price,
+        "gross_gain": gross_gain,
+        "fee_percent": fee_ratio * 100.0,
+        "fee": fee,
+        "net_gain": net_gain,
+    }

@@ -45,8 +45,10 @@ def setup_status(tree: app_commands.CommandTree) -> None:
         )
         balance = round(float(user["bank"]), 2)
         networth = round(float(user.get("networth", 0.0)), 2)
+        owe = round(float(user.get("owe", 0.0)), 2)
         embed.add_field(name="💳 Balance", value=f"**${balance:.2f}**", inline=True)
         embed.add_field(name="💎 Networth", value=f"**${networth:.2f}**", inline=True)
+        embed.add_field(name="🏦 Owe", value=f"**${owe:.2f}**", inline=True)
         embed.add_field(name="︽ Rank", value=str(user["rank"]), inline=True)
         embed.add_field(name="📅 Joined", value=user["joined_at"][:10], inline=True)
 
