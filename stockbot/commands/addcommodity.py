@@ -10,6 +10,7 @@ def setup_addcommodity(tree: app_commands.CommandTree) -> None:
         name="Commodity name (e.g. Gold).",
         price="Commodity unit price.",
         rarity="Rarity tier.",
+        spawn_weight_override="Optional per-item shop spawn weight override (0 = use rarity weight).",
         image_url="Image URL for this commodity.",
         description="Commodity description/lore.",
     )
@@ -30,6 +31,7 @@ def setup_addcommodity(tree: app_commands.CommandTree) -> None:
         rarity: str,
         image_url: str,
         description: str,
+        spawn_weight_override: float = 0.0,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -43,6 +45,7 @@ def setup_addcommodity(tree: app_commands.CommandTree) -> None:
             name=name.strip(),
             price=price,
             rarity=normalize_rarity(rarity),
+            spawn_weight_override=max(0.0, float(spawn_weight_override)),
             image_url=image_url.strip(),
             description=description.strip(),
         )
@@ -60,6 +63,11 @@ def setup_addcommodity(tree: app_commands.CommandTree) -> None:
         )
         embed.add_field(name="Price", value=f"${float(price):.2f}", inline=True)
         embed.add_field(name="Rarity", value=normalize_rarity(rarity).title(), inline=True)
+        embed.add_field(
+            name="Shop Weight",
+            value=f"{max(0.0, float(spawn_weight_override)):.4g} (0 = rarity default)",
+            inline=True,
+        )
         if image_url.strip():
             embed.set_image(url=image_url.strip())
         await interaction.response.send_message(embed=embed, ephemeral=True)

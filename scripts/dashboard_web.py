@@ -5,12 +5,13 @@ import secrets
 import sqlite3
 import sys
 import time
+import json
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, g, jsonify, render_template_string, request
+from flask import Flask, g, jsonify, render_template_string, request, send_file
 
 # Ensure project root is importable when running as a standalone script via systemd.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME
 from stockbot.services.perks import evaluate_user_perks
+from stockbot.services.shop_state import get_shop_items, refresh_shop, set_item_availability, swap_item
 
 @dataclass(frozen=True)
 class _CfgSpec:
@@ -32,9 +34,10 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "TICK_INTERVAL": _CfgSpec(5, int, "Seconds between market ticks."),
     "TREND_MULTIPLIER": _CfgSpec(1e-2, float, "Multiplier used by trend-related math."),
     "DISPLAY_TIMEZONE": _CfgSpec("America/New_York", str, "Timezone used for display and market-close checks."),
-    "MARKET_CLOSE_HOUR": _CfgSpec(21, int, "Local hour (0-23) used for daily market close logic."),
+    "MARKET_CLOSE_HOUR": _CfgSpec(21.0, float, "Local close time as decimal hour [0,24). Example: 21.5 means 21:30."),
     "STONKERS_ROLE_NAME": _CfgSpec("📈💰📊Stonkers", str, "Role granted on registration and pinged on close updates."),
     "ANNOUNCEMENT_CHANNEL_ID": _CfgSpec(0, int, "Discord channel ID used for announcements; 0 means auto-pick."),
+    "GM_ID": _CfgSpec(0, int, "Discord user ID designated as game master; excluded from rankings when >0."),
     "DRIFT_NOISE_FREQUENCY": _CfgSpec(0.7, float, "Normalized fast noise frequency [0,1]."),
     "DRIFT_NOISE_GAIN": _CfgSpec(0.8, float, "Fast noise gain multiplier."),
     "DRIFT_NOISE_LOW_FREQ_RATIO": _CfgSpec(0.08, float, "Low-band frequency ratio relative to fast frequency."),
@@ -44,6 +47,7 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "TRADING_FEES": _CfgSpec(1.0, float, "Sell fee percentage applied to realized profit."),
     "COMMODITIES_LIMIT": _CfgSpec(5, int, "Max total commodity units a player can hold; <=0 disables."),
     "PAWN_SELL_RATE": _CfgSpec(75.0, float, "Pawn payout percentage when selling commodities to bank."),
+    "SHOP_RARITY_WEIGHTS": _CfgSpec('{"common":1.0,"uncommon":0.6,"rare":0.3,"legendary":0.1,"exotic":0.03}', str, "JSON mapping of rarity->weight used for shop rotation."),
 }
 
 AUTH_REQUIRED_HTML = """<!doctype html>
@@ -132,6 +136,11 @@ MAIN_HTML = """<!doctype html>
       text-decoration: underline;
       text-underline-offset: 2px;
     }
+    .rarity-common { color: #ffffff; font-weight: 600; }
+    .rarity-uncommon { color: #22c55e; font-weight: 600; }
+    .rarity-rare { color: #38bdf8; font-weight: 600; }
+    .rarity-legendary { color: #c084fc; font-weight: 600; }
+    .rarity-exotic { color: #f59e0b; font-weight: 700; }
     @media (max-width: 980px) {
       .wrap { grid-template-columns: 1fr; }
       .side { max-height: none; }
@@ -152,6 +161,7 @@ MAIN_HTML = """<!doctype html>
         <div class="btnrow">
           <button id="showCompanies" class="active">Show Companies</button>
           <button id="showCommodities">Show Commodities</button>
+          <button id="showShop">Shop</button>
           <button id="showPlayers">Show Players</button>
           <button id="showPerks">Show Perks</button>
           <button id="showAnnouncements">Announcements</button>
@@ -220,6 +230,14 @@ MAIN_HTML = """<!doctype html>
     function esc(text) {
       return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
+    function rarityClass(r) {
+      const t = String(r || "common").toLowerCase().trim();
+      if (t === "uncommon") return "rarity-uncommon";
+      if (t === "rare") return "rarity-rare";
+      if (t === "legendary") return "rarity-legendary";
+      if (t === "exotic") return "rarity-exotic";
+      return "rarity-common";
+    }
     function fmtEtDate(value) {
       const dt = value ? new Date(value) : new Date();
       if (Number.isNaN(dt.getTime())) return String(value || "-");
@@ -249,6 +267,7 @@ MAIN_HTML = """<!doctype html>
       document.querySelectorAll("button[id^='show']").forEach((btn) => btn.classList.remove("active"));
       if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
       if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
+      if (currentTab === "shop") document.getElementById("showShop").classList.add("active");
       if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
       if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
       if (currentTab === "announcements") document.getElementById("showAnnouncements").classList.add("active");
@@ -386,16 +405,16 @@ MAIN_HTML = """<!doctype html>
     function renderCommodities(rows) {
       document.getElementById("tableTitle").textContent = "Commodities";
       document.getElementById("thead").innerHTML = `<tr>
-        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Tags</th><th>Description</th>
+        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Spawn Weight</th><th>Tags</th><th>Description</th>
       </tr>`;
       const tbody = document.getElementById("rows");
       const controlRow = `<tr>
-        <td colspan="6" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
           <button id="addCommodityBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Commodity</button>
         </td>
       </tr>`;
       if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="6" class="empty">No commodities found.</td></tr>';
+        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No commodities found.</td></tr>';
       } else {
         const fallbackSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52"><rect width="100%" height="100%" fill="#0b1323"/><text x="50%" y="50%" fill="#94a3b8" font-size="9" text-anchor="middle" dominant-baseline="middle">No Img</text></svg>';
         const fallback = `data:image/svg+xml;utf8,${encodeURIComponent(fallbackSvg)}`;
@@ -403,7 +422,8 @@ MAIN_HTML = """<!doctype html>
           <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
           <td><strong>${esc(r.name)}</strong></td>
           <td class="mono">${fmtMoney(r.price)}</td>
-          <td>${esc((r.rarity || "common").toUpperCase())}</td>
+          <td><span class="${rarityClass(r.rarity)}">${esc((r.rarity || "common").toUpperCase())}</span></td>
+          <td class="mono">${esc(String(Number(r.spawn_weight_override || 0).toFixed(4)))}</td>
           <td>${esc(String((r.tags || []).join(", ")))}</td>
           <td>${esc(r.description || "")}</td>
         </tr>`).join("");
@@ -416,12 +436,19 @@ MAIN_HTML = """<!doctype html>
           const priceRaw = window.prompt("Price:", "1.00");
           if (priceRaw === null) return;
           const rarity = (window.prompt("Rarity (common/uncommon/rare/legendary/exotic):", "common") || "common").trim().toLowerCase();
+          const spawnWeightRaw = window.prompt("Spawn weight override (0 = rarity default):", "0");
+          if (spawnWeightRaw === null) return;
           const image_url = (window.prompt("Image URL (optional):", "") || "").trim();
           const tags = (window.prompt("Tags (comma-separated, optional):", "") || "").trim();
           const description = (window.prompt("Description (optional):", "") || "").trim();
           const price = Number(priceRaw);
+          const spawn_weight_override = Number(spawnWeightRaw);
           if (!Number.isFinite(price) || price <= 0) {
             alert("Invalid price.");
+            return;
+          }
+          if (!Number.isFinite(spawn_weight_override) || spawn_weight_override < 0) {
+            alert("Invalid spawn weight override.");
             return;
           }
           addBtn.disabled = true;
@@ -431,7 +458,7 @@ MAIN_HTML = """<!doctype html>
             const res = await fetch(withAuthToken("/api/commodity"), {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, price, rarity, image_url, tags, description }),
+              body: JSON.stringify({ name, price, rarity, spawn_weight_override, image_url, tags, description }),
             });
             if (!res.ok) {
               const err = await res.json().catch(() => ({ error: "Create failed" }));
@@ -478,6 +505,117 @@ MAIN_HTML = """<!doctype html>
         tr.addEventListener("click", () => {
           const uid = tr.getAttribute("data-user");
           gotoWithAuth(`/player/${encodeURIComponent(uid)}`);
+        });
+      });
+    }
+    function renderShop(data) {
+      const rows = Array.isArray(data.items) ? data.items : [];
+      const all = Array.isArray(data.available) ? data.available : [];
+      document.getElementById("tableTitle").textContent = `Shop (Bucket ${Number(data.bucket || 0)})`;
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Slot</th><th>Name</th><th>Price</th><th>Rarity</th><th>Availability</th><th>Swap To</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="refreshShopBtn" style="padding:6px 10px;background:#1d4ed8;border-color:#2563eb;color:#dbeafe;">Refresh Random Set</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No active shop items.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r, idx) => {
+          const name = String(r.name || "");
+          const options = all
+            .filter((n) => n !== name)
+            .map((n) => `<option value="${esc(n)}">${esc(n)}</option>`)
+            .join("");
+          return `<tr>
+            <td class="mono">${idx + 1}</td>
+            <td><strong>${esc(name)}</strong></td>
+            <td class="mono">${fmtMoney(r.price || 0)}</td>
+            <td><span class="${rarityClass(r.rarity)}">${esc(String(r.rarity || "common").toUpperCase())}</span></td>
+            <td class="${r.in_stock ? 'up' : 'down'}">${r.in_stock ? "IN STOCK" : "OUT OF STOCK"}</td>
+            <td>
+              <select data-shop-swap-target="${idx}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                <option value="">(choose)</option>
+                ${options}
+              </select>
+            </td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button data-shop-toggle="${esc(name)}" style="padding:6px 10px;${r.in_stock ? "background:#7f1d1d;border-color:#ef4444;color:#fee2e2;" : "background:#14532d;border-color:#22c55e;color:#dcfce7;"}">${r.in_stock ? "Set OUT" : "Set IN"}</button>
+              <button data-shop-swap="${idx}" style="padding:6px 10px;">Swap</button>
+            </td>
+          </tr>`;
+        }).join("");
+      }
+
+      const refreshBtn = document.getElementById("refreshShopBtn");
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", async () => {
+          refreshBtn.disabled = true;
+          const old = refreshBtn.textContent;
+          refreshBtn.textContent = "Refreshing...";
+          try {
+            const res = await fetch(withAuthToken("/api/shop/refresh"), { method: "POST" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Refresh failed" }));
+              alert(err.error || "Refresh failed");
+            }
+            await loadShop();
+          } finally {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = old;
+          }
+        });
+      }
+
+      document.querySelectorAll("button[data-shop-toggle]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const name = btn.getAttribute("data-shop-toggle");
+          if (!name) return;
+          const makeInStock = btn.textContent?.includes("Set IN");
+          btn.disabled = true;
+          try {
+            const res = await fetch(withAuthToken("/api/shop/availability"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, in_stock: !!makeInStock }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Update failed" }));
+              alert(err.error || "Update failed");
+            }
+            await loadShop();
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      document.querySelectorAll("button[data-shop-swap]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const slotRaw = btn.getAttribute("data-shop-swap");
+          if (slotRaw === null) return;
+          const slot = Number(slotRaw);
+          const sel = document.querySelector(`select[data-shop-swap-target="${CSS.escape(slotRaw)}"]`);
+          const new_name = String(sel?.value || "").trim();
+          if (!new_name) return;
+          btn.disabled = true;
+          try {
+            const res = await fetch(withAuthToken("/api/shop/swap"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ slot, new_name }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Swap failed" }));
+              alert(err.error || "Swap failed");
+            }
+            await loadShop();
+          } finally {
+            btn.disabled = false;
+          }
         });
       });
     }
@@ -1051,10 +1189,35 @@ MAIN_HTML = """<!doctype html>
         tbody.innerHTML = '<tr><td colspan="6" class="empty">No app configs found.</td></tr>';
         return;
       }
+      function prettyConfigValue(name, value) {
+        const raw = String(value ?? "");
+        if (name !== "SHOP_RARITY_WEIGHTS") return raw;
+        try {
+          return JSON.stringify(JSON.parse(raw), null, 2);
+        } catch (_e) {
+          return raw;
+        }
+      }
+      function valueEditorHtml(row) {
+        const name = String(row.name || "");
+        const value = prettyConfigValue(name, row.value);
+        if (name === "SHOP_RARITY_WEIGHTS") {
+          return `<textarea class="cfg-value mono" data-config-input="${esc(name)}" style="width:100%;min-height:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;resize:vertical;">${esc(value)}</textarea>`;
+        }
+        return `<input class="cfg-value mono" data-config-input="${esc(name)}" value="${esc(value)}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />`;
+      }
+      function defaultCellHtml(row) {
+        const name = String(row.name || "");
+        const value = prettyConfigValue(name, row.default);
+        if (name === "SHOP_RARITY_WEIGHTS") {
+          return `<pre class="mono" style="margin:0;white-space:pre-wrap;word-break:break-word;background:#0b1323;border:1px solid #334155;border-radius:6px;padding:6px 8px;">${esc(value)}</pre>`;
+        }
+        return `<span class="mono">${esc(String(row.default))}</span>`;
+      }
       tbody.innerHTML = rows.map((r) => `<tr data-config="${esc(r.name)}">
         <td class="mono"><strong>${esc(r.name)}</strong></td>
-        <td><input class="cfg-value mono" data-config-input="${esc(r.name)}" value="${esc(String(r.value))}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
-        <td class="mono">${esc(String(r.default))}</td>
+        <td>${valueEditorHtml(r)}</td>
+        <td>${defaultCellHtml(r)}</td>
         <td>${esc(r.type || "-")}</td>
         <td>${esc(r.description || "")}</td>
         <td><button class="cfg-save" data-config-save="${esc(r.name)}" style="padding:6px 10px;">Save</button></td>
@@ -1137,10 +1300,14 @@ MAIN_HTML = """<!doctype html>
           return;
         }
         backups.forEach((b) => {
+          const downloadUrl = withAuthToken(`/api/server-actions/backups/${encodeURIComponent(b.name)}/download`);
           const row = `<tr data-backup="${esc(b.name)}">
-            <td><strong>Delete Backup</strong></td>
+            <td><strong>Backup File</strong></td>
             <td class="mono">${esc(b.name)}<br><span class="muted">${esc(String(b.size_human || ""))}</span></td>
-            <td><button data-delete-backup="${esc(b.name)}" style="padding:6px 10px;background:#7f1d1d;border-color:#b91c1c;">Delete</button></td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">
+              <a href="${downloadUrl}" style="display:inline-block;padding:6px 10px;border:1px solid #334155;border-radius:6px;background:#1f2937;color:#e5e7eb;text-decoration:none;">Download</a>
+              <button data-delete-backup="${esc(b.name)}" style="padding:6px 10px;background:#7f1d1d;border-color:#b91c1c;">Delete</button>
+            </td>
             <td class="mono" data-backup-status="${esc(b.name)}">-</td>
           </tr>`;
           tbody.insertAdjacentHTML("beforeend", row);
@@ -1184,6 +1351,12 @@ MAIN_HTML = """<!doctype html>
       renderCommodities(data.commodities || []);
       document.getElementById("last").textContent = fmtEtDate();
     }
+    async function loadShop() {
+      const res = await fetch(withAuthToken("/api/shop"), { cache: "no-store" });
+      const data = await res.json();
+      renderShop(data || {});
+      document.getElementById("last").textContent = fmtEtDate();
+    }
     async function loadPlayers() {
       const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
       const data = await res.json();
@@ -1197,21 +1370,26 @@ MAIN_HTML = """<!doctype html>
       document.getElementById("last").textContent = fmtEtDate();
     }
     async function loadAnnouncements() {
-      const [aRes, nRes, pRes] = await Promise.all([
+      const [aRes, nRes, pRes, gmRes] = await Promise.all([
         fetch(withAuthToken("/api/close-announcement"), { cache: "no-store" }),
         fetch(withAuthToken("/api/close-news"), { cache: "no-store" }),
         fetch(withAuthToken("/api/players"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/app-config/GM_ID"), { cache: "no-store" }),
       ]);
-      if (!aRes.ok || !nRes.ok || !pRes.ok) {
+      if (!aRes.ok || !nRes.ok || !pRes.ok || !gmRes.ok) {
         const aErr = await aRes.text().catch(() => "");
         const nErr = await nRes.text().catch(() => "");
         const pErr = await pRes.text().catch(() => "");
-        throw new Error(`Announcements load failed (close-announcement=${aRes.status}, close-news=${nRes.status}, players=${pRes.status}) ${aErr || nErr || pErr}`.trim());
+        const gmErr = await gmRes.text().catch(() => "");
+        throw new Error(`Announcements load failed (close-announcement=${aRes.status}, close-news=${nRes.status}, players=${pRes.status}, gm=${gmRes.status}) ${aErr || nErr || pErr || gmErr}`.trim());
       }
       const aData = await aRes.json().catch(() => ({}));
       const nData = await nRes.json().catch(() => ({}));
       const pData = await pRes.json().catch(() => ({}));
+      const gmData = await gmRes.json().catch(() => ({}));
+      const gmId = String(gmData?.config?.value || "").trim();
       const rankings = (Array.isArray(pData.players) ? pData.players : [])
+        .filter((x) => !gmId || String(x.user_id || "") !== gmId)
         .slice()
         .sort((x, y) => Number(y.networth || 0) - Number(x.networth || 0))
         .slice(0, 3);
@@ -1293,6 +1471,7 @@ MAIN_HTML = """<!doctype html>
         await loadHeaderStats();
         if (currentTab === "companies") await loadCompanies();
         else if (currentTab === "commodities") await loadCommodities();
+        else if (currentTab === "shop") await loadShop();
         else if (currentTab === "players") await loadPlayers();
         else if (currentTab === "perks") await loadPerks();
         else if (currentTab === "announcements") await loadAnnouncements();
@@ -1322,6 +1501,7 @@ MAIN_HTML = """<!doctype html>
     }
     document.getElementById("showCompanies").addEventListener("click", () => { currentTab = "companies"; setButtons(); tick(); });
     document.getElementById("showCommodities").addEventListener("click", () => { currentTab = "commodities"; setButtons(); tick(); });
+    document.getElementById("showShop").addEventListener("click", () => { currentTab = "shop"; setButtons(); tick(); });
     document.getElementById("showPlayers").addEventListener("click", () => { currentTab = "players"; setButtons(); tick(); });
     document.getElementById("showPerks").addEventListener("click", () => { currentTab = "perks"; setButtons(); tick(); });
     document.getElementById("showAnnouncements").addEventListener("click", () => { currentTab = "announcements"; setButtons(); tick(); });
@@ -1641,7 +1821,11 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       </div>
       <div class="row">
         <div><label>Rarity</label><input id="rarity" /></div>
+        <div><label>Spawn Weight Override (0 = rarity default)</label><input id="spawn_weight_override" type="number" step="0.0001" min="0" /></div>
+      </div>
+      <div class="row">
         <div><label>Image URL</label><input id="image_url" /></div>
+        <div></div>
       </div>
       <div class="row one">
         <div><label>Tags (comma-separated)</label><input id="tags" /></div>
@@ -1684,6 +1868,7 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       el("name").value = c.name || "";
       el("price").value = Number(c.price).toFixed(2);
       el("rarity").value = c.rarity || "common";
+      el("spawn_weight_override").value = Number(c.spawn_weight_override || 0).toFixed(4);
       el("image_url").value = c.image_url || "";
       el("tags").value = String((c.tags || []).join(", "));
       el("description").value = c.description || "";
@@ -1694,6 +1879,7 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
         name: el("name").value,
         price: Number(el("price").value),
         rarity: el("rarity").value,
+        spawn_weight_override: Number(el("spawn_weight_override").value),
         image_url: el("image_url").value,
         tags: el("tags").value,
         description: el("description").value,
@@ -1734,15 +1920,24 @@ PLAYER_DETAIL_HTML = """<!doctype html>
     .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
     .title { font-size:1.2rem; font-weight:700; }
     .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+    .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:8px; }
     label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    input, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
     button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
     button:hover { background: var(--btnH); }
     .muted { color:var(--muted); font-size:.85rem; }
     a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    .inventory-card { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .inventory-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px; flex-wrap:wrap; }
+    .inventory-grid { display:grid; grid-template-columns: 1fr auto auto; gap:8px; align-items:center; }
+    .qty-input { max-width: 110px; }
+    .small-btn { padding:7px 10px; }
     @media (max-width: 760px) {
       .row { grid-template-columns: 1fr; }
+      .row3 { grid-template-columns: 1fr; }
       .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .inventory-grid { grid-template-columns: 1fr; }
+      .qty-input { max-width: unset; }
     }
   </style>
 </head>
@@ -1771,10 +1966,33 @@ PLAYER_DETAIL_HTML = """<!doctype html>
       </div>
       <button id="saveBtn">Save</button>
       <div id="msg" class="muted" style="margin-top:8px;"></div>
+
+      <div class="inventory-card">
+        <div class="inventory-head">
+          <div class="title" style="font-size:1rem;">Commodities</div>
+          <div class="muted" id="inventorySummary">Loading...</div>
+        </div>
+        <div class="row3">
+          <div>
+            <label>Add/Remove Commodity</label>
+            <select id="invCommodity"></select>
+          </div>
+          <div>
+            <label>Delta (can be negative)</label>
+            <input id="invDelta" type="number" step="1" value="1" />
+          </div>
+          <div style="display:flex; align-items:flex-end;">
+            <button id="applyDeltaBtn" class="small-btn" type="button">Apply Delta</button>
+          </div>
+        </div>
+        <div id="inventoryRows" class="inventory-grid"></div>
+      </div>
     </div>
   </div>
   <script>
     const USER_ID = {{ user_id|tojson }};
+    let INVENTORY = [];
+    let AVAILABLE = [];
     function el(id){ return document.getElementById(id); }
     const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
     function withAuthToken(url) {
@@ -1787,9 +2005,12 @@ PLAYER_DETAIL_HTML = """<!doctype html>
       if (back) back.href = withAuthToken("/");
     }
     async function load() {
-      const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}`), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
+      const [playerRes, invRes] = await Promise.all([
+        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}`), { cache: "no-store" }),
+        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities`), { cache: "no-store" }),
+      ]);
+      if (!playerRes.ok) return;
+      const data = await playerRes.json();
       const p = data.player;
       el("display_name").value = p.display_name || "";
       el("joined_at").value = p.joined_at || "";
@@ -1804,6 +2025,81 @@ PLAYER_DETAIL_HTML = """<!doctype html>
       } else {
         el("trade_limit_status").value = "Disabled";
       }
+      if (invRes.ok) {
+        const invData = await invRes.json();
+        INVENTORY = Array.isArray(invData.inventory) ? invData.inventory : [];
+        AVAILABLE = Array.isArray(invData.available) ? invData.available : [];
+        renderInventory();
+      }
+    }
+
+    function renderInventory() {
+      const rows = el("inventoryRows");
+      const summary = el("inventorySummary");
+      const select = el("invCommodity");
+      const totalQty = INVENTORY.reduce((n, r) => n + Number(r.quantity || 0), 0);
+      summary.textContent = `${totalQty} total units`;
+
+      const names = AVAILABLE.length ? AVAILABLE : INVENTORY.map((r) => String(r.name || ""));
+      select.innerHTML = names.map((n) => {
+        const key = encodeURIComponent(String(n));
+        return `<option value="${key}">${n}</option>`;
+      }).join("");
+      if (!select.value && names.length) select.value = encodeURIComponent(String(names[0]));
+
+      if (!INVENTORY.length) {
+        rows.innerHTML = `<div class="muted">No commodities owned.</div>`;
+        return;
+      }
+      rows.innerHTML = INVENTORY.map((r) => {
+        const name = String(r.name || "");
+        const key = encodeURIComponent(name);
+        const qty = Number(r.quantity || 0);
+        return `
+          <div><strong>${name}</strong></div>
+          <input class="qty-input" data-qty-key="${key}" type="number" step="1" min="0" value="${qty}" />
+          <button class="small-btn" data-save-qty="${key}" type="button">Set Qty</button>
+        `;
+      }).join("");
+
+      document.querySelectorAll("button[data-save-qty]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const key = btn.getAttribute("data-save-qty");
+          const input = document.querySelector(`input[data-qty-key="${CSS.escape(key)}"]`);
+          if (!input) return;
+          const qty = Number(input.value);
+          const name = decodeURIComponent(String(key || ""));
+          await setCommodityQty(name, qty);
+        });
+      });
+    }
+
+    async function setCommodityQty(name, quantity) {
+      const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities/set`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commodity_name: name, quantity }),
+      });
+      if (res.ok) {
+        el("msg").textContent = `Updated ${name}.`;
+      } else {
+        const err = await res.json().catch(()=>({error:"Failed"}));
+        el("msg").textContent = err.error || "Update failed.";
+      }
+      await load();
+    }
+
+    async function applyDelta() {
+      const key = String(el("invCommodity").value || "").trim();
+      const name = decodeURIComponent(key);
+      const delta = Number(el("invDelta").value || 0);
+      if (!name || !Number.isFinite(delta) || delta === 0) {
+        el("msg").textContent = "Pick a commodity and non-zero delta.";
+        return;
+      }
+      const cur = INVENTORY.find((r) => String(r.name) === name);
+      const nextQty = Math.max(0, Number(cur?.quantity || 0) + Math.trunc(delta));
+      await setCommodityQty(name, nextQty);
     }
     async function save() {
       const payload = {
@@ -1848,6 +2144,7 @@ PLAYER_DETAIL_HTML = """<!doctype html>
     }
     el("saveBtn").addEventListener("click", save);
     el("resetTradeBtn").addEventListener("click", resetTradeUsage);
+    el("applyDeltaBtn").addEventListener("click", applyDelta);
     wireBackLink();
     load();
   </script>
@@ -2462,8 +2759,10 @@ def create_app() -> Flask:
         return f"config:{name}"
 
     def _normalize_config(name: str, value):
-        if name in {"START_BALANCE", "DRIFT_NOISE_FREQUENCY", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES", "TREND_MULTIPLIER", "PAWN_SELL_RATE"}:
+        if name in {"START_BALANCE", "MARKET_CLOSE_HOUR", "DRIFT_NOISE_FREQUENCY", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES", "TREND_MULTIPLIER", "PAWN_SELL_RATE"}:
             number = float(value)
+            if name == "MARKET_CLOSE_HOUR":
+                return max(0.0, min(23.9997222222, number))
             if name == "DRIFT_NOISE_FREQUENCY":
                 return max(0.0, min(1.0, number))
             if name == "PAWN_SELL_RATE":
@@ -2471,22 +2770,42 @@ def create_app() -> Flask:
             if name in {"START_BALANCE", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES"}:
                 return max(0.0, number)
             return number
-        if name in {"TICK_INTERVAL", "MARKET_CLOSE_HOUR", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID", "COMMODITIES_LIMIT"}:
-            if name == "ANNOUNCEMENT_CHANNEL_ID":
+        if name == "SHOP_RARITY_WEIGHTS":
+            text = str(value).strip()
+            if not text:
+                return str(APP_CONFIG_SPECS[name].default)
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                raise ValueError("SHOP_RARITY_WEIGHTS must be valid JSON object.")
+            if not isinstance(parsed, dict):
+                raise ValueError("SHOP_RARITY_WEIGHTS must be a JSON object.")
+            normalized: dict[str, float] = {}
+            for key, raw in parsed.items():
+                k = str(key).strip().lower()
+                if not k:
+                    continue
+                try:
+                    normalized[k] = max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    continue
+            if not normalized:
+                raise ValueError("SHOP_RARITY_WEIGHTS has no valid entries.")
+            return json.dumps(normalized, separators=(",", ":"))
+        if name in {"TICK_INTERVAL", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "COMMODITIES_LIMIT"}:
+            if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID"}:
                 text = str(value).strip()
                 if text == "":
                     return 0
                 if text.startswith("+"):
                     text = text[1:]
                 if not text.isdigit():
-                    raise ValueError("ANNOUNCEMENT_CHANNEL_ID must be a positive integer channel ID.")
+                    raise ValueError(f"{name} must be a positive integer Discord ID.")
                 return max(0, int(text))
 
             number = int(float(value))
             if name == "TICK_INTERVAL":
                 return max(1, number)
-            if name == "MARKET_CLOSE_HOUR":
-                return max(0, min(23, number))
             if name == "TRADING_LIMITS_PERIOD":
                 return max(1, number)
             if name == "COMMODITIES_LIMIT":
@@ -2631,6 +2950,17 @@ def create_app() -> Flask:
                 """
             )
 
+    def _ensure_commodities_columns() -> None:
+        with _connect() as conn:
+            cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(commodities);").fetchall()
+            }
+            if cols and "spawn_weight_override" not in cols:
+                conn.execute(
+                    "ALTER TABLE commodities ADD COLUMN spawn_weight_override REAL NOT NULL DEFAULT 0;"
+                )
+
     def _parse_tags(raw: object) -> list[str]:
         text = str(raw or "")
         parts = [p.strip().lower() for p in text.split(",")]
@@ -2679,7 +3009,7 @@ def create_app() -> Flask:
 
     def _config_value_for_json(name: str, value):
         # Discord snowflakes exceed JS safe integer range; keep them as strings in JSON.
-        if name == "ANNOUNCEMENT_CHANNEL_ID":
+        if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID"}:
             return str(value)
         return value
 
@@ -2716,7 +3046,7 @@ def create_app() -> Flask:
         return f"{size}B"
 
     def _until_close_text() -> str:
-        close_hour = int(_get_config("MARKET_CLOSE_HOUR"))
+        close_hour = float(_get_config("MARKET_CLOSE_HOUR"))
         tz_name = str(_get_config("DISPLAY_TIMEZONE"))
         try:
             tz = ZoneInfo(tz_name)
@@ -2724,7 +3054,11 @@ def create_app() -> Flask:
             tz = timezone.utc
 
         now_local = datetime.now(timezone.utc).astimezone(tz)
-        close_local = now_local.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+        close_seconds = max(0, min((24 * 3600) - 1, int(round(close_hour * 3600.0))))
+        close_local = (
+            now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(seconds=close_seconds)
+        )
         if now_local >= close_local:
             close_local = close_local + timedelta(days=1)
         delta = close_local - now_local
@@ -2734,14 +3068,18 @@ def create_app() -> Flask:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _until_close_seconds() -> int:
-        close_hour = int(_get_config("MARKET_CLOSE_HOUR"))
+        close_hour = float(_get_config("MARKET_CLOSE_HOUR"))
         tz_name = str(_get_config("DISPLAY_TIMEZONE"))
         try:
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = timezone.utc
         now_local = datetime.now(timezone.utc).astimezone(tz)
-        close_local = now_local.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+        close_seconds = max(0, min((24 * 3600) - 1, int(round(close_hour * 3600.0))))
+        close_local = (
+            now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(seconds=close_seconds)
+        )
         if now_local >= close_local:
             close_local = close_local + timedelta(days=1)
         return max(0, int((close_local - now_local).total_seconds()))
@@ -2762,6 +3100,7 @@ def create_app() -> Flask:
     _ensure_config_defaults()
     _ensure_perk_tables()
     _ensure_commodity_tags_table()
+    _ensure_commodities_columns()
 
     @app.before_request
     def _auth_gate():
@@ -2956,7 +3295,7 @@ def create_app() -> Flask:
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT name, price, rarity, image_url, description
+                SELECT name, price, rarity, spawn_weight_override, image_url, description
                 FROM commodities
                 ORDER BY name
                 """
@@ -2979,12 +3318,64 @@ def create_app() -> Flask:
             out.append(item)
         return jsonify({"commodities": out})
 
+    @app.get("/api/shop")
+    def api_shop():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        bucket, items, available = get_shop_items(guild_id)
+        return jsonify(
+            {
+                "guild_id": guild_id,
+                "bucket": bucket,
+                "items": items,
+                "available": available,
+            }
+        )
+
+    @app.post("/api/shop/refresh")
+    def api_shop_refresh():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        refresh_shop(guild_id)
+        bucket, items, available = get_shop_items(guild_id)
+        return jsonify({"ok": True, "bucket": bucket, "items": items, "available": available})
+
+    @app.post("/api/shop/availability")
+    def api_shop_availability():
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        in_stock = bool(data.get("in_stock", True))
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        set_item_availability(guild_id, name, in_stock=in_stock)
+        return jsonify({"ok": True, "name": name, "in_stock": in_stock})
+
+    @app.post("/api/shop/swap")
+    def api_shop_swap():
+        data = request.get_json(silent=True) or {}
+        try:
+            slot = int(data.get("slot", -1))
+        except (TypeError, ValueError):
+            return jsonify({"error": "slot must be an integer"}), 400
+        new_name = str(data.get("new_name", "")).strip()
+        if not new_name:
+            return jsonify({"error": "new_name is required"}), 400
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        ok = swap_item(guild_id, slot, new_name)
+        if not ok:
+            return jsonify({"error": "swap failed (invalid slot/name or duplicate target)"}), 400
+        bucket, items, available = get_shop_items(guild_id)
+        return jsonify({"ok": True, "bucket": bucket, "items": items, "available": available})
+
     @app.get("/api/commodity/<name>")
     def api_commodity(name: str):
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT name, price, rarity, image_url, description
+                SELECT name, price, rarity, spawn_weight_override, image_url, description
                 FROM commodities
                 WHERE name = ? COLLATE NOCASE
                 """,
@@ -3219,6 +3610,122 @@ def create_app() -> Flask:
             player["trade_limit_window_minutes"] = 0.0
 
         return jsonify({"player": player})
+
+    @app.get("/api/player/<int:user_id>/commodities")
+    def api_player_commodities(user_id: int):
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            inv_rows = conn.execute(
+                """
+                SELECT commodity_name AS name, quantity
+                FROM user_commodities
+                WHERE guild_id = ? AND user_id = ? AND quantity > 0
+                ORDER BY commodity_name ASC
+                """,
+                (guild_id, user_id),
+            ).fetchall()
+            all_rows = conn.execute(
+                """
+                SELECT name
+                FROM commodities
+                WHERE guild_id = ?
+                ORDER BY name ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        return jsonify(
+            {
+                "inventory": [dict(r) for r in inv_rows],
+                "available": [str(r["name"]) for r in all_rows],
+            }
+        )
+
+    @app.post("/api/player/<int:user_id>/commodities/set")
+    def api_player_set_commodity_qty(user_id: int):
+        data = request.get_json(silent=True) or {}
+        commodity_name = str(data.get("commodity_name", "")).strip()
+        if not commodity_name:
+            return jsonify({"error": "commodity_name is required"}), 400
+        try:
+            quantity = max(0, int(float(data.get("quantity", 0))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid quantity"}), 400
+
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM commodities
+                WHERE guild_id = ? AND name = ? COLLATE NOCASE
+                """,
+                (guild_id, commodity_name),
+            ).fetchone()
+            if exists is None:
+                return jsonify({"error": "Commodity not found"}), 404
+
+            if quantity <= 0:
+                conn.execute(
+                    """
+                    DELETE FROM user_commodities
+                    WHERE guild_id = ? AND user_id = ? AND commodity_name = ? COLLATE NOCASE
+                    """,
+                    (guild_id, user_id, commodity_name),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO user_commodities (guild_id, user_id, commodity_name, quantity)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id, commodity_name)
+                    DO UPDATE SET quantity = excluded.quantity
+                    """,
+                    (guild_id, user_id, commodity_name, quantity),
+                )
+
+            # Keep networth in sync with inventory edits.
+            networth_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(uc.quantity * c.price), 0.0) AS total
+                FROM user_commodities uc
+                JOIN commodities c
+                  ON c.guild_id = uc.guild_id
+                 AND c.name = uc.commodity_name
+                WHERE uc.guild_id = ? AND uc.user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            total = float(networth_row["total"]) if networth_row is not None else 0.0
+            conn.execute(
+                """
+                UPDATE users
+                SET networth = ?
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (total, guild_id, user_id),
+            )
+
+        return jsonify({"ok": True, "commodity_name": commodity_name, "quantity": quantity})
 
     @app.get("/api/perk-preview")
     def api_perk_preview():
@@ -3613,6 +4120,7 @@ def create_app() -> Flask:
             "name": str,
             "price": float,
             "rarity": str,
+            "spawn_weight_override": float,
             "image_url": str,
             "description": str,
         }
@@ -3631,6 +4139,8 @@ def create_app() -> Flask:
             return jsonify({"error": "No valid fields provided"}), 400
         if "price" in updates:
             updates["price"] = max(0.01, float(updates["price"]))
+        if "spawn_weight_override" in updates:
+            updates["spawn_weight_override"] = max(0.0, float(updates["spawn_weight_override"]))
         tags = _parse_tags(data.get("tags", ""))
 
         with _connect() as conn:
@@ -3689,6 +4199,10 @@ def create_app() -> Flask:
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid price"}), 400
         rarity = str(data.get("rarity", "common")).strip().lower() or "common"
+        try:
+            spawn_weight_override = max(0.0, float(data.get("spawn_weight_override", 0.0)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid spawn_weight_override"}), 400
         image_url = str(data.get("image_url", "")).strip()
         description = str(data.get("description", "")).strip()
         tags = _parse_tags(data.get("tags", ""))
@@ -3707,10 +4221,10 @@ def create_app() -> Flask:
                 return jsonify({"error": f"Commodity `{name}` already exists"}), 409
             conn.execute(
                 """
-                INSERT INTO commodities (guild_id, name, price, rarity, image_url, description)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO commodities (guild_id, name, price, rarity, spawn_weight_override, image_url, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, name, price, rarity, image_url, description),
+                (guild_id, name, price, rarity, spawn_weight_override, image_url, description),
             )
             for tag in tags:
                 conn.execute(
@@ -4165,6 +4679,27 @@ def create_app() -> Flask:
         except OSError as exc:
             return jsonify({"error": f"Delete failed: {exc}"}), 500
         return jsonify({"ok": True, "deleted": backup_name})
+
+    @app.get("/api/server-actions/backups/<backup_name>/download")
+    def api_server_action_download_backup(backup_name: str):
+        if "/" in backup_name or "\\" in backup_name:
+            return jsonify({"error": "Invalid backup name"}), 400
+        if not backup_name.endswith(".db"):
+            return jsonify({"error": "Only .db backup files are downloadable"}), 400
+
+        backup_dir = _backup_dir().resolve()
+        target = (backup_dir / backup_name).resolve()
+        if target.parent != backup_dir:
+            return jsonify({"error": "Invalid backup path"}), 400
+        if not target.exists():
+            return jsonify({"error": "Backup not found"}), 404
+
+        return send_file(
+            target,
+            as_attachment=True,
+            download_name=backup_name,
+            mimetype="application/x-sqlite3",
+        )
 
     return app
 

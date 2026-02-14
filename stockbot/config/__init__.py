@@ -17,6 +17,7 @@ from stockbot.config.settings import (
     TRADING_FEES,
     COMMODITIES_LIMIT,
     PAWN_SELL_RATE,
+    SHOP_RARITY_WEIGHTS,
     RANK_INCOME,
     DEFAULT_RANK,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "TRADING_FEES",
     "COMMODITIES_LIMIT",
     "PAWN_SELL_RATE",
+    "SHOP_RARITY_WEIGHTS",
     "RANK_INCOME",
     "DEFAULT_RANK",
 ]

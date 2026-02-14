@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 from stockbot.config.settings import (
@@ -9,6 +10,7 @@ from stockbot.config.settings import (
     DRIFT_NOISE_GAIN,
     DRIFT_NOISE_LOW_FREQ_RATIO,
     DRIFT_NOISE_LOW_GAIN,
+    GM_ID,
     MARKET_CLOSE_HOUR,
     ANNOUNCEMENT_CHANNEL_ID,
     START_BALANCE,
@@ -17,6 +19,7 @@ from stockbot.config.settings import (
     TRADING_FEES,
     COMMODITIES_LIMIT,
     PAWN_SELL_RATE,
+    SHOP_RARITY_WEIGHTS,
     TRADING_LIMITS,
     TRADING_LIMITS_PERIOD,
     TREND_MULTIPLIER,
@@ -53,9 +56,9 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         description="Timezone used for display and market-close checks.",
     ),
     "MARKET_CLOSE_HOUR": AppConfigSpec(
-        default=int(MARKET_CLOSE_HOUR),
-        cast=int,
-        description="Local hour (0-23) used for daily market close logic.",
+        default=float(MARKET_CLOSE_HOUR),
+        cast=float,
+        description="Local close time as decimal hour [0,24). Example: 21.5 means 21:30.",
     ),
     "STONKERS_ROLE_NAME": AppConfigSpec(
         default=str(STONKERS_ROLE_NAME),
@@ -66,6 +69,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         default=int(ANNOUNCEMENT_CHANNEL_ID),
         cast=int,
         description="Discord channel ID used for announcements; 0 means auto-pick.",
+    ),
+    "GM_ID": AppConfigSpec(
+        default=int(GM_ID),
+        cast=int,
+        description="Discord user ID designated as game master; excluded from ranking leaderboards when >0.",
     ),
     "DRIFT_NOISE_FREQUENCY": AppConfigSpec(
         default=float(DRIFT_NOISE_FREQUENCY),
@@ -112,6 +120,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         cast=float,
         description="Pawn payout percentage when selling commodities to bank.",
     ),
+    "SHOP_RARITY_WEIGHTS": AppConfigSpec(
+        default=str(SHOP_RARITY_WEIGHTS),
+        cast=str,
+        description="JSON mapping of rarity->weight used for shop rotation.",
+    ),
 }
 
 
@@ -130,11 +143,15 @@ def _normalize(name: str, value: Any) -> Any:
         text = str(value).strip()
         return text or str(DISPLAY_TIMEZONE)
     if name == "MARKET_CLOSE_HOUR":
-        return max(0, min(23, int(value)))
+        close_hour = float(value)
+        # Keep within one-day bounds while allowing sub-hour precision.
+        return max(0.0, min(23.9997222222, close_hour))
     if name == "STONKERS_ROLE_NAME":
         text = str(value).strip()
         return text or str(STONKERS_ROLE_NAME)
     if name == "ANNOUNCEMENT_CHANNEL_ID":
+        return max(0, int(value))
+    if name == "GM_ID":
         return max(0, int(value))
     if name == "DRIFT_NOISE_FREQUENCY":
         return max(0.0, min(1.0, float(value)))
@@ -154,6 +171,28 @@ def _normalize(name: str, value: Any) -> Any:
         return max(0, int(value))
     if name == "PAWN_SELL_RATE":
         return max(0.0, min(100.0, float(value)))
+    if name == "SHOP_RARITY_WEIGHTS":
+        text = str(value).strip()
+        if not text:
+            return str(SHOP_RARITY_WEIGHTS)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return str(SHOP_RARITY_WEIGHTS)
+        if not isinstance(parsed, dict):
+            return str(SHOP_RARITY_WEIGHTS)
+        normalized: dict[str, float] = {}
+        for key, raw in parsed.items():
+            k = str(key).strip().lower()
+            if not k:
+                continue
+            try:
+                normalized[k] = max(0.0, float(raw))
+            except (TypeError, ValueError):
+                continue
+        if not normalized:
+            return str(SHOP_RARITY_WEIGHTS)
+        return json.dumps(normalized, separators=(",", ":"))
     return value
 
 

@@ -39,7 +39,7 @@ def build_market_close_v2_view(
             container.add_item(ui.TextDisplay(content="\n\n".join(body_parts)))
             if hasattr(ui, "Separator"):
                 container.add_item(ui.Separator())
-        container.add_item(ui.TextDisplay(content="# **Market Close: Commodity Networth Leaders**"))
+        container.add_item(ui.TextDisplay(content="# **Market Close: Networth Leaders**"))
         container.add_item(ui.TextDisplay(content="\n".join(ranking_lines) if ranking_lines else "_No ranking data_"))
         view.add_item(container)
         return view

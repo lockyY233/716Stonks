@@ -1,6 +1,7 @@
 from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import View, button
 
+from stockbot.config.runtime import get_app_config
 from stockbot.db import get_commodities, get_companies, get_users
 
 
@@ -170,6 +171,9 @@ def setup_list(tree: app_commands.CommandTree) -> None:
             return
         if target == "players":
             rows = get_users(interaction.guild.id)
+            gm_id = int(get_app_config("GM_ID"))
+            if gm_id > 0:
+                rows = [row for row in rows if int(row.get("user_id", 0)) != gm_id]
             pages = _build_player_pages(rows)
             view = CompaniesPager(interaction.user.id, pages)
             await interaction.response.send_message(embed=pages[0], view=view)

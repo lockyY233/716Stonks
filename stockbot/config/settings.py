@@ -11,9 +11,10 @@ START_BALANCE = 5                           # Players starting balance
 TICK_INTERVAL = 5                           # 1 tick = 1 update to the pricing
 TREND_MULTIPLIER = 1e-2                     # Multiplier to the slope 
 DISPLAY_TIMEZONE = "America/New_York"       # Timezone for display only
-MARKET_CLOSE_HOUR = 21                      # hour to record daily close (reset changes and send tag players for news)
+MARKET_CLOSE_HOUR = 21.0                    # local close time as decimal hour (e.g. 21.5 = 21:30)
 STONKERS_ROLE_NAME = "📈💰📊Stonkers"        # Role granted on successful registration
 ANNOUNCEMENT_CHANNEL_ID = 0                 # Target channel ID for market close announcements; 0 = auto-pick
+GM_ID = 0                                   # Discord user ID for game master; excluded from ranking leaderboards when >0
 DRIFT_NOISE_FREQUENCY = 0.7                 # Normalized [0,1] -> fraction of Nyquist (tick/2)
 DRIFT_NOISE_GAIN = 0.8                      # Multiplier on Perlin output so drift% feels closer to direct amplitude
 DRIFT_NOISE_LOW_FREQ_RATIO = 0.08           # Low band frequency as a ratio of DRIFT_NOISE_FREQUENCY
@@ -23,6 +24,7 @@ TRADING_LIMITS_PERIOD = 60                  # Reset window in ticks for trading 
 TRADING_FEES = 1                         # Fee as % of realized profit on sell transactions (profit only)
 COMMODITIES_LIMIT = 5                      # Max total commodity units a player can hold across all commodities; <=0 disables
 PAWN_SELL_RATE = 75                        # Pawn payout rate (% of commodity price when selling to bank)
+SHOP_RARITY_WEIGHTS = '{"common":1.0,"uncommon":0.6,"rare":0.3,"legendary":0.1,"exotic":0.03}'  # Base rarity spawn weights for /shop rotation
 
 # Rank income paid at market close (once per local date per guild).
 RANK_INCOME = {

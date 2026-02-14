@@ -66,6 +66,7 @@ def add_commodity(
     rarity: str,
     image_url: str,
     description: str,
+    spawn_weight_override: float = 0.0,
 ) -> bool:
     with get_connection() as conn:
         existing = conn.execute(
@@ -76,10 +77,18 @@ def add_commodity(
             return False
         conn.execute(
             """
-            INSERT INTO commodities (guild_id, name, price, rarity, image_url, description)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO commodities (guild_id, name, price, rarity, spawn_weight_override, image_url, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, name, max(0.01, float(price)), rarity, image_url, description),
+            (
+                guild_id,
+                name,
+                max(0.01, float(price)),
+                rarity,
+                max(0.0, float(spawn_weight_override)),
+                image_url,
+                description,
+            ),
         )
         return True
 
@@ -88,7 +97,7 @@ def get_commodities(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT name, price, rarity, image_url, description
+            SELECT name, price, rarity, spawn_weight_override, image_url, description
             FROM commodities
             WHERE guild_id = ?
             ORDER BY name
@@ -102,7 +111,7 @@ def get_commodity(guild_id: int, name: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT name, price, rarity, image_url, description
+            SELECT name, price, rarity, spawn_weight_override, image_url, description
             FROM commodities
             WHERE guild_id = ? AND name = ? COLLATE NOCASE
             """,
@@ -115,7 +124,7 @@ def get_user_commodities(guild_id: int, user_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT uc.commodity_name AS name, uc.quantity, c.price, c.rarity, c.image_url, c.description
+            SELECT uc.commodity_name AS name, uc.quantity, c.price, c.rarity, c.spawn_weight_override, c.image_url, c.description
             FROM user_commodities uc
             JOIN commodities c
               ON c.guild_id = uc.guild_id
@@ -518,6 +527,7 @@ def update_commodity_admin_fields(
         "name": str,
         "price": float,
         "rarity": str,
+        "spawn_weight_override": float,
         "image_url": str,
         "description": str,
     }

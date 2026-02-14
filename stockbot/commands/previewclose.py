@@ -27,8 +27,12 @@ def setup_previewclose(tree: app_commands.CommandTree) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         guild = interaction.guild
+        gm_id = int(get_app_config("GM_ID"))
         await asyncio.to_thread(recalc_all_networth, guild.id)
-        top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 3)
+        top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 50)
+        if gm_id > 0:
+            top = [row for row in top if int(row.get("user_id", 0)) != gm_id]
+        top = top[:3]
         announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         role = discord.utils.get(guild.roles, name=stonkers_role_name)

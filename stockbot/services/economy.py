@@ -25,7 +25,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
     drift_noise_low_freq_ratio = float(get_app_config("DRIFT_NOISE_LOW_FREQ_RATIO"))
     drift_noise_gain = float(get_app_config("DRIFT_NOISE_GAIN"))
     drift_noise_low_gain = float(get_app_config("DRIFT_NOISE_LOW_GAIN"))
-    market_close_hour = int(get_app_config("MARKET_CLOSE_HOUR"))
+    market_close_hour = float(get_app_config("MARKET_CLOSE_HOUR"))
     display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
     fast_cycles_per_tick = normalized_frequency_to_cycles_per_tick(drift_noise_frequency)
     low_cycles_per_tick = fast_cycles_per_tick * max(0.0, drift_noise_low_freq_ratio)
@@ -37,7 +37,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
         display_tz = timezone.utc
     local_dt = now_dt.astimezone(display_tz)
     local_date = local_dt.strftime("%Y-%m-%d")
-    local_hour = local_dt.hour
+    local_hour = local_dt.hour + (local_dt.minute / 60.0) + (local_dt.second / 3600.0)
     for guild_id in guild_ids:
         companies = get_companies(guild_id)
         if not companies:

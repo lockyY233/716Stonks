@@ -1,43 +1,15 @@
-from random import Random
-
 from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import Button, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
-from stockbot.config.runtime import get_app_config
 from stockbot.core.commodity_rarity import rarity_color
-from stockbot.db import get_commodities, get_state_value, set_state_value
+from stockbot.db import get_state_value, set_state_value
+from stockbot.services.shop_state import get_shop_items
 from stockbot.services.trading import perform_buy_commodity
 
-
-def _current_limit_bucket() -> int:
-    period = max(1, int(get_app_config("TRADING_LIMITS_PERIOD")))
-    raw = get_state_value("last_tick")
-    tick = int(raw) if raw is not None else 0
-    return max(0, tick // period)
-
-
 def _build_store(guild_id: int) -> list[dict]:
-    commodities = get_commodities(guild_id)
-    if not commodities:
-        return []
-
-    bucket = _current_limit_bucket()
-    rng = Random(f"shop:{guild_id}:{bucket}")
-    indices = list(range(len(commodities)))
-    rng.shuffle(indices)
-    selected = [commodities[i] for i in indices[:5]]
-
-    store_rows: list[dict] = []
-    for row in selected:
-        entry = dict(row)
-        stock_key = f"shop_sold:{guild_id}:{bucket}:{str(entry.get('name', '')).lower()}"
-        sold_raw = get_state_value(stock_key)
-        sold = int(sold_raw) if sold_raw and sold_raw.isdigit() else 0
-        entry["in_stock"] = sold < 1
-        entry["_stock_key"] = stock_key
-        store_rows.append(entry)
-    return store_rows
+    _bucket, rows, _available = get_shop_items(guild_id)
+    return rows
 
 
 class ShopPager(View):

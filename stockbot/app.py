@@ -148,15 +148,17 @@ class StockBot(discord.Client):
 
     async def _maybe_send_market_close_announcement(self) -> None:
         display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))
-        market_close_hour = int(get_app_config("MARKET_CLOSE_HOUR"))
+        market_close_hour = float(get_app_config("MARKET_CLOSE_HOUR"))
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
+        gm_id = int(get_app_config("GM_ID"))
         try:
             tz = ZoneInfo(display_timezone)
         except Exception:
             tz = timezone.utc
         now_local = datetime.now(timezone.utc).astimezone(tz)
-        if now_local.hour < market_close_hour:
+        now_hour = now_local.hour + (now_local.minute / 60.0) + (now_local.second / 3600.0)
+        if now_hour < market_close_hour:
             return
 
         local_date = now_local.strftime("%Y-%m-%d")
@@ -169,7 +171,10 @@ class StockBot(discord.Client):
                 continue
 
             await asyncio.to_thread(recalc_all_networth, guild.id)
-            top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 3)
+            top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 50)
+            if gm_id > 0:
+                top = [row for row in top if int(row.get("user_id", 0)) != gm_id]
+            top = top[:3]
             if not top:
                 set_state_value(state_key, local_date)
                 continue
@@ -183,6 +188,7 @@ class StockBot(discord.Client):
             lines = build_close_ranking_lines(top)
 
             announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
+            announced_ok = False
             try:
                 sent_v2 = await send_market_close_v2(
                     channel=channel,
@@ -197,6 +203,7 @@ class StockBot(discord.Client):
                         f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}"
                     )
                     continue
+                announced_ok = True
                 news_rows = await asyncio.to_thread(get_close_news, guild.id, enabled_only=True)
                 for row in news_rows:
                     news_embed = build_close_news_embed(row, preview=False)
@@ -206,7 +213,8 @@ class StockBot(discord.Client):
                     f"[announce] failed to send market-close update "
                     f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}: {exc}"
                 )
-            set_state_value(state_key, local_date)
+            if announced_ok:
+                set_state_value(state_key, local_date)
 
     def _backup_database_if_needed(self, local_date: str) -> None:
         state_key = "db_backup_date"
