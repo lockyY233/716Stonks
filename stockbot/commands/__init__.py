@@ -25,6 +25,7 @@ from stockbot.commands.nextreset import setup_nextreset
 from stockbot.commands.feedback import setup_feedback
 from stockbot.commands.admingive import setup_admingive
 from stockbot.commands.perks import setup_perks
+from stockbot.commands.previewclose import setup_previewclose
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -53,3 +54,4 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_feedback(tree)
     setup_admingive(tree)
     setup_perks(tree)
+    setup_previewclose(tree)

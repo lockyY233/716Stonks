@@ -2,13 +2,13 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Run bot",
+      "label": "Build locally",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": ["-m", "stockbot"],
       "group": {
         "kind": "build",
-        "isDefault": true
+        "isDefault": false
       },
       "presentation": {
         "reveal": "always",
@@ -23,6 +23,10 @@
       "args": [
         "${workspaceFolder}/scripts/deploy.sh"
       ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "options": {
         "envFile": "${workspaceFolder}/.env.deploy"
       },

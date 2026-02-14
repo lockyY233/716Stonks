@@ -98,6 +98,7 @@ MAIN_HTML = """<!doctype html>
     button, a.btn { background: var(--btn); border: 1px solid #334155; color: var(--text); padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: .86rem; text-decoration: none; text-align: center; }
     button:hover, a.btn:hover { background: var(--btnH); }
     button.active { border-color: #22c55e; }
+    button.alert { background: #7f1d1d; border-color: #ef4444; color: #fee2e2; }
     table { width: 100%; border-collapse: collapse; }
     thead th { text-align: left; font-size: .84rem; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); padding: 10px 8px; background: #0b1323; position: sticky; top: 0; }
     tbody td { padding: 9px 8px; border-bottom: 1px solid #111827; font-size: .92rem; }
@@ -153,6 +154,7 @@ MAIN_HTML = """<!doctype html>
           <button id="showCommodities">Show Commodities</button>
           <button id="showPlayers">Show Players</button>
           <button id="showPerks">Show Perks</button>
+          <button id="showAnnouncements">Announcements</button>
           <button id="showFeedback">Feedback</button>
           <button id="showBankActions">Bank Actions</button>
           <button id="showActionHistory">Action History</button>
@@ -197,6 +199,7 @@ MAIN_HTML = """<!doctype html>
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     let currentTab = "companies";
     let pollTimer = null;
@@ -248,6 +251,7 @@ MAIN_HTML = """<!doctype html>
       if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
       if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
       if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
+      if (currentTab === "announcements") document.getElementById("showAnnouncements").classList.add("active");
       if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
       if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
       if (currentTab === "actionHistory") document.getElementById("showActionHistory").classList.add("active");
@@ -393,7 +397,8 @@ MAIN_HTML = """<!doctype html>
       if (!rows.length) {
         tbody.innerHTML = controlRow + '<tr><td colspan="6" class="empty">No commodities found.</td></tr>';
       } else {
-        const fallback = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='9' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
+        const fallbackSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52"><rect width="100%" height="100%" fill="#0b1323"/><text x="50%" y="50%" fill="#94a3b8" font-size="9" text-anchor="middle" dominant-baseline="middle">No Img</text></svg>';
+        const fallback = `data:image/svg+xml;utf8,${encodeURIComponent(fallbackSvg)}`;
         tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-commodity="${esc(r.name)}">
           <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
           <td><strong>${esc(r.name)}</strong></td>
@@ -545,6 +550,261 @@ MAIN_HTML = """<!doctype html>
           const id = tr.getAttribute("data-perk-id");
           if (!id) return;
           gotoWithAuth(`/perk/${encodeURIComponent(id)}`);
+        });
+      });
+    }
+    function mdPreview(text) {
+      const source = String(text || "");
+      if (window.marked && typeof window.marked.parse === "function") {
+        try {
+          return window.marked.parse(source, {
+            gfm: true,
+            breaks: true,
+          });
+        } catch (_e) {}
+      }
+      const safe = esc(source);
+      return safe.split(String.fromCharCode(10)).join("<br>");
+    }
+    function renderCloseRankingPreview(rows) {
+      const list = Array.isArray(rows) ? rows : [];
+      if (!list.length) {
+        return "<strong>#1</strong> @PlayerOne — Networth <code>$0.00</code><br><strong>#2</strong> @PlayerTwo — Networth <code>$0.00</code><br><strong>#3</strong> @PlayerThree — Networth <code>$0.00</code>";
+      }
+      return list.slice(0, 3).map((p, idx) => {
+        const name = esc(String(p.display_name || `User ${p.user_id || "?"}`));
+        const nw = Number(p.networth || 0).toFixed(2);
+        return `<strong>#${idx + 1}</strong> ${name} — Networth <code>$${nw}</code>`;
+      }).join("<br>");
+    }
+    async function renderAnnouncements(data) {
+      const markdown = String(data.markdown || "");
+      const newsRows = Array.isArray(data.news || []) ? data.news : [];
+      const rankingRows = Array.isArray(data.rankings || []) ? data.rankings : [];
+      document.getElementById("tableTitle").textContent = "Announcements";
+      document.getElementById("thead").innerHTML = "";
+      const tbody = document.getElementById("rows");
+      const newsHtml = newsRows.length
+        ? newsRows.map((n) => `
+            <tr data-news-id="${esc(String(n.id || ""))}">
+              <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+                <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
+                    <input data-news-title="${esc(String(n.id || ""))}" value="${esc(String(n.title || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                  </div>
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
+                    <input data-news-sort="${esc(String(n.id || ""))}" type="number" value="${esc(String(n.sort_order ?? 0))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                  </div>
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
+                    <select data-news-enabled="${esc(String(n.id || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                      <option value="1"${Number(n.enabled || 0) ? " selected" : ""}>Yes</option>
+                      <option value="0"${Number(n.enabled || 0) ? "" : " selected"}>No</option>
+                    </select>
+                  </div>
+                </div>
+                <div style="margin-top:8px;">
+                  <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
+                  <textarea data-news-body="${esc(String(n.id || ""))}" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(String(n.body || ""))}</textarea>
+                </div>
+                <div style="margin-top:8px;">
+                  <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
+                  <input data-news-image="${esc(String(n.id || ""))}" value="${esc(String(n.image_url || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                </div>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+                  <button data-news-save="${esc(String(n.id || ""))}" style="padding:6px 10px;">Save</button>
+                  <button data-news-del="${esc(String(n.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button>
+                  <span class="muted">id ${esc(String(n.id || ""))}</span>
+                </div>
+              </td>
+            </tr>
+          `).join("")
+        : `<tr><td class="empty">No closing news items yet.</td></tr>`;
+      tbody.innerHTML = `
+        <tr>
+          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+            <div style="font-weight:700;margin-bottom:8px;">Close Announcement Markdown</div>
+            <textarea id="closeAnnouncementMd" style="width:100%;min-height:140px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(markdown)}</textarea>
+            <div style="margin-top:8px;">
+              <button id="saveCloseAnnouncement" style="padding:6px 10px;">Save Announcement</button>
+            </div>
+            <div style="margin-top:10px;font-weight:700;">Preview</div>
+            <div id="closeAnnouncementPreview" style="margin-top:6px;padding:10px;border:1px solid #1f2937;border-radius:8px;background:#0b1323;">
+              ${mdPreview(markdown)}
+              <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
+              <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
+              <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="font-weight:700;">Close News Embeds</div>
+              <button id="addCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add News</button>
+            </div>
+            <div id="addCloseNewsForm" style="margin-top:10px;display:none;">
+              <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
+                  <input id="newNewsTitle" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                </div>
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
+                  <input id="newNewsSort" type="number" value="0" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                </div>
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
+                  <select id="newNewsEnabled" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                    <option value="1" selected>Yes</option>
+                    <option value="0">No</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-top:8px;">
+                <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
+                <textarea id="newNewsBody" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;"></textarea>
+              </div>
+              <div style="margin-top:8px;">
+                <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
+                <input id="newNewsImage" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+              </div>
+              <div style="margin-top:8px;display:flex;gap:8px;">
+                <button id="saveNewCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">Create</button>
+                <button id="cancelNewCloseNews" style="padding:6px 10px;">Cancel</button>
+              </div>
+            </div>
+          </td>
+        </tr>
+        ${newsHtml}
+      `;
+      const mdInput = document.getElementById("closeAnnouncementMd");
+      const mdPreviewBox = document.getElementById("closeAnnouncementPreview");
+      if (mdInput && mdPreviewBox) {
+        mdInput.addEventListener("input", () => {
+          const html = `
+            ${mdPreview(mdInput.value)}
+            <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
+            <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
+            <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
+          `;
+          mdPreviewBox.innerHTML = html;
+        });
+      }
+      const saveBtn = document.getElementById("saveCloseAnnouncement");
+      if (saveBtn && mdInput) {
+        saveBtn.addEventListener("click", async () => {
+          saveBtn.disabled = true;
+          const old = saveBtn.textContent;
+          saveBtn.textContent = "Saving...";
+          try {
+            const res = await fetch(withAuthToken("/api/close-announcement"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ markdown: mdInput.value }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Save failed" }));
+              alert(err.error || "Save failed");
+            } else {
+              saveBtn.textContent = "Saved";
+              setTimeout(() => { saveBtn.textContent = old; }, 800);
+            }
+          } finally {
+            saveBtn.disabled = false;
+          }
+        });
+      }
+      const addBtn = document.getElementById("addCloseNews");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const form = document.getElementById("addCloseNewsForm");
+          if (form) form.style.display = "block";
+          addBtn.style.display = "none";
+        });
+      }
+      const cancelAddBtn = document.getElementById("cancelNewCloseNews");
+      if (cancelAddBtn) {
+        cancelAddBtn.addEventListener("click", () => {
+          const form = document.getElementById("addCloseNewsForm");
+          const addButton = document.getElementById("addCloseNews");
+          if (form) form.style.display = "none";
+          if (addButton) addButton.style.display = "";
+        });
+      }
+      const saveNewBtn = document.getElementById("saveNewCloseNews");
+      if (saveNewBtn) {
+        saveNewBtn.addEventListener("click", async () => {
+          const title = String((document.getElementById("newNewsTitle") || {}).value || "").trim();
+          const body = String((document.getElementById("newNewsBody") || {}).value || "");
+          const image_url = String((document.getElementById("newNewsImage") || {}).value || "").trim();
+          const sort_order = Number(String((document.getElementById("newNewsSort") || {}).value || "0"));
+          const enabled = Number(String((document.getElementById("newNewsEnabled") || {}).value || "1")) ? 1 : 0;
+          if (!title) {
+            alert("Title is required.");
+            return;
+          }
+          saveNewBtn.disabled = true;
+          const res = await fetch(withAuthToken("/api/close-news"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
+          });
+          saveNewBtn.disabled = false;
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Create failed" }));
+            alert(err.error || "Create failed");
+            return;
+          }
+          await loadAnnouncements();
+        });
+      }
+      document.querySelectorAll("button[data-news-save]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-news-save");
+          if (!id) return;
+          const titleEl = document.querySelector(`input[data-news-title="${CSS.escape(id)}"]`);
+          const bodyEl = document.querySelector(`textarea[data-news-body="${CSS.escape(id)}"]`);
+          const imageEl = document.querySelector(`input[data-news-image="${CSS.escape(id)}"]`);
+          const sortEl = document.querySelector(`input[data-news-sort="${CSS.escape(id)}"]`);
+          const enabledEl = document.querySelector(`select[data-news-enabled="${CSS.escape(id)}"]`);
+          const title = String(titleEl ? titleEl.value : "").trim();
+          const body = String(bodyEl ? bodyEl.value : "");
+          const image_url = String(imageEl ? imageEl.value : "").trim();
+          const sort_order = Number(String(sortEl ? sortEl.value : "0"));
+          const enabled = Number(String(enabledEl ? enabledEl.value : "1")) ? 1 : 0;
+          if (!title) {
+            alert("Title is required.");
+            return;
+          }
+          btn.disabled = true;
+          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
+          });
+          btn.disabled = false;
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Update failed" }));
+            alert(err.error || "Update failed");
+            return;
+          }
+          await loadAnnouncements();
+        });
+      });
+      document.querySelectorAll("button[data-news-del]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-news-del");
+          if (!id || !window.confirm("Delete this news item?")) return;
+          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), { method: "DELETE" });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Delete failed" }));
+            alert(err.error || "Delete failed");
+            return;
+          }
+          await loadAnnouncements();
         });
       });
     }
@@ -936,6 +1196,32 @@ MAIN_HTML = """<!doctype html>
       await renderPerks(data.perks || []);
       document.getElementById("last").textContent = fmtEtDate();
     }
+    async function loadAnnouncements() {
+      const [aRes, nRes, pRes] = await Promise.all([
+        fetch(withAuthToken("/api/close-announcement"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/close-news"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/players"), { cache: "no-store" }),
+      ]);
+      if (!aRes.ok || !nRes.ok || !pRes.ok) {
+        const aErr = await aRes.text().catch(() => "");
+        const nErr = await nRes.text().catch(() => "");
+        const pErr = await pRes.text().catch(() => "");
+        throw new Error(`Announcements load failed (close-announcement=${aRes.status}, close-news=${nRes.status}, players=${pRes.status}) ${aErr || nErr || pErr}`.trim());
+      }
+      const aData = await aRes.json().catch(() => ({}));
+      const nData = await nRes.json().catch(() => ({}));
+      const pData = await pRes.json().catch(() => ({}));
+      const rankings = (Array.isArray(pData.players) ? pData.players : [])
+        .slice()
+        .sort((x, y) => Number(y.networth || 0) - Number(x.networth || 0))
+        .slice(0, 3);
+      await renderAnnouncements({
+        markdown: String(aData.markdown || ""),
+        news: Array.isArray(nData.news) ? nData.news : [],
+        rankings,
+      });
+      document.getElementById("last").textContent = fmtEtDate();
+    }
     async function loadActionHistory() {
       const res = await fetch(withAuthToken("/api/action-history"), { cache: "no-store" });
       const data = await res.json();
@@ -969,10 +1255,14 @@ MAIN_HTML = """<!doctype html>
           untilResetSeconds = Math.max(0, Number(data.seconds_until_reset));
           document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
         } else {
-          document.getElementById("statUntilReset").textContent = data.until_reset || "-";
+        document.getElementById("statUntilReset").textContent = data.until_reset || "-";
         }
         document.getElementById("statCompanies").textContent = String(data.company_count ?? "-");
         document.getElementById("statUsers").textContent = String(data.user_count ?? "-");
+        const bankBtn = document.getElementById("showBankActions");
+        const feedbackBtn = document.getElementById("showFeedback");
+        if (bankBtn) bankBtn.classList.toggle("alert", Number(data.bank_pending_count || 0) > 0);
+        if (feedbackBtn) feedbackBtn.classList.toggle("alert", Number(data.feedback_count || 0) > 0);
       } catch (_e) {}
     }
     function startHeaderTicker() {
@@ -1005,12 +1295,16 @@ MAIN_HTML = """<!doctype html>
         else if (currentTab === "commodities") await loadCommodities();
         else if (currentTab === "players") await loadPlayers();
         else if (currentTab === "perks") await loadPerks();
+        else if (currentTab === "announcements") await loadAnnouncements();
         else if (currentTab === "feedback") await loadFeedback();
         else if (currentTab === "bankActions") await loadBankActions();
         else if (currentTab === "actionHistory") await loadActionHistory();
         else if (currentTab === "configs") await loadConfigs();
         else return;
-      } catch (_e) {}
+      } catch (e) {
+        console.error("Dashboard tab load failed:", e);
+        document.getElementById("rows").innerHTML = `<tr><td class="empty">Failed to load ${esc(currentTab)}: ${esc(String(e && e.message ? e.message : e))}</td></tr>`;
+      }
     }
     async function syncPollInterval() {
       try {
@@ -1030,6 +1324,7 @@ MAIN_HTML = """<!doctype html>
     document.getElementById("showCommodities").addEventListener("click", () => { currentTab = "commodities"; setButtons(); tick(); });
     document.getElementById("showPlayers").addEventListener("click", () => { currentTab = "players"; setButtons(); tick(); });
     document.getElementById("showPerks").addEventListener("click", () => { currentTab = "perks"; setButtons(); tick(); });
+    document.getElementById("showAnnouncements").addEventListener("click", () => { currentTab = "announcements"; setButtons(); tick(); });
     document.getElementById("showFeedback").addEventListener("click", () => { currentTab = "feedback"; setButtons(); tick(); });
     document.getElementById("showBankActions").addEventListener("click", () => { currentTab = "bankActions"; setButtons(); tick(); });
     document.getElementById("showActionHistory").addEventListener("click", () => { currentTab = "actionHistory"; setButtons(); tick(); });
@@ -2472,6 +2767,8 @@ def create_app() -> Flask:
     def _auth_gate():
         _cleanup_expired_auth_entries()
         g._new_webadmin_sid = None
+        if request.path == "/favicon.ico":
+            return ("", 204)
 
         token = (request.args.get("token") or "").strip()
         godtoken_state = (_state_get("webadmin:godtoken") or "").strip()
@@ -2605,8 +2902,18 @@ def create_app() -> Flask:
         with _connect() as conn:
             companies_row = conn.execute("SELECT COUNT(*) AS c FROM companies").fetchone()
             users_row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+            feedback_row = conn.execute("SELECT COUNT(*) AS c FROM feedback").fetchone()
+            bank_pending_row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM bank_requests
+                WHERE status = 'pending'
+                """
+            ).fetchone()
         company_count = int(companies_row["c"]) if companies_row is not None else 0
         user_count = int(users_row["c"]) if users_row is not None else 0
+        feedback_count = int(feedback_row["c"]) if feedback_row is not None else 0
+        bank_pending_count = int(bank_pending_row["c"]) if bank_pending_row is not None else 0
         return jsonify(
             {
                 "until_close": _until_close_text(),
@@ -2615,6 +2922,8 @@ def create_app() -> Flask:
                 "seconds_until_reset": _until_reset_seconds(),
                 "company_count": company_count,
                 "user_count": user_count,
+                "feedback_count": feedback_count,
+                "bank_pending_count": bank_pending_count,
             }
         )
 
@@ -2997,6 +3306,113 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/close-announcement")
+    def api_close_announcement_get():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        markdown = _state_get(f"close_announcement_md:{guild_id}") or ""
+        return jsonify({"guild_id": guild_id, "markdown": markdown})
+
+    @app.post("/api/close-announcement")
+    def api_close_announcement_set():
+        data = request.get_json(silent=True) or {}
+        markdown = str(data.get("markdown", ""))
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        _state_set(f"close_announcement_md:{guild_id}", markdown)
+        return jsonify({"ok": True, "guild_id": guild_id, "markdown": markdown})
+
+    @app.get("/api/close-news")
+    def api_close_news():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, title, body, image_url, sort_order, enabled, updated_at
+                FROM close_news
+                WHERE guild_id = ?
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        return jsonify({"guild_id": guild_id, "news": [dict(r) for r in rows]})
+
+    @app.post("/api/close-news")
+    def api_close_news_create():
+        data = request.get_json(silent=True) or {}
+        title = str(data.get("title", "")).strip()
+        body = str(data.get("body", ""))
+        image_url = str(data.get("image_url", "")).strip()
+        try:
+            sort_order = int(data.get("sort_order", 0))
+            enabled = 1 if int(data.get("enabled", 1)) != 0 else 0
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid sort_order/enabled"}), 400
+        if not title:
+            return jsonify({"error": "title is required"}), 400
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            cur = conn.execute(
+                """
+                INSERT INTO close_news (guild_id, title, body, image_url, sort_order, enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, title, body, image_url, sort_order, enabled, now_iso),
+            )
+            news_id = int(cur.lastrowid)
+        return jsonify({"ok": True, "id": news_id})
+
+    @app.post("/api/close-news/<int:news_id>")
+    def api_close_news_update(news_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        if "title" in data:
+            title = str(data.get("title", "")).strip()
+            if not title:
+                return jsonify({"error": "title cannot be empty"}), 400
+            updates["title"] = title
+        if "body" in data:
+            updates["body"] = str(data.get("body", ""))
+        if "image_url" in data:
+            updates["image_url"] = str(data.get("image_url", "")).strip()
+        if "sort_order" in data:
+            try:
+                updates["sort_order"] = int(data.get("sort_order", 0))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid sort_order"}), 400
+        if "enabled" in data:
+            try:
+                updates["enabled"] = 1 if int(data.get("enabled", 1)) != 0 else 0
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid enabled"}), 400
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values())
+        values.append(news_id)
+        with _connect() as conn:
+            cur = conn.execute(
+                f"UPDATE close_news SET {set_clause} WHERE id = ?",
+                values,
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "News item not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/close-news/<int:news_id>")
+    def api_close_news_delete(news_id: int):
+        with _connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM close_news WHERE id = ?",
+                (news_id,),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "News item not found"}), 404
+        return jsonify({"ok": True})
+
     @app.post("/api/company/<symbol>/adjust")
     def api_company_adjust(symbol: str):
         data = request.get_json(silent=True) or {}
@@ -3108,7 +3524,6 @@ def create_app() -> Flask:
             except (TypeError, ValueError):
                 return jsonify({"error": f"Invalid value for {key}"}), 400
             updates[key] = value
-
         if not updates:
             return jsonify({"error": "No valid fields provided"}), 400
 

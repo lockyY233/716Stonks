@@ -154,6 +154,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS close_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                image_url TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS perks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -205,6 +216,7 @@ def init_db() -> None:
         _ensure_commodities_tables(conn)
         _ensure_bank_requests_table(conn)
         _ensure_feedback_table(conn)
+        _ensure_close_news_table(conn)
         _ensure_perks_tables(conn)
 
 
@@ -380,6 +392,23 @@ def _ensure_feedback_table(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             message TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+        """
+    )
+
+
+def _ensure_close_news_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS close_news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            image_url TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
         );
         """
     )

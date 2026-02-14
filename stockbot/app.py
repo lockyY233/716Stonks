@@ -14,6 +14,7 @@ from stockbot.db import (
     backfill_company_starting_ticks,
     create_database_backup,
     get_unprocessed_reviewed_bank_requests,
+    get_close_news,
     get_top_users_by_networth,
     get_state_value,
     get_users,
@@ -24,6 +25,11 @@ from stockbot.db import (
     update_user_bank,
 )
 from stockbot.services.economy import process_ticks
+from stockbot.services.announcements import (
+    build_close_news_embed,
+    build_close_ranking_lines,
+    send_market_close_v2,
+)
 from stockbot.services.perks import apply_income_perks
 
 
@@ -174,18 +180,27 @@ class StockBot(discord.Client):
 
             role = discord.utils.get(guild.roles, name=stonkers_role_name)
             role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
-            lines = []
-            for idx, row in enumerate(top, start=1):
-                user_id = int(row["user_id"])
-                networth = float(row.get("networth", 0.0))
-                lines.append(f"**#{idx}** <@{user_id}> — Networth `${networth:.2f}`")
+            lines = build_close_ranking_lines(top)
 
-            embed = discord.Embed(
-                title="Market Close: Commodity Networth Leaders",
-                description="\n".join(lines),
-            )
+            announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
             try:
-                await channel.send(content=f"{role_mention} market close update:", embed=embed)
+                sent_v2 = await send_market_close_v2(
+                    channel=channel,
+                    role_mention=role_mention,
+                    announcement_md=announcement_md,
+                    ranking_lines=lines,
+                    content_suffix="market close!",
+                )
+                if not sent_v2:
+                    print(
+                        f"[announce] skipped market-close update (V2 required) "
+                        f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}"
+                    )
+                    continue
+                news_rows = await asyncio.to_thread(get_close_news, guild.id, enabled_only=True)
+                for row in news_rows:
+                    news_embed = build_close_news_embed(row, preview=False)
+                    await channel.send(embed=news_embed)
             except Exception as exc:
                 print(
                     f"[announce] failed to send market-close update "
@@ -232,7 +247,7 @@ class StockBot(discord.Client):
         self,
         guild: discord.Guild,
         preferred_channel_id: int = 0,
-    ) -> discord.abc.Messageable | None:
+    ) -> discord.TextChannel | discord.Thread | None:
         # Explicit config: try this channel first.
         if preferred_channel_id > 0:
             channel = guild.get_channel(preferred_channel_id) or self.get_channel(preferred_channel_id)

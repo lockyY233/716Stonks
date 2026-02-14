@@ -910,6 +910,35 @@ def get_feedback(
         return [dict(row) for row in rows]
 
 
+def get_close_news(
+    guild_id: int,
+    *,
+    enabled_only: bool = False,
+) -> list[dict]:
+    with get_connection() as conn:
+        if enabled_only:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, title, body, image_url, sort_order, enabled, updated_at
+                FROM close_news
+                WHERE guild_id = ? AND enabled = 1
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, title, body, image_url, sort_order, enabled, updated_at
+                FROM close_news
+                WHERE guild_id = ?
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_bank_requests(
     *,
     guild_id: int | None = None,
