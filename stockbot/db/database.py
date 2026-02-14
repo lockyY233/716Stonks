@@ -92,6 +92,10 @@ def init_db() -> None:
                 spawn_weight_override REAL NOT NULL DEFAULT 0,
                 image_url TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
+                perk_name TEXT NOT NULL DEFAULT '',
+                perk_description TEXT NOT NULL DEFAULT '',
+                perk_min_qty INTEGER NOT NULL DEFAULT 1,
+                perk_effects_json TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (guild_id, name)
             );
 
@@ -327,6 +331,10 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
             spawn_weight_override REAL NOT NULL DEFAULT 0,
             image_url TEXT NOT NULL DEFAULT '',
             description TEXT NOT NULL DEFAULT '',
+            perk_name TEXT NOT NULL DEFAULT '',
+            perk_description TEXT NOT NULL DEFAULT '',
+            perk_min_qty INTEGER NOT NULL DEFAULT 1,
+            perk_effects_json TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (guild_id, name)
         );
 
@@ -366,6 +374,22 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
     if "spawn_weight_override" not in columns:
         conn.execute(
             "ALTER TABLE commodities ADD COLUMN spawn_weight_override REAL NOT NULL DEFAULT 0;"
+        )
+    if "perk_name" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN perk_name TEXT NOT NULL DEFAULT '';"
+        )
+    if "perk_description" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN perk_description TEXT NOT NULL DEFAULT '';"
+        )
+    if "perk_min_qty" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN perk_min_qty INTEGER NOT NULL DEFAULT 1;"
+        )
+    if "perk_effects_json" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN perk_effects_json TEXT NOT NULL DEFAULT '';"
         )
 
 

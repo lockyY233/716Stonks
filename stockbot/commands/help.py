@@ -1,134 +1,147 @@
-from discord import ButtonStyle, Embed, Interaction, Member, app_commands
-from discord.ui import View, button
+from __future__ import annotations
+
+import discord
+from discord import ButtonStyle, Interaction, app_commands
 
 
-class HelpView(View):
-    def __init__(self, owner_id: int, show_admin: bool) -> None:
-        super().__init__(timeout=180)
-        self._owner_id = owner_id
-        if not show_admin:
-            self.remove_item(self.addcompany)
-            self.remove_item(self.addcommodity)
-            self.remove_item(self.adminshow)
-            self.remove_item(self.webadmin)
+def _supports_components_v2() -> bool:
+    ui = discord.ui
+    return all(hasattr(ui, name) for name in ("LayoutView", "Container", "TextDisplay", "ActionRow"))
 
-    async def interaction_check(self, interaction: Interaction) -> bool:
-        if interaction.user.id != self._owner_id:
-            await interaction.response.send_message(
-                "Only the command user can use these buttons.",
-                ephemeral=False,
+
+HELP_SECTIONS: dict[str, str] = {
+    "get_started": (
+        "## Get Started\n"
+        "1. `/register` to create your account.\n"
+        "2. `/list target:companies` to see available stocks.\n"
+        "3. `/price symbol:...` to view chart + actions.\n"
+        "4. Use `/buy` and `/sell` to trade.\n"
+        "5. Use `/shop` to buy commodities and build networth.\n"
+        "6. Use `/ranking` to track the leaderboard."
+    ),
+    "tutorial": (
+        "## Tutorial\n"
+        "- Market updates every tick.\n"
+        "- Stock prices are driven by base, slope, drift, and player flow.\n"
+        "- Trading has per-window limits and fees.\n"
+        "- Commodities increase networth and can trigger perks.\n"
+        "- Use `/nextreset` to see when trading limits reset."
+    ),
+    "market": (
+        "## Market Commands\n"
+        "- `/price symbol:... [last:...]`\n"
+        "- `/buy`\n"
+        "- `/sell`\n"
+        "- `/transactionhistory`"
+    ),
+    "economy": (
+        "## Economy Commands\n"
+        "- `/shop`\n"
+        "- `/bank`\n"
+        "- `/donate target:... amount:...`\n"
+        "- `/feedback`\n"
+        "- `/nextreset`"
+    ),
+    "profile": (
+        "## Profile Commands\n"
+        "- `/status [member:...]`\n"
+        "- `/ranking`\n"
+        "- `/perks [member:...]`"
+    ),
+    "lookup": (
+        "## Lookup Commands\n"
+        "- `/list target:companies|commodities|players`\n"
+        "- `/desc [target:...]`"
+    ),
+    "fun": (
+        "## Fun Commands\n"
+        "- `/hello`\n"
+        "- `/no`"
+    ),
+}
+
+
+class HelpV2View(discord.ui.LayoutView):
+    def __init__(self, section: str = "get_started") -> None:
+        super().__init__(timeout=300)
+        self._section = section if section in HELP_SECTIONS else "get_started"
+        self._render()
+
+    def _render(self) -> None:
+        self.clear_items()
+        ui = discord.ui
+        container = ui.Container()
+        container.add_item(ui.TextDisplay(content="# 716Stonks Help"))
+        container.add_item(
+            ui.TextDisplay(
+                content=(
+                    "Public help panel. Choose a section below.\n"
+                    "Admin-only commands are intentionally excluded."
+                )
             )
-            return False
-        return True
-
-    async def _send_detail(self, interaction: Interaction, title: str, usage: str, detail: str) -> None:
-        embed = Embed(title=title, description=detail)
-        embed.add_field(name="Usage", value=f"`{usage}`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=False)
-
-    @button(label="Get Started", style=ButtonStyle.success, row=0)
-    async def get_started(self, interaction: Interaction, _button) -> None:
-        embed = Embed(
-            title="Get Started",
-            description=(
-                "Quick start guide for new players:\n\n"
-                "1. Use `/register` to create your account.\n"
-                "2. Use `/list target:companies` to see available stocks.\n"
-                "3. Use `/price symbol:...` to check charts and current price.\n"
-                "4. Buy/Sell stocks with `/buy` and `/sell` (or the Buy button in `/price`).\n"
-                "5. Use `/shop` to buy commodities and build networth.\n"
-                "6. Higher army ranks receive different income at market close.\n\n"
-                "Important rules:\n"
-                "- Trading actions are limited per reset window.\n"
-                "- Selling charges a fee on realized profit."
-            ),
         )
-        await interaction.response.send_message(embed=embed, ephemeral=False)
+        if hasattr(ui, "Separator"):
+            container.add_item(ui.Separator())
+        container.add_item(ui.TextDisplay(content=HELP_SECTIONS[self._section]))
 
-    @button(label="/register", style=ButtonStyle.secondary, row=0)
-    async def register(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/register", "/register", "Register your account.")
+        top_row = ui.ActionRow()
+        started_btn = discord.ui.Button(label="Get Started", style=ButtonStyle.success)
+        tutorial_btn = discord.ui.Button(label="Tutorial", style=ButtonStyle.primary)
 
-    @button(label="/buy", style=ButtonStyle.secondary, row=0)
-    async def buy(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/buy", "/buy", "Buy shares or commodities (interactive flow).")
+        async def _to_started(interaction: Interaction) -> None:
+            self._section = "get_started"
+            self._render()
+            await interaction.response.edit_message(view=self)
 
-    @button(label="/sell", style=ButtonStyle.secondary, row=0)
-    async def sell(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/sell", "/sell", "Sell shares (interactive flow).")
+        async def _to_tutorial(interaction: Interaction) -> None:
+            self._section = "tutorial"
+            self._render()
+            await interaction.response.edit_message(view=self)
 
-    @button(label="/price", style=ButtonStyle.secondary, row=0)
-    async def price(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/price", "/price symbol:ATEST last:50", "Show company price chart.")
+        started_btn.callback = _to_started
+        tutorial_btn.callback = _to_tutorial
+        top_row.add_item(started_btn)
+        top_row.add_item(tutorial_btn)
+        container.add_item(top_row)
 
-    @button(label="/status", style=ButtonStyle.secondary, row=1)
-    async def status(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/status", "/status member:@user", "Show profile and holdings.")
+        row_2 = ui.ActionRow()
+        market_btn = discord.ui.Button(label="Market", style=ButtonStyle.secondary)
+        economy_btn = discord.ui.Button(label="Economy", style=ButtonStyle.secondary)
+        profile_btn = discord.ui.Button(label="Profile", style=ButtonStyle.secondary)
+        lookup_btn = discord.ui.Button(label="Lookup", style=ButtonStyle.secondary)
+        fun_btn = discord.ui.Button(label="Fun", style=ButtonStyle.secondary)
 
-    @button(label="/shop", style=ButtonStyle.secondary, row=1)
-    async def shop(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/shop", "/shop", "Browse rotating commodity shop.")
+        async def _switch(interaction: Interaction, section: str) -> None:
+            self._section = section
+            self._render()
+            await interaction.response.edit_message(view=self)
 
-    @button(label="/bank", style=ButtonStyle.secondary, row=1)
-    async def bank(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/bank", "/bank", "Open bank services (loan/payback).")
+        market_btn.callback = lambda i: _switch(i, "market")
+        economy_btn.callback = lambda i: _switch(i, "economy")
+        profile_btn.callback = lambda i: _switch(i, "profile")
+        lookup_btn.callback = lambda i: _switch(i, "lookup")
+        fun_btn.callback = lambda i: _switch(i, "fun")
 
-    @button(label="/nextreset", style=ButtonStyle.secondary, row=1)
-    async def nextreset(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/nextreset", "/nextreset", "Show minutes until trading-limit reset.")
+        row_2.add_item(market_btn)
+        row_2.add_item(economy_btn)
+        row_2.add_item(profile_btn)
+        row_2.add_item(lookup_btn)
+        row_2.add_item(fun_btn)
+        container.add_item(row_2)
 
-    @button(label="/feedback", style=ButtonStyle.secondary, row=1)
-    async def feedback(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/feedback", "/feedback", "Send anonymous feedback.")
-
-    @button(label="/list", style=ButtonStyle.secondary, row=2)
-    async def list_cmd(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/list", "/list target:companies|commodities|players", "Show paged lists.")
-
-    @button(label="/desc", style=ButtonStyle.secondary, row=2)
-    async def desc(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/desc", "/desc target:company_or_commodity", "Show lore/description.")
-
-    @button(label="/perks", style=ButtonStyle.secondary, row=2)
-    async def perks(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/perks", "/perks member:@user", "Show triggered perks and projected daily income.")
-
-    @button(label="/addcompany", style=ButtonStyle.primary, row=3)
-    async def addcompany(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/addcompany", "/addcompany ...", "Admin: add a company.")
-
-    @button(label="/addcommodity", style=ButtonStyle.primary, row=3)
-    async def addcommodity(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/addcommodity", "/addcommodity ...", "Admin: add a commodity.")
-
-    @button(label="/adminshow", style=ButtonStyle.primary, row=3)
-    async def adminshow(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/adminshow", "/adminshow target:users|companies|commodities", "Admin: inspect/edit rows.")
-
-    @button(label="/webadmin", style=ButtonStyle.primary, row=3)
-    async def webadmin(self, interaction: Interaction, _button) -> None:
-        await self._send_detail(interaction, "/webadmin", "/webadmin", "Admin: generate dashboard token link.")
+        self.add_item(container)
 
 
 def setup_help(tree: app_commands.CommandTree) -> None:
-    @tree.command(name="help", description="List available commands.")
+    @tree.command(name="help", description="Show public help panel (non-admin commands).")
     async def help_command(interaction: Interaction) -> None:
-        show_admin = False
-        if isinstance(interaction.user, Member):
-            show_admin = bool(interaction.user.guild_permissions.administrator)
-        elif interaction.guild is not None:
-            member = interaction.guild.get_member(interaction.user.id)
-            if member is not None:
-                show_admin = bool(member.guild_permissions.administrator)
+        if not _supports_components_v2():
+            await interaction.response.send_message(
+                "Help requires Components V2 support in this runtime.",
+                ephemeral=False,
+            )
+            return
 
-        embed = Embed(
-            title="Commands",
-            description="Tap a button for details.",
-        )
-        if show_admin:
-            embed.add_field(name="Mode", value="Admin view enabled.", inline=False)
-        else:
-            embed.add_field(name="Mode", value="Player view.", inline=False)
+        view = HelpV2View(section="get_started")
+        await interaction.response.send_message(view=view, ephemeral=False)
 
-        view = HelpView(interaction.user.id, show_admin=show_admin)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)

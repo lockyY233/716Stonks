@@ -211,7 +211,16 @@ MAIN_HTML = """<!doctype html>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
-    let currentTab = "companies";
+    const VALID_TABS = new Set(["companies", "commodities", "shop", "players", "perks", "announcements", "feedback", "bankActions", "actionHistory", "configs", "serverSettings"]);
+    function normalizeTab(tab) {
+      const t = String(tab || "").trim();
+      return VALID_TABS.has(t) ? t : "companies";
+    }
+    let currentTab = normalizeTab(
+      new URLSearchParams(window.location.search).get("tab")
+      || localStorage.getItem("dashboard_tab")
+      || "companies"
+    );
     let pollTimer = null;
     let pollMs = 2000;
     let untilCloseSeconds = null;
@@ -260,8 +269,21 @@ MAIN_HTML = """<!doctype html>
       const sep = url.includes("?") ? "&" : "?";
       return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
     }
+    function withTab(url, tab) {
+      const t = normalizeTab(tab);
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}tab=${encodeURIComponent(t)}`;
+    }
     function gotoWithAuth(url) {
-      window.location.href = withAuthToken(url);
+      window.location.href = withAuthToken(withTab(url, currentTab));
+    }
+    function setCurrentTab(tab) {
+      currentTab = normalizeTab(tab);
+      localStorage.setItem("dashboard_tab", currentTab);
+      const qp = new URLSearchParams(window.location.search);
+      qp.set("tab", currentTab);
+      const query = qp.toString();
+      history.replaceState(null, "", `${window.location.pathname}${query ? "?" + query : ""}`);
     }
     function setButtons() {
       document.querySelectorAll("button[id^='show']").forEach((btn) => btn.classList.remove("active"));
@@ -1499,17 +1521,18 @@ MAIN_HTML = """<!doctype html>
         pollTimer = setInterval(tick, pollMs);
       } catch (_e) {}
     }
-    document.getElementById("showCompanies").addEventListener("click", () => { currentTab = "companies"; setButtons(); tick(); });
-    document.getElementById("showCommodities").addEventListener("click", () => { currentTab = "commodities"; setButtons(); tick(); });
-    document.getElementById("showShop").addEventListener("click", () => { currentTab = "shop"; setButtons(); tick(); });
-    document.getElementById("showPlayers").addEventListener("click", () => { currentTab = "players"; setButtons(); tick(); });
-    document.getElementById("showPerks").addEventListener("click", () => { currentTab = "perks"; setButtons(); tick(); });
-    document.getElementById("showAnnouncements").addEventListener("click", () => { currentTab = "announcements"; setButtons(); tick(); });
-    document.getElementById("showFeedback").addEventListener("click", () => { currentTab = "feedback"; setButtons(); tick(); });
-    document.getElementById("showBankActions").addEventListener("click", () => { currentTab = "bankActions"; setButtons(); tick(); });
-    document.getElementById("showActionHistory").addEventListener("click", () => { currentTab = "actionHistory"; setButtons(); tick(); });
-    document.getElementById("showConfigs").addEventListener("click", () => { currentTab = "configs"; setButtons(); tick(); });
-    document.getElementById("showServerSettings").addEventListener("click", () => { currentTab = "serverSettings"; setButtons(); renderServerSettings(); });
+    document.getElementById("showCompanies").addEventListener("click", () => { setCurrentTab("companies"); setButtons(); tick(); });
+    document.getElementById("showCommodities").addEventListener("click", () => { setCurrentTab("commodities"); setButtons(); tick(); });
+    document.getElementById("showShop").addEventListener("click", () => { setCurrentTab("shop"); setButtons(); tick(); });
+    document.getElementById("showPlayers").addEventListener("click", () => { setCurrentTab("players"); setButtons(); tick(); });
+    document.getElementById("showPerks").addEventListener("click", () => { setCurrentTab("perks"); setButtons(); tick(); });
+    document.getElementById("showAnnouncements").addEventListener("click", () => { setCurrentTab("announcements"); setButtons(); tick(); });
+    document.getElementById("showFeedback").addEventListener("click", () => { setCurrentTab("feedback"); setButtons(); tick(); });
+    document.getElementById("showBankActions").addEventListener("click", () => { setCurrentTab("bankActions"); setButtons(); tick(); });
+    document.getElementById("showActionHistory").addEventListener("click", () => { setCurrentTab("actionHistory"); setButtons(); tick(); });
+    document.getElementById("showConfigs").addEventListener("click", () => { setCurrentTab("configs"); setButtons(); tick(); });
+    document.getElementById("showServerSettings").addEventListener("click", () => { setCurrentTab("serverSettings"); setButtons(); renderServerSettings(); });
+    setCurrentTab(currentTab);
     setButtons();
     tick();
     syncPollInterval();
@@ -1541,7 +1564,7 @@ DETAIL_HTML = """<!doctype html>
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
     .row.one { grid-template-columns: 1fr; }
     label { display:block; font-size:.82rem; color: var(--muted); margin-bottom: 4px; }
-    input, textarea { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
     textarea { min-height: 96px; resize: vertical; }
     button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
     button:hover { background: var(--btnH); }
@@ -1617,7 +1640,11 @@ DETAIL_HTML = """<!doctype html>
     }
     function wireBackLink() {
       const back = el("backLink");
-      if (back) back.href = withAuthToken("/");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
     }
     function fmtEtDate(value) {
       const dt = value ? new Date(value) : new Date();
@@ -1794,12 +1821,16 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
     .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
     .row.one { grid-template-columns:1fr; }
     label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input, textarea { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
     textarea { min-height: 110px; resize: vertical; }
     button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
     button:hover { background: var(--btnH); }
     .muted { color:var(--muted); font-size:.85rem; }
     .preview { width: 300px; height: 300px; max-width: 100%; border-radius: 10px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #1f2937; padding:6px; vertical-align: middle; font-size:.86rem; }
+    th { color: var(--muted); text-align:left; }
+    .small-btn { padding:7px 10px; font-size:.82rem; }
     a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
     @media (max-width: 760px) {
       .row { grid-template-columns: 1fr; }
@@ -1820,7 +1851,16 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
         <div><label>Price</label><input id="price" type="number" step="0.01" /></div>
       </div>
       <div class="row">
-        <div><label>Rarity</label><input id="rarity" /></div>
+        <div>
+          <label>Rarity</label>
+          <select id="rarity">
+            <option value="common">common</option>
+            <option value="uncommon">uncommon</option>
+            <option value="rare">rare</option>
+            <option value="legendary">legendary</option>
+            <option value="exotic">exotic</option>
+          </select>
+        </div>
         <div><label>Spawn Weight Override (0 = rarity default)</label><input id="spawn_weight_override" type="number" step="0.0001" min="0" /></div>
       </div>
       <div class="row">
@@ -1837,6 +1877,66 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       <div class="row one">
         <div><label>Description</label><textarea id="description"></textarea></div>
       </div>
+      <div class="row">
+        <div><label>Perk Name (optional)</label><input id="perk_name" /></div>
+        <div><label>Perk Min Qty</label><input id="perk_min_qty" type="number" step="1" min="1" value="1" /></div>
+      </div>
+      <div class="row one">
+        <div><label>Perk Description</label><textarea id="perk_description"></textarea></div>
+      </div>
+      <div class="row one">
+        <div>
+          <label>Perk Effects (aligned with Perks editor)</label>
+          <table>
+            <thead>
+              <tr>
+                <th>Target</th>
+                <th>Mode</th>
+                <th>Value</th>
+                <th>Scale Source</th>
+                <th>Scale Key</th>
+                <th>Scale Factor</th>
+                <th>Cap</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="effectsRows"></tbody>
+          </table>
+          <div class="row" style="margin-top:8px;">
+            <div>
+              <label>New Effect</label>
+              <select id="new_eff_target">
+                <option value="income">income</option>
+                <option value="trade_limits">trade_limits</option>
+                <option value="networth">networth</option>
+              </select>
+            </div>
+            <div>
+              <label>Mode</label>
+              <select id="new_eff_mode">
+                <option value="flat">flat</option>
+                <option value="multiplier">multiplier</option>
+                <option value="per_item">per_item</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div><label>Value</label><input id="new_eff_value" type="number" step="0.0001" value="0" /></div>
+            <div><label>Scale Source</label><select id="new_eff_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Scale Key</label><select id="new_eff_key"></select></div>
+            <div><label>Scale Factor</label><input id="new_eff_scale_factor" type="number" step="0.0001" value="0" /></div>
+          </div>
+          <div class="row">
+            <div><label>Cap (0 = no cap)</label><input id="new_eff_cap" type="number" step="0.0001" value="0" /></div>
+            <div style="display:flex;align-items:flex-end;"><button id="addEffectBtn" class="small-btn" type="button">Add Effect</button></div>
+          </div>
+          <div class="row one">
+            <div><label>Serialized JSON (read-only)</label><textarea id="perk_effects_json" readonly>[]</textarea></div>
+          </div>
+        </div>
+      </div>
       <button id="saveBtn">Save</button>
       <div id="msg" class="muted" style="margin-top:8px;"></div>
     </div>
@@ -1845,15 +1945,98 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
     const COMMODITY = {{ name|tojson }};
     const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
     const FALLBACK = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='22' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
+    let EFFECTS = [];
+    let COMMODITY_NAMES = [];
     function el(id){ return document.getElementById(id); }
+    function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch])); }
     function withAuthToken(url) {
       if (!URL_AUTH_TOKEN) return url;
       const sep = url.includes("?") ? "&" : "?";
       return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
     }
+    function optionsForCommodityKey(selected) {
+      if (!COMMODITY_NAMES.length) return '<option value="">(No commodities)</option>';
+      return COMMODITY_NAMES.map((n) => {
+        const sel = String(n).toLowerCase() === String(selected || "").toLowerCase() ? " selected" : "";
+        return `<option value="${esc(n)}"${sel}>${esc(n)}</option>`;
+      }).join("");
+    }
+    function syncEffectsJsonBox() {
+      el("perk_effects_json").value = JSON.stringify(EFFECTS, null, 2);
+    }
+    function renderEffectsRows() {
+      const tbody = el("effectsRows");
+      if (!EFFECTS.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">No effects configured.</td></tr>';
+        syncEffectsJsonBox();
+        return;
+      }
+      tbody.innerHTML = EFFECTS.map((eff, i) => `
+        <tr data-eff-index="${i}">
+          <td><select data-eff-target="${i}"><option value="income"${eff.target_stat === "income" ? " selected" : ""}>income</option><option value="trade_limits"${eff.target_stat === "trade_limits" ? " selected" : ""}>trade_limits</option><option value="networth"${eff.target_stat === "networth" ? " selected" : ""}>networth</option></select></td>
+          <td><select data-eff-mode="${i}"><option value="flat"${eff.value_mode === "flat" ? " selected" : ""}>flat</option><option value="multiplier"${eff.value_mode === "multiplier" ? " selected" : ""}>multiplier</option><option value="per_item"${eff.value_mode === "per_item" ? " selected" : ""}>per_item</option></select></td>
+          <td><input data-eff-value="${i}" type="number" step="0.0001" value="${Number(eff.value || 0)}" /></td>
+          <td><select data-eff-source="${i}"><option value="none"${String(eff.scale_source || "none") === "none" ? " selected" : ""}>none</option><option value="commodity_qty"${String(eff.scale_source || "none") === "commodity_qty" ? " selected" : ""}>commodity_qty</option></select></td>
+          <td><select data-eff-key="${i}">${optionsForCommodityKey(eff.scale_key || COMMODITY)}</select></td>
+          <td><input data-eff-scale-factor="${i}" type="number" step="0.0001" value="${Number(eff.scale_factor || 0)}" /></td>
+          <td><input data-eff-cap="${i}" type="number" step="0.0001" value="${Number(eff.cap || 0)}" /></td>
+          <td><button class="small-btn" data-del-eff="${i}" type="button">Delete</button></td>
+        </tr>
+      `).join("");
+
+      for (const btn of document.querySelectorAll("[data-del-eff]")) {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.getAttribute("data-del-eff"));
+          if (Number.isFinite(idx) && idx >= 0 && idx < EFFECTS.length) {
+            EFFECTS.splice(idx, 1);
+            renderEffectsRows();
+          }
+        });
+      }
+      syncEffectsJsonBox();
+    }
+    function collectEffectsFromDom() {
+      const rows = document.querySelectorAll("tr[data-eff-index]");
+      const next = [];
+      for (const row of rows) {
+        const idx = Number(row.getAttribute("data-eff-index"));
+        const target = document.querySelector(`[data-eff-target="${idx}"]`)?.value || "income";
+        const mode = document.querySelector(`[data-eff-mode="${idx}"]`)?.value || "flat";
+        const value = Number(document.querySelector(`[data-eff-value="${idx}"]`)?.value || 0);
+        const source = document.querySelector(`[data-eff-source="${idx}"]`)?.value || "none";
+        const key = document.querySelector(`[data-eff-key="${idx}"]`)?.value || COMMODITY;
+        const scaleFactor = Number(document.querySelector(`[data-eff-scale-factor="${idx}"]`)?.value || 0);
+        const cap = Number(document.querySelector(`[data-eff-cap="${idx}"]`)?.value || 0);
+        next.push({
+          target_stat: target,
+          value_mode: mode,
+          value: Number.isFinite(value) ? value : 0,
+          scale_source: source,
+          scale_key: key,
+          scale_factor: Number.isFinite(scaleFactor) ? scaleFactor : 0,
+          cap: Number.isFinite(cap) ? cap : 0,
+        });
+      }
+      EFFECTS = next;
+      syncEffectsJsonBox();
+    }
+    async function loadCommodityNames() {
+      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      COMMODITY_NAMES = (Array.isArray(data.commodities) ? data.commodities : [])
+        .map((r) => String(r.name || "").trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+      el("new_eff_key").innerHTML = optionsForCommodityKey(COMMODITY);
+    }
     function wireBackLink() {
       const back = el("backLink");
-      if (back) back.href = withAuthToken("/");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
     }
     function syncPreview() {
       const img = el("preview");
@@ -1861,6 +2044,7 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       img.src = el("image_url").value || FALLBACK;
     }
     async function load() {
+      await loadCommodityNames();
       const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}`), { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
@@ -1872,9 +2056,31 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       el("image_url").value = c.image_url || "";
       el("tags").value = String((c.tags || []).join(", "));
       el("description").value = c.description || "";
+      el("perk_name").value = c.perk_name || "";
+      el("perk_description").value = c.perk_description || "";
+      el("perk_min_qty").value = Number(c.perk_min_qty || 1);
+      try {
+        const parsed = JSON.parse((c.perk_effects_json || "").trim() || "[]");
+        EFFECTS = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
+      } catch (_e) {
+        EFFECTS = [];
+      }
+      renderEffectsRows();
       syncPreview();
     }
     async function save() {
+      collectEffectsFromDom();
+      let perkEffectsJson = (el("perk_effects_json").value || "").trim();
+      if (!perkEffectsJson) perkEffectsJson = "[]";
+      try {
+        const parsed = JSON.parse(perkEffectsJson);
+        if (!Array.isArray(parsed) && typeof parsed !== "object") {
+          throw new Error("Perk Effects JSON must be an object or array.");
+        }
+      } catch (e) {
+        el("msg").textContent = "Invalid Perk Effects JSON.";
+        return;
+      }
       const payload = {
         name: el("name").value,
         price: Number(el("price").value),
@@ -1883,6 +2089,10 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
         image_url: el("image_url").value,
         tags: el("tags").value,
         description: el("description").value,
+        perk_name: el("perk_name").value,
+        perk_description: el("perk_description").value,
+        perk_min_qty: Number(el("perk_min_qty").value || 1),
+        perk_effects_json: perkEffectsJson,
       };
       const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}/update`), {
         method: "POST",
@@ -1897,6 +2107,19 @@ COMMODITY_DETAIL_HTML = """<!doctype html>
       }
       await load();
     }
+    el("addEffectBtn").addEventListener("click", () => {
+      collectEffectsFromDom();
+      EFFECTS.push({
+        target_stat: el("new_eff_target").value,
+        value_mode: el("new_eff_mode").value,
+        value: Number(el("new_eff_value").value || 0),
+        scale_source: el("new_eff_source").value,
+        scale_key: el("new_eff_key").value || COMMODITY,
+        scale_factor: Number(el("new_eff_scale_factor").value || 0),
+        cap: Number(el("new_eff_cap").value || 0),
+      });
+      renderEffectsRows();
+    });
     el("saveBtn").addEventListener("click", save);
     el("image_url").addEventListener("input", syncPreview);
     wireBackLink();
@@ -2002,7 +2225,11 @@ PLAYER_DETAIL_HTML = """<!doctype html>
     }
     function wireBackLink() {
       const back = el("backLink");
-      if (back) back.href = withAuthToken("/");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
     }
     async function load() {
       const [playerRes, invRes] = await Promise.all([
@@ -2209,7 +2436,11 @@ APP_CONFIG_DETAIL_HTML = """<!doctype html>
     }
     function wireBackLink() {
       const back = el("backLink");
-      if (back) back.href = withAuthToken("/");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
     }
     async function load() {
       const res = await fetch(withAuthToken(`/api/app-config/${encodeURIComponent(CONFIG_NAME)}`), { cache: "no-store" });
@@ -2310,7 +2541,7 @@ PERK_DETAIL_HTML = """<!doctype html>
       </table>
       <div class="row" style="margin-top:10px;">
         <div><label>Group</label><input id="new_req_group" type="number" step="1" value="1" /></div>
-        <div><label>Type</label><select id="new_req_type"><option value="commodity_qty">commodity_qty</option><option value="tag_qty">tag_qty</option></select></div>
+        <div><label>Type</label><select id="new_req_type"><option value="commodity_qty">commodity_qty</option><option value="tag_qty">tag_qty</option><option value="any_single_commodity_qty">any_single_commodity_qty</option></select></div>
       </div>
       <div class="row">
         <div><label>Commodity Name</label><select id="new_req_commodity"></select></div>
@@ -2363,7 +2594,11 @@ PERK_DETAIL_HTML = """<!doctype html>
     }
     function wireBackLink() {
       const back = el("backLink");
-      if (back) back.href = withAuthToken("/");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
     }
     function commoditySelectOptions(selectedName) {
       const selected = String(selectedName || "");
@@ -2384,7 +2619,9 @@ PERK_DETAIL_HTML = """<!doctype html>
     function requirementKeyOptions(reqType, selectedName) {
       const selected = String(selectedName || "");
       const fromType = String(reqType || "commodity_qty");
-      const values = fromType === "tag_qty" ? [...commodityTags] : [...commodityNames];
+      const values = fromType === "tag_qty"
+        ? [...commodityTags]
+        : (fromType === "any_single_commodity_qty" ? ["*"] : [...commodityNames]);
       if (selected && !values.some((n) => n.toLowerCase() === selected.toLowerCase())) {
         values.push(selected);
       }
@@ -2453,7 +2690,7 @@ PERK_DETAIL_HTML = """<!doctype html>
       tbody.innerHTML = rows.map((r) => `<tr data-req-id="${esc(String(r.id))}">
         <td class="mono">${esc(String(r.id))}</td>
         <td><input data-req-group="${esc(String(r.id))}" type="number" step="1" value="${esc(String(r.group_id || 1))}" /></td>
-        <td><select data-req-type="${esc(String(r.id))}"><option value="commodity_qty"${String(r.req_type || "commodity_qty") === "commodity_qty" ? " selected" : ""}>commodity_qty</option><option value="tag_qty"${String(r.req_type || "") === "tag_qty" ? " selected" : ""}>tag_qty</option></select></td>
+        <td><select data-req-type="${esc(String(r.id))}"><option value="commodity_qty"${String(r.req_type || "commodity_qty") === "commodity_qty" ? " selected" : ""}>commodity_qty</option><option value="tag_qty"${String(r.req_type || "") === "tag_qty" ? " selected" : ""}>tag_qty</option><option value="any_single_commodity_qty"${String(r.req_type || "") === "any_single_commodity_qty" ? " selected" : ""}>any_single_commodity_qty</option></select></td>
         <td><select data-req-commodity="${esc(String(r.id))}">${requirementKeyOptions(String(r.req_type || "commodity_qty"), String(r.commodity_name || ""))}</select></td>
         <td><input data-req-operator="${esc(String(r.id))}" value="${esc(String(r.operator || ">="))}" /></td>
         <td><input data-req-value="${esc(String(r.id))}" type="number" step="1" min="0" value="${esc(String(Number(r.value || 1).toFixed(0)))}" /></td>
@@ -2556,7 +2793,7 @@ PERK_DETAIL_HTML = """<!doctype html>
       if (!reqId) return;
       const payload = {
         group_id: Number(document.querySelector(`input[data-req-group="${CSS.escape(reqId)}"]`).value),
-        req_type: document.querySelector(`input[data-req-type="${CSS.escape(reqId)}"]`).value,
+        req_type: document.querySelector(`select[data-req-type="${CSS.escape(reqId)}"]`).value,
         commodity_name: document.querySelector(`select[data-req-commodity="${CSS.escape(reqId)}"]`).value,
         operator: document.querySelector(`input[data-req-operator="${CSS.escape(reqId)}"]`).value,
         value: Number(document.querySelector(`input[data-req-value="${CSS.escape(reqId)}"]`).value),
@@ -2960,6 +3197,22 @@ def create_app() -> Flask:
                 conn.execute(
                     "ALTER TABLE commodities ADD COLUMN spawn_weight_override REAL NOT NULL DEFAULT 0;"
                 )
+            if cols and "perk_name" not in cols:
+                conn.execute(
+                    "ALTER TABLE commodities ADD COLUMN perk_name TEXT NOT NULL DEFAULT '';"
+                )
+            if cols and "perk_description" not in cols:
+                conn.execute(
+                    "ALTER TABLE commodities ADD COLUMN perk_description TEXT NOT NULL DEFAULT '';"
+                )
+            if cols and "perk_min_qty" not in cols:
+                conn.execute(
+                    "ALTER TABLE commodities ADD COLUMN perk_min_qty INTEGER NOT NULL DEFAULT 1;"
+                )
+            if cols and "perk_effects_json" not in cols:
+                conn.execute(
+                    "ALTER TABLE commodities ADD COLUMN perk_effects_json TEXT NOT NULL DEFAULT '';"
+                )
 
     def _parse_tags(raw: object) -> list[str]:
         text = str(raw or "")
@@ -3295,7 +3548,8 @@ def create_app() -> Flask:
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT name, price, rarity, spawn_weight_override, image_url, description
+                SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                       perk_name, perk_description, perk_min_qty, perk_effects_json
                 FROM commodities
                 ORDER BY name
                 """
@@ -3375,7 +3629,8 @@ def create_app() -> Flask:
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT name, price, rarity, spawn_weight_override, image_url, description
+                SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                       perk_name, perk_description, perk_min_qty, perk_effects_json
                 FROM commodities
                 WHERE name = ? COLLATE NOCASE
                 """,
@@ -4123,6 +4378,10 @@ def create_app() -> Flask:
             "spawn_weight_override": float,
             "image_url": str,
             "description": str,
+            "perk_name": str,
+            "perk_description": str,
+            "perk_min_qty": int,
+            "perk_effects_json": str,
         }
         updates: dict[str, object] = {}
         for key, caster in allowed.items():
@@ -4141,6 +4400,17 @@ def create_app() -> Flask:
             updates["price"] = max(0.01, float(updates["price"]))
         if "spawn_weight_override" in updates:
             updates["spawn_weight_override"] = max(0.0, float(updates["spawn_weight_override"]))
+        if "perk_min_qty" in updates:
+            updates["perk_min_qty"] = max(1, int(updates["perk_min_qty"]))
+        if "perk_effects_json" in updates:
+            raw_json = str(updates["perk_effects_json"]).strip() or "[]"
+            try:
+                parsed = json.loads(raw_json)
+                if not isinstance(parsed, (dict, list)):
+                    return jsonify({"error": "perk_effects_json must be an object or array"}), 400
+            except json.JSONDecodeError:
+                return jsonify({"error": "Invalid perk_effects_json"}), 400
+            updates["perk_effects_json"] = raw_json
         tags = _parse_tags(data.get("tags", ""))
 
         with _connect() as conn:
@@ -4205,6 +4475,21 @@ def create_app() -> Flask:
             return jsonify({"error": "Invalid spawn_weight_override"}), 400
         image_url = str(data.get("image_url", "")).strip()
         description = str(data.get("description", "")).strip()
+        perk_name = str(data.get("perk_name", "")).strip()
+        perk_description = str(data.get("perk_description", "")).strip()
+        try:
+            perk_min_qty = max(1, int(float(data.get("perk_min_qty", 1))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid perk_min_qty"}), 400
+        perk_effects_json = str(data.get("perk_effects_json", "")).strip()
+        if not perk_effects_json:
+            perk_effects_json = "[]"
+        try:
+            parsed_perk = json.loads(perk_effects_json)
+            if not isinstance(parsed_perk, (dict, list)):
+                return jsonify({"error": "perk_effects_json must be an object or array"}), 400
+        except json.JSONDecodeError:
+            return jsonify({"error": "Invalid perk_effects_json"}), 400
         tags = _parse_tags(data.get("tags", ""))
 
         with _connect() as conn:
@@ -4221,10 +4506,16 @@ def create_app() -> Flask:
                 return jsonify({"error": f"Commodity `{name}` already exists"}), 409
             conn.execute(
                 """
-                INSERT INTO commodities (guild_id, name, price, rarity, spawn_weight_override, image_url, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO commodities (
+                    guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                    perk_name, perk_description, perk_min_qty, perk_effects_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, name, price, rarity, spawn_weight_override, image_url, description),
+                (
+                    guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                    perk_name, perk_description, perk_min_qty, perk_effects_json,
+                ),
             )
             for tag in tags:
                 conn.execute(
@@ -4383,8 +4674,10 @@ def create_app() -> Flask:
         req_type = str(data.get("req_type", "commodity_qty")).strip().lower() or "commodity_qty"
         commodity_name = str(data.get("commodity_name", "")).strip()
         operator = _sanitize_operator(data.get("operator", ">="))
-        if req_type not in {"commodity_qty", "tag_qty"}:
+        if req_type not in {"commodity_qty", "tag_qty", "any_single_commodity_qty"}:
             return jsonify({"error": "Unsupported req_type"}), 400
+        if req_type == "any_single_commodity_qty":
+            commodity_name = "*"
         if not commodity_name:
             return jsonify({"error": "commodity_name/tag is required"}), 400
         with _connect() as conn:
@@ -4414,11 +4707,15 @@ def create_app() -> Flask:
                 return jsonify({"error": "Invalid group_id"}), 400
         if "req_type" in data:
             req_type = str(data.get("req_type", "")).strip().lower()
-            if req_type not in {"commodity_qty", "tag_qty"}:
+            if req_type not in {"commodity_qty", "tag_qty", "any_single_commodity_qty"}:
                 return jsonify({"error": "Unsupported req_type"}), 400
             updates["req_type"] = req_type
+            if req_type == "any_single_commodity_qty":
+                updates["commodity_name"] = "*"
         if "commodity_name" in data:
             updates["commodity_name"] = str(data.get("commodity_name", "")).strip()
+        if str(updates.get("req_type", "")).lower() == "any_single_commodity_qty":
+            updates["commodity_name"] = "*"
         if "operator" in data:
             updates["operator"] = _sanitize_operator(data.get("operator"))
         if "value" in data:

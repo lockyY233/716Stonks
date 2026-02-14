@@ -67,6 +67,10 @@ def add_commodity(
     image_url: str,
     description: str,
     spawn_weight_override: float = 0.0,
+    perk_name: str = "",
+    perk_description: str = "",
+    perk_min_qty: int = 1,
+    perk_effects_json: str = "",
 ) -> bool:
     with get_connection() as conn:
         existing = conn.execute(
@@ -77,8 +81,11 @@ def add_commodity(
             return False
         conn.execute(
             """
-            INSERT INTO commodities (guild_id, name, price, rarity, spawn_weight_override, image_url, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO commodities (
+                guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                perk_name, perk_description, perk_min_qty, perk_effects_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -88,6 +95,10 @@ def add_commodity(
                 max(0.0, float(spawn_weight_override)),
                 image_url,
                 description,
+                str(perk_name or ""),
+                str(perk_description or ""),
+                max(1, int(perk_min_qty)),
+                str(perk_effects_json or ""),
             ),
         )
         return True
@@ -97,7 +108,8 @@ def get_commodities(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT name, price, rarity, spawn_weight_override, image_url, description
+            SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                   perk_name, perk_description, perk_min_qty, perk_effects_json
             FROM commodities
             WHERE guild_id = ?
             ORDER BY name
@@ -111,7 +123,8 @@ def get_commodity(guild_id: int, name: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT name, price, rarity, spawn_weight_override, image_url, description
+            SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                   perk_name, perk_description, perk_min_qty, perk_effects_json
             FROM commodities
             WHERE guild_id = ? AND name = ? COLLATE NOCASE
             """,
@@ -530,6 +543,10 @@ def update_commodity_admin_fields(
         "spawn_weight_override": float,
         "image_url": str,
         "description": str,
+        "perk_name": str,
+        "perk_description": str,
+        "perk_min_qty": int,
+        "perk_effects_json": str,
     }
     sets: list[str] = []
     values: list[object] = []

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 
 import discord
@@ -45,6 +47,62 @@ def _scaled_value(
         key = str(effect.get("scale_key", "") or "").strip().lower()
         return float(commodity_qty_by_name.get(key, 0))
     return 0.0
+
+
+def _apply_effect_to_accumulators(
+    effect: dict,
+    *,
+    stacks: int,
+    commodity_qty_by_name: dict[str, int],
+    tracked_stats: tuple[str, ...],
+    perk_add: dict[str, float],
+    perk_mul: dict[str, float],
+    effect_display_parts: list[str],
+) -> None:
+    target_stat = str(effect.get("target_stat", "") or "").strip().lower()
+    if target_stat not in tracked_stats:
+        return
+    value_mode = str(effect.get("value_mode", "flat") or "flat").strip().lower()
+    value = float(effect.get("value", 0) or 0.0)
+    scale_factor = float(effect.get("scale_factor", 0) or 0.0)
+    cap = float(effect.get("cap", 0) or 0.0)
+    scaled = _scaled_value(effect, commodity_qty_by_name)
+
+    if value_mode == "flat":
+        contrib = value
+        if cap > 0:
+            contrib = max(-cap, min(cap, contrib))
+        perk_add[target_stat] += contrib * stacks
+        if abs(contrib) > 1e-9:
+            sign = "+" if contrib >= 0 else "-"
+            effect_display_parts.append(f"{target_stat} {sign}{abs(contrib):.2f}")
+        return
+
+    if value_mode == "multiplier":
+        one = max(0.0, value)
+        perk_mul[target_stat] *= one ** stacks
+        if abs(one - 1.0) > 1e-9:
+            effect_display_parts.append(f"{target_stat} x{one:.2f}")
+        return
+
+    if value_mode == "per_item":
+        contrib = value + (scale_factor * scaled)
+        if cap > 0:
+            contrib = max(-cap, min(cap, contrib))
+        perk_add[target_stat] += contrib * stacks
+        base_str = ""
+        if abs(value) > 1e-9:
+            sign = "+" if value >= 0 else "-"
+            base_str = f"{target_stat} {sign}{abs(value):.2f}"
+        scale_str = ""
+        if abs(scale_factor) > 1e-9:
+            scale_str = f"x{scale_factor:.2f} per item after"
+        if base_str and scale_str:
+            effect_display_parts.append(f"{base_str}, {scale_str}")
+        elif base_str:
+            effect_display_parts.append(base_str)
+        elif scale_str:
+            effect_display_parts.append(f"{target_stat} {scale_str}")
 
 
 def apply_income_perks(
@@ -109,6 +167,18 @@ def evaluate_user_perks(
             for r in tag_qty_rows
             if str(r["tag"]).strip()
         }
+        commodity_perk_rows = conn.execute(
+            """
+            SELECT uc.commodity_name, uc.quantity,
+                   c.perk_name, c.perk_description, c.perk_min_qty, c.perk_effects_json
+            FROM user_commodities uc
+            JOIN commodities c
+              ON c.guild_id = uc.guild_id
+             AND c.name = uc.commodity_name
+            WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
+            """,
+            (guild_id, user_id),
+        ).fetchall()
         if base_networth is None:
             networth_row = conn.execute(
                 """
@@ -133,43 +203,30 @@ def evaluate_user_perks(
             (guild_id,),
         ).fetchall()
         perks = [dict(r) for r in perks_rows]
-        if not perks:
-            final_trade_limits = max(0, int(round(float(base_trade_limits))))
-            return {
-                "base": {
-                    "income": float(base_income),
-                    "trade_limits": float(base_trade_limits),
-                    "networth": float(base_networth),
-                },
-                "final": {
-                    "income": float(base_income),
-                    "trade_limits": float(final_trade_limits),
-                    "networth": float(base_networth),
-                },
-                "matched_perks": [],
-            }
+        req_rows = []
+        effect_rows = []
+        if perks:
+            perk_ids = [int(p["id"]) for p in perks]
+            placeholders = ",".join(["?"] * len(perk_ids))
 
-        perk_ids = [int(p["id"]) for p in perks]
-        placeholders = ",".join(["?"] * len(perk_ids))
-
-        req_rows = conn.execute(
-            f"""
-            SELECT id, perk_id, group_id, req_type, commodity_name, operator, value
-            FROM perk_requirements
-            WHERE perk_id IN ({placeholders})
-            ORDER BY perk_id, group_id, id
-            """,
-            tuple(perk_ids),
-        ).fetchall()
-        effect_rows = conn.execute(
-            f"""
-            SELECT id, perk_id, effect_type, target_stat, value_mode, value, scale_source, scale_key, scale_factor, cap
-            FROM perk_effects
-            WHERE perk_id IN ({placeholders})
-            ORDER BY perk_id, id
-            """,
-            tuple(perk_ids),
-        ).fetchall()
+            req_rows = conn.execute(
+                f"""
+                SELECT id, perk_id, group_id, req_type, commodity_name, operator, value
+                FROM perk_requirements
+                WHERE perk_id IN ({placeholders})
+                ORDER BY perk_id, group_id, id
+                """,
+                tuple(perk_ids),
+            ).fetchall()
+            effect_rows = conn.execute(
+                f"""
+                SELECT id, perk_id, effect_type, target_stat, value_mode, value, scale_source, scale_key, scale_factor, cap
+                FROM perk_effects
+                WHERE perk_id IN ({placeholders})
+                ORDER BY perk_id, id
+                """,
+                tuple(perk_ids),
+            ).fetchall()
 
     req_by_perk: dict[int, list[dict]] = {}
     for row in req_rows:
@@ -210,6 +267,8 @@ def evaluate_user_perks(
                 elif req_type == "tag_qty":
                     tag = str(req.get("commodity_name", "") or "").strip().lower()
                     actual = float(qty_by_tag.get(tag, 0))
+                elif req_type == "any_single_commodity_qty":
+                    actual = float(max(commodity_qty_by_name.values()) if commodity_qty_by_name else 0)
                 else:
                     group_ok = False
                     break
@@ -238,46 +297,15 @@ def evaluate_user_perks(
         perk_mul = {k: 1.0 for k in tracked_stats}
         effect_display_parts: list[str] = []
         for effect in effects_by_perk.get(perk_id, []):
-            target_stat = str(effect.get("target_stat", "") or "").strip().lower()
-            if target_stat not in tracked_stats:
-                continue
-            value_mode = str(effect.get("value_mode", "flat") or "flat").strip().lower()
-            value = float(effect.get("value", 0) or 0.0)
-            scale_factor = float(effect.get("scale_factor", 0) or 0.0)
-            cap = float(effect.get("cap", 0) or 0.0)
-            scaled = _scaled_value(effect, commodity_qty_by_name)
-
-            if value_mode == "flat":
-                contrib = value
-                if cap > 0:
-                    contrib = max(-cap, min(cap, contrib))
-                perk_add[target_stat] += contrib * stacks
-                if abs(contrib) > 1e-9:
-                    sign = "+" if contrib >= 0 else "-"
-                    effect_display_parts.append(f"{target_stat} {sign}{abs(contrib):.2f}")
-            elif value_mode == "multiplier":
-                one = max(0.0, value)
-                perk_mul[target_stat] *= one ** stacks
-                if abs(one - 1.0) > 1e-9:
-                    effect_display_parts.append(f"{target_stat} x{one:.2f}")
-            elif value_mode == "per_item":
-                contrib = value + (scale_factor * scaled)
-                if cap > 0:
-                    contrib = max(-cap, min(cap, contrib))
-                perk_add[target_stat] += contrib * stacks
-                base_str = ""
-                if abs(value) > 1e-9:
-                    sign = "+" if value >= 0 else "-"
-                    base_str = f"{target_stat} {sign}{abs(value):.2f}"
-                scale_str = ""
-                if abs(scale_factor) > 1e-9:
-                    scale_str = f"x{scale_factor:.2f} per item after"
-                if base_str and scale_str:
-                    effect_display_parts.append(f"{base_str}, {scale_str}")
-                elif base_str:
-                    effect_display_parts.append(base_str)
-                elif scale_str:
-                    effect_display_parts.append(f"{target_stat} {scale_str}")
+            _apply_effect_to_accumulators(
+                effect,
+                stacks=stacks,
+                commodity_qty_by_name=commodity_qty_by_name,
+                tracked_stats=tracked_stats,
+                perk_add=perk_add,
+                perk_mul=perk_mul,
+                effect_display_parts=effect_display_parts,
+            )
 
         has_change = any(abs(perk_add[k]) > 1e-9 or abs(perk_mul[k] - 1.0) > 1e-9 for k in tracked_stats)
         if not has_change:
@@ -291,6 +319,75 @@ def evaluate_user_perks(
                 "perk_id": perk_id,
                 "name": str(perk.get("name", f"perk#{perk_id}")),
                 "description": str(perk.get("description", "")),
+                "stacks": stacks,
+                "add": perk_add["income"],
+                "mul": perk_mul["income"],
+                "adds": dict(perk_add),
+                "muls": dict(perk_mul),
+                "display": " | ".join(effect_display_parts),
+            }
+        )
+
+    # Commodity-level per-item perks.
+    for row in commodity_perk_rows:
+        qty = max(0, int(row["quantity"] or 0))
+        if qty <= 0:
+            continue
+        min_qty = max(1, int(row["perk_min_qty"] or 1))
+        if qty < min_qty:
+            continue
+        effects_raw = str(row["perk_effects_json"] or "").strip()
+        if not effects_raw:
+            continue
+        try:
+            parsed = json.loads(effects_raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            effects = [parsed]
+        elif isinstance(parsed, list):
+            effects = [e for e in parsed if isinstance(e, dict)]
+        else:
+            effects = []
+        if not effects:
+            continue
+
+        stacks = max(1, qty // min_qty)
+        perk_add = {k: 0.0 for k in tracked_stats}
+        perk_mul = {k: 1.0 for k in tracked_stats}
+        effect_display_parts: list[str] = []
+        for effect in effects:
+            if not effect.get("scale_key"):
+                effect = {
+                    **effect,
+                    "scale_key": str(row["commodity_name"]).strip().lower(),
+                }
+            _apply_effect_to_accumulators(
+                effect,
+                stacks=stacks,
+                commodity_qty_by_name=commodity_qty_by_name,
+                tracked_stats=tracked_stats,
+                perk_add=perk_add,
+                perk_mul=perk_mul,
+                effect_display_parts=effect_display_parts,
+            )
+
+        has_change = any(abs(perk_add[k]) > 1e-9 or abs(perk_mul[k] - 1.0) > 1e-9 for k in tracked_stats)
+        if not has_change:
+            continue
+
+        for key in tracked_stats:
+            stat_add[key] += perk_add[key]
+            stat_mul[key] *= perk_mul[key]
+
+        commodity_name = str(row["commodity_name"] or "").strip()
+        derived_id = 2_000_000_000 + (int(hashlib.md5(commodity_name.lower().encode("utf-8")).hexdigest()[:8], 16) % 100_000_000)
+        perk_name = str(row["perk_name"] or "").strip() or f"{commodity_name} perk"
+        matched.append(
+            {
+                "perk_id": int(derived_id),
+                "name": perk_name,
+                "description": str(row["perk_description"] or "").strip(),
                 "stacks": stacks,
                 "add": perk_add["income"],
                 "mul": perk_mul["income"],
