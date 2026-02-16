@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ name }} · Commodity</title>
+  <style>
+    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 920px; margin: 20px auto; padding: 0 14px; }
+    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .title { font-size:1.2rem; font-weight:700; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+    .row.one { grid-template-columns:1fr; }
+    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    textarea { min-height: 110px; resize: vertical; }
+    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
+    button:hover { background: var(--btnH); }
+    .muted { color:var(--muted); font-size:.85rem; }
+    .preview { width: 300px; height: 300px; max-width: 100%; border-radius: 10px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #1f2937; padding:6px; vertical-align: middle; font-size:.86rem; }
+    th { color: var(--muted); text-align:left; }
+    .small-btn { padding:7px 10px; font-size:.82rem; }
+    .ownersTitle { margin-top: 6px; font-size: 1rem; font-weight: 700; }
+    .ownersWrap { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: #0b1323; overflow: auto; max-height: 240px; }
+    .ownersTable { width: 100%; border-collapse: collapse; }
+    .ownersTable th, .ownersTable td { padding: 8px 10px; border-bottom: 1px solid #1f2937; font-size: .88rem; text-align: left; }
+    .ownersTable th { color: var(--muted); font-size: .8rem; font-weight: 600; position: sticky; top: 0; background: #0f1b30; }
+    .ownersEmpty { padding: 10px; color: var(--muted); font-size: .85rem; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    @media (max-width: 760px) {
+      .row { grid-template-columns: 1fr; }
+      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .preview { width: 100%; height: auto; aspect-ratio: 1 / 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="top">
+        <div class="title">Commodity · {{ name }}</div>
+        <a id="backLink" href="/">Back to Dashboard</a>
+      </div>
+      <div class="row">
+        <div><label>Name</label><input id="name" /></div>
+        <div><label>Price</label><input id="price" type="number" step="0.01" /></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Rarity</label>
+          <select id="rarity">
+            <option value="common">common</option>
+            <option value="uncommon">uncommon</option>
+            <option value="rare">rare</option>
+            <option value="legendary">legendary</option>
+            <option value="exotic">exotic</option>
+          </select>
+        </div>
+        <div><label>Spawn Weight Override (0 = rarity default)</label><input id="spawn_weight_override" type="number" step="0.0001" min="0" /></div>
+      </div>
+      <div class="row">
+        <div><label>Image URL</label><input id="image_url" /></div>
+        <div></div>
+      </div>
+      <div class="row one">
+        <div><label>Tags (comma-separated)</label><input id="tags" /></div>
+      </div>
+      <div class="row">
+        <div><label>Thumbnail Preview</label><img id="preview" class="preview" alt="Commodity thumbnail" /></div>
+        <div></div>
+      </div>
+      <div class="ownersTitle">Owners</div>
+      <div class="ownersWrap">
+        <table class="ownersTable">
+          <thead>
+            <tr><th>User</th><th>Quantity</th></tr>
+          </thead>
+          <tbody id="ownersRows">
+            <tr><td colspan="2" class="ownersEmpty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="row one">
+        <div><label>Description</label><textarea id="description"></textarea></div>
+      </div>
+      <div class="row">
+        <div><label>Perk Name (optional)</label><input id="perk_name" /></div>
+        <div><label>Perk Min Qty</label><input id="perk_min_qty" type="number" step="1" min="1" value="1" /></div>
+      </div>
+      <div class="row one">
+        <div><label>Perk Description</label><textarea id="perk_description"></textarea></div>
+      </div>
+      <div class="row one">
+        <div>
+          <label>Perk Effects (aligned with Perks editor)</label>
+          <table>
+            <thead>
+              <tr>
+                <th>Target</th>
+                <th>Mode</th>
+                <th>Value</th>
+                <th>Scale Source</th>
+                <th>Scale Key</th>
+                <th>Scale Factor</th>
+                <th>Cap</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="effectsRows"></tbody>
+          </table>
+          <div class="row" style="margin-top:8px;">
+            <div>
+              <label>New Effect</label>
+              <select id="new_eff_target">
+                <option value="income">income</option>
+                <option value="trade_limits">trade_limits</option>
+                <option value="networth">networth</option>
+              </select>
+            </div>
+            <div>
+              <label>Mode</label>
+              <select id="new_eff_mode">
+                <option value="flat">flat</option>
+                <option value="multiplier">multiplier</option>
+                <option value="per_item">per_item</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div><label>Value</label><input id="new_eff_value" type="number" step="0.0001" value="0" /></div>
+            <div><label>Scale Source</label><select id="new_eff_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Scale Key</label><select id="new_eff_key"></select></div>
+            <div><label>Scale Factor</label><input id="new_eff_scale_factor" type="number" step="0.0001" value="0" /></div>
+          </div>
+          <div class="row">
+            <div><label>Cap (0 = no cap)</label><input id="new_eff_cap" type="number" step="0.0001" value="0" /></div>
+            <div style="display:flex;align-items:flex-end;"><button id="addEffectBtn" class="small-btn" type="button">Add Effect</button></div>
+          </div>
+          <div class="row one">
+            <div><label>Serialized JSON (read-only)</label><textarea id="perk_effects_json" readonly>[]</textarea></div>
+          </div>
+        </div>
+      </div>
+      <button id="saveBtn">Save</button>
+      <div id="msg" class="muted" style="margin-top:8px;"></div>
+    </div>
+  </div>
+  <script>
+    const COMMODITY = {{ name|tojson }};
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    const FALLBACK = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='22' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
+    let EFFECTS = [];
+    let COMMODITY_NAMES = [];
+    function el(id){ return document.getElementById(id); }
+    function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch])); }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function optionsForCommodityKey(selected) {
+      if (!COMMODITY_NAMES.length) return '<option value="">(No commodities)</option>';
+      return COMMODITY_NAMES.map((n) => {
+        const sel = String(n).toLowerCase() === String(selected || "").toLowerCase() ? " selected" : "";
+        return `<option value="${esc(n)}"${sel}>${esc(n)}</option>`;
+      }).join("");
+    }
+    function syncEffectsJsonBox() {
+      el("perk_effects_json").value = JSON.stringify(EFFECTS, null, 2);
+    }
+    function renderEffectsRows() {
+      const tbody = el("effectsRows");
+      if (!EFFECTS.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">No effects configured.</td></tr>';
+        syncEffectsJsonBox();
+        return;
+      }
+      tbody.innerHTML = EFFECTS.map((eff, i) => `
+        <tr data-eff-index="${i}">
+          <td><select data-eff-target="${i}"><option value="income"${eff.target_stat === "income" ? " selected" : ""}>income</option><option value="trade_limits"${eff.target_stat === "trade_limits" ? " selected" : ""}>trade_limits</option><option value="networth"${eff.target_stat === "networth" ? " selected" : ""}>networth</option></select></td>
+          <td><select data-eff-mode="${i}"><option value="flat"${eff.value_mode === "flat" ? " selected" : ""}>flat</option><option value="multiplier"${eff.value_mode === "multiplier" ? " selected" : ""}>multiplier</option><option value="per_item"${eff.value_mode === "per_item" ? " selected" : ""}>per_item</option></select></td>
+          <td><input data-eff-value="${i}" type="number" step="0.0001" value="${Number(eff.value || 0)}" /></td>
+          <td><select data-eff-source="${i}"><option value="none"${String(eff.scale_source || "none") === "none" ? " selected" : ""}>none</option><option value="commodity_qty"${String(eff.scale_source || "none") === "commodity_qty" ? " selected" : ""}>commodity_qty</option></select></td>
+          <td><select data-eff-key="${i}">${optionsForCommodityKey(eff.scale_key || COMMODITY)}</select></td>
+          <td><input data-eff-scale-factor="${i}" type="number" step="0.0001" value="${Number(eff.scale_factor || 0)}" /></td>
+          <td><input data-eff-cap="${i}" type="number" step="0.0001" value="${Number(eff.cap || 0)}" /></td>
+          <td><button class="small-btn" data-del-eff="${i}" type="button">Delete</button></td>
+        </tr>
+      `).join("");
+
+      for (const btn of document.querySelectorAll("[data-del-eff]")) {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.getAttribute("data-del-eff"));
+          if (Number.isFinite(idx) && idx >= 0 && idx < EFFECTS.length) {
+            EFFECTS.splice(idx, 1);
+            renderEffectsRows();
+          }
+        });
+      }
+      syncEffectsJsonBox();
+    }
+    function collectEffectsFromDom() {
+      const rows = document.querySelectorAll("tr[data-eff-index]");
+      const next = [];
+      for (const row of rows) {
+        const idx = Number(row.getAttribute("data-eff-index"));
+        const target = document.querySelector(`[data-eff-target="${idx}"]`)?.value || "income";
+        const mode = document.querySelector(`[data-eff-mode="${idx}"]`)?.value || "flat";
+        const value = Number(document.querySelector(`[data-eff-value="${idx}"]`)?.value || 0);
+        const source = document.querySelector(`[data-eff-source="${idx}"]`)?.value || "none";
+        const key = document.querySelector(`[data-eff-key="${idx}"]`)?.value || COMMODITY;
+        const scaleFactor = Number(document.querySelector(`[data-eff-scale-factor="${idx}"]`)?.value || 0);
+        const cap = Number(document.querySelector(`[data-eff-cap="${idx}"]`)?.value || 0);
+        next.push({
+          target_stat: target,
+          value_mode: mode,
+          value: Number.isFinite(value) ? value : 0,
+          scale_source: source,
+          scale_key: key,
+          scale_factor: Number.isFinite(scaleFactor) ? scaleFactor : 0,
+          cap: Number.isFinite(cap) ? cap : 0,
+        });
+      }
+      EFFECTS = next;
+      syncEffectsJsonBox();
+    }
+    async function loadCommodityNames() {
+      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      COMMODITY_NAMES = (Array.isArray(data.commodities) ? data.commodities : [])
+        .map((r) => String(r.name || "").trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+      el("new_eff_key").innerHTML = optionsForCommodityKey(COMMODITY);
+    }
+    function wireBackLink() {
+      const back = el("backLink");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
+    }
+    function syncPreview() {
+      const img = el("preview");
+      img.onerror = () => { img.onerror = null; img.src = FALLBACK; };
+      img.src = el("image_url").value || FALLBACK;
+    }
+    function renderOwners(rows) {
+      const tbody = el("ownersRows");
+      if (!tbody) return;
+      if (!Array.isArray(rows) || rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="2" class="ownersEmpty">No players own this item yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => {
+        const uid = String(r.user_id || "");
+        const name = String(r.display_name || "").trim() || `User ${uid || "?"}`;
+        const qty = Number(r.quantity || 0);
+        return `<tr>
+          <td>${esc(name)}<div class="muted mono">${esc(uid)}</div></td>
+          <td class="mono">${Number.isFinite(qty) ? qty.toFixed(0) : "0"}</td>
+        </tr>`;
+      }).join("");
+    }
+    async function load() {
+      await loadCommodityNames();
+      const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}`), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const c = data.commodity;
+      el("name").value = c.name || "";
+      el("price").value = Number(c.price).toFixed(2);
+      el("rarity").value = c.rarity || "common";
+      el("spawn_weight_override").value = Number(c.spawn_weight_override || 0).toFixed(4);
+      el("image_url").value = c.image_url || "";
+      el("tags").value = String((c.tags || []).join(", "));
+      el("description").value = c.description || "";
+      el("perk_name").value = c.perk_name || "";
+      el("perk_description").value = c.perk_description || "";
+      el("perk_min_qty").value = Number(c.perk_min_qty || 1);
+      try {
+        const parsed = JSON.parse((c.perk_effects_json || "").trim() || "[]");
+        EFFECTS = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
+      } catch (_e) {
+        EFFECTS = [];
+      }
+      renderEffectsRows();
+      syncPreview();
+      renderOwners(Array.isArray(data.owners) ? data.owners : []);
+    }
+    async function save() {
+      collectEffectsFromDom();
+      let perkEffectsJson = (el("perk_effects_json").value || "").trim();
+      if (!perkEffectsJson) perkEffectsJson = "[]";
+      try {
+        const parsed = JSON.parse(perkEffectsJson);
+        if (!Array.isArray(parsed) && typeof parsed !== "object") {
+          throw new Error("Perk Effects JSON must be an object or array.");
+        }
+      } catch (e) {
+        el("msg").textContent = "Invalid Perk Effects JSON.";
+        return;
+      }
+      const payload = {
+        name: el("name").value,
+        price: Number(el("price").value),
+        rarity: el("rarity").value,
+        spawn_weight_override: Number(el("spawn_weight_override").value),
+        image_url: el("image_url").value,
+        tags: el("tags").value,
+        description: el("description").value,
+        perk_name: el("perk_name").value,
+        perk_description: el("perk_description").value,
+        perk_min_qty: Number(el("perk_min_qty").value || 1),
+        perk_effects_json: perkEffectsJson,
+      };
+      const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        el("msg").textContent = "Saved.";
+      } else {
+        const err = await res.json().catch(()=>({error:"Failed"}));
+        el("msg").textContent = err.error || "Save failed.";
+      }
+      await load();
+    }
+    el("addEffectBtn").addEventListener("click", () => {
+      collectEffectsFromDom();
+      EFFECTS.push({
+        target_stat: el("new_eff_target").value,
+        value_mode: el("new_eff_mode").value,
+        value: Number(el("new_eff_value").value || 0),
+        scale_source: el("new_eff_source").value,
+        scale_key: el("new_eff_key").value || COMMODITY,
+        scale_factor: Number(el("new_eff_scale_factor").value || 0),
+        cap: Number(el("new_eff_cap").value || 0),
+      });
+      renderEffectsRows();
+    });
+    el("saveBtn").addEventListener("click", save);
+    el("image_url").addEventListener("input", syncPreview);
+    wireBackLink();
+    load();
+  </script>
+</body>
+</html>

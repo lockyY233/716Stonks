@@ -1,4 +1,5 @@
 from io import BytesIO
+import math
 
 import matplotlib
 from discord import File
@@ -44,7 +45,7 @@ def build_player_impact_curve(
     fig.text(
         0.02,
         0.01,
-        f"slope={slope:.4f}  drift=±{drift:.3f}%  liquidity={liquidity:.2f}  impact_power={impact_power:.3f}",
+        f"slope={slope:.6f}%/tick  drift=±{drift:.3f}%  liquidity={liquidity:.2f}  impact_power={impact_power:.3f}",
         transform=fig.transFigure,
         va="bottom",
         ha="left",
@@ -101,7 +102,8 @@ def build_price_projection_curve(
         elif step == sell_tick:
             scripted_flow = -scripted_trade_size / liquidity
         scripted_impact = (abs(scripted_flow) ** impact_power) * (1.0 if scripted_flow >= 0 else -1.0)
-        base = max(0.01, base + float(slope) + scripted_impact)
+        trend_factor = math.exp(float(slope) / 100.0)
+        base = max(0.01, (base * trend_factor) + scripted_impact)
         x_fast = (step * fast_cycles_per_tick) + phase_fast
         x_low = (step * low_cycles_per_tick) + phase_low
         noise_unit = (perlin1d(x_fast, seed_fast) * fast_gain) + (perlin1d(x_low, seed_low) * low_gain)
@@ -126,7 +128,7 @@ def build_price_projection_curve(
     fig.text(
         0.02,
         0.01,
-        f"start={start_price:.2f}  slope={slope:.4f}/tick  drift=±{drift:.3f}%/tick  f={drift_noise_frequency:.2f}  g={drift_noise_gain:.2f}  low={drift_noise_low_freq_ratio:.2f}x/{drift_noise_low_gain:.2f}  events:+10@20,-10@60",
+        f"start={start_price:.2f}  slope={slope:.6f}%/tick  drift=±{drift:.3f}%/tick  f={drift_noise_frequency:.2f}  g={drift_noise_gain:.2f}  low={drift_noise_low_freq_ratio:.2f}x/{drift_noise_low_gain:.2f}  events:+10@20,-10@60",
         transform=fig.transFigure,
         va="bottom",
         ha="left",

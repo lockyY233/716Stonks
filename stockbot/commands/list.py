@@ -1,6 +1,7 @@
 from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import View, button
 
+from stockbot.config.settings import RANK_INCOME
 from stockbot.config.runtime import get_app_config
 from stockbot.db import get_commodities, get_companies, get_users
 
@@ -143,14 +144,42 @@ def _build_commodities_pages(commodities: list[dict]) -> list[Embed]:
     return pages
 
 
+def _build_rank_income_pages() -> list[Embed]:
+    items = [(rank, float(amount)) for rank, amount in RANK_INCOME.items()]
+    if not items:
+        return [
+            Embed(
+                title="Rank Income",
+                description="No rank income configured.",
+            )
+        ]
+    pages: list[Embed] = []
+    total = len(items)
+    for start in range(0, total, _PAGE_SIZE):
+        chunk = items[start : start + _PAGE_SIZE]
+        lines = []
+        for rank, amount in chunk:
+            lines.append(f"**{rank}** — ${amount:.2f}")
+        page_num = len(pages) + 1
+        total_pages = (total + _PAGE_SIZE - 1) // _PAGE_SIZE
+        embed = Embed(
+            title="Rank Income",
+            description="\n".join(lines),
+        )
+        embed.set_footer(text=f"Page {page_num}/{total_pages} • Total {total}")
+        pages.append(embed)
+    return pages
+
+
 def setup_list(tree: app_commands.CommandTree) -> None:
-    @tree.command(name="list", description="List available companies.")
+    @tree.command(name="list", description="List companies, commodities, players, or rank income.")
     @app_commands.describe(target="Pick a list to show.")
     @app_commands.choices(
         target=[
             app_commands.Choice(name="companies", value="companies"),
             app_commands.Choice(name="commodities", value="commodities"),
             app_commands.Choice(name="players", value="players"),
+            app_commands.Choice(name="RANK_INCOME", value="rank_income"),
         ]
     )
     async def list_companies(
@@ -181,6 +210,11 @@ def setup_list(tree: app_commands.CommandTree) -> None:
         if target == "commodities":
             rows = get_commodities(interaction.guild.id)
             pages = _build_commodities_pages(rows)
+            view = CompaniesPager(interaction.user.id, pages)
+            await interaction.response.send_message(embed=pages[0], view=view)
+            return
+        if target == "rank_income":
+            pages = _build_rank_income_pages()
             view = CompaniesPager(interaction.user.id, pages)
             await interaction.response.send_message(embed=pages[0], view=view)
             return

@@ -24,6 +24,23 @@ from stockbot.db import (
 from stockbot.services.perks import check_and_announce_perk_activations, evaluate_user_perks
 
 
+def _normalize_owner_ids(raw: object) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        try:
+            uid = int(item)
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0 or uid in seen:
+            continue
+        seen.add(uid)
+        out.append(uid)
+    return out
+
+
 def _limit_bucket_key(guild_id: int, user_id: int, bucket_index: int) -> str:
     return f"trade_used:{guild_id}:{user_id}:{bucket_index}"
 
@@ -159,6 +176,9 @@ async def perform_buy(
     company = get_company(interaction.guild.id, symbol_upper)
     if company is None:
         return False, f"Company `{symbol_upper}` not found."
+    owner_user_ids = _normalize_owner_ids(company.get("owner_user_ids", []))
+    if int(interaction.user.id) in owner_user_ids:
+        return False, "Company owners cannot buy their own stock."
 
     price = float(company.get("current_price", company["base_price"]))
     total_cost = round(price * shares, 2)
@@ -203,6 +223,48 @@ async def perform_buy(
         details="",
         created_at=datetime.now(timezone.utc).isoformat(),
     )
+    owner_fee_rate_pct = max(0.0, min(100.0, float(get_app_config("OWNER_BUY_FEE_RATE"))))
+    owner_fee = 0.0
+    if owner_user_ids and owner_fee_rate_pct > 0:
+        total_owner_fee = round(total_cost * (owner_fee_rate_pct / 100.0), 2)
+        if total_owner_fee > 0:
+            eligible_owner_ids: list[int] = []
+            for owner_id in owner_user_ids:
+                owner_user = get_user(interaction.guild.id, owner_id)
+                if owner_user is not None:
+                    eligible_owner_ids.append(owner_id)
+            if eligible_owner_ids:
+                cents = int(round(total_owner_fee * 100))
+                count = len(eligible_owner_ids)
+                base_cents = cents // count
+                rem = cents % count
+                splits = [base_cents + (1 if i < rem else 0) for i in range(count)]
+                for idx, owner_id in enumerate(eligible_owner_ids):
+                    part = splits[idx] / 100.0
+                    if part <= 0:
+                        continue
+                    owner_user = get_user(interaction.guild.id, owner_id)
+                    if owner_user is None:
+                        continue
+                    owner_fee += part
+                    update_user_bank(
+                        interaction.guild.id,
+                        owner_id,
+                        float(owner_user.get("bank", 0.0)) + part,
+                    )
+                    add_action_history(
+                        guild_id=interaction.guild.id,
+                        user_id=owner_id,
+                        action_type="owner_payout",
+                        target_type="stock",
+                        target_symbol=symbol_upper,
+                        quantity=float(shares),
+                        unit_price=part / max(1, shares),
+                        total_amount=part,
+                        details=f"source=buy;buyer={interaction.user.id};rate={owner_fee_rate_pct:.2f}%;owners={count}",
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                owner_fee = round(owner_fee, 2)
     limits_enabled, limit, _used, period_minutes, remaining = _current_limit_status(
         interaction.guild.id,
         interaction.user.id,
@@ -226,7 +288,9 @@ async def perform_buy(
             f"- Trading limit: "
             f"**{limit_display}**\n"
             f"- Transaction fee: "
-            f"{fee_ratio_pct:.2f}% => **$0.00** (buy fee disabled; applies on realized sell profit)."
+            f"{fee_ratio_pct:.2f}% => **$0.00** (buy fee disabled; applies on realized sell profit).\n"
+            f"- Owner payout: "
+            f"{owner_fee_rate_pct:.2f}% => **${owner_fee:.2f}**"
         ),
     )
 
@@ -250,6 +314,9 @@ async def perform_sell(
     company = get_company(interaction.guild.id, symbol_upper)
     if company is None:
         return False, f"Company `{symbol_upper}` not found."
+    owner_user_ids = _normalize_owner_ids(company.get("owner_user_ids", []))
+    if int(interaction.user.id) in owner_user_ids:
+        return False, "Company owners cannot sell their own stock."
 
     owned = get_user_shares(interaction.guild.id, interaction.user.id, symbol_upper)
     if owned < shares:

@@ -6,19 +6,31 @@ import sqlite3
 import sys
 import time
 import json
+import io
+import hashlib
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from flask import Flask, g, jsonify, render_template_string, request, send_file
+from PIL import Image, UnidentifiedImageError
 
 # Ensure project root is importable when running as a standalone script via systemd.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+TEMPLATE_DIR = Path(__file__).resolve().parent / "dashboard_templates"
+
+def _load_template(name: str) -> str:
+    return (TEMPLATE_DIR / name).read_text(encoding="utf-8")
+
 from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME
+from stockbot.services.jobs import get_active_jobs, refresh_jobs_rotation, swap_active_job
 from stockbot.services.perks import evaluate_user_perks
 from stockbot.services.shop_state import get_shop_items, refresh_shop, set_item_availability, swap_item
 
@@ -37,6 +49,7 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "MARKET_CLOSE_HOUR": _CfgSpec(21.0, float, "Local close time as decimal hour [0,24). Example: 21.5 means 21:30."),
     "STONKERS_ROLE_NAME": _CfgSpec("📈💰📊Stonkers", str, "Role granted on registration and pinged on close updates."),
     "ANNOUNCEMENT_CHANNEL_ID": _CfgSpec(0, int, "Discord channel ID used for announcements; 0 means auto-pick."),
+    "ANNOUNCE_MENTION_ROLE": _CfgSpec(1, int, "1 to mention role at close; 0 to disable mention."),
     "GM_ID": _CfgSpec(0, int, "Discord user ID designated as game master; excluded from rankings when >0."),
     "DRIFT_NOISE_FREQUENCY": _CfgSpec(0.7, float, "Normalized fast noise frequency [0,1]."),
     "DRIFT_NOISE_GAIN": _CfgSpec(0.8, float, "Fast noise gain multiplier."),
@@ -45,2854 +58,33 @@ APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
     "TRADING_LIMITS": _CfgSpec(40, int, "Max shares traded per period; <=0 disables limits."),
     "TRADING_LIMITS_PERIOD": _CfgSpec(60, int, "Tick window length for trading-limit reset."),
     "TRADING_FEES": _CfgSpec(1.0, float, "Sell fee percentage applied to realized profit."),
+    "OWNER_BUY_FEE_RATE": _CfgSpec(5.0, float, "Owner payout percentage from non-owner buy transaction value."),
     "COMMODITIES_LIMIT": _CfgSpec(5, int, "Max total commodity units a player can hold; <=0 disables."),
     "PAWN_SELL_RATE": _CfgSpec(75.0, float, "Pawn payout percentage when selling commodities to bank."),
     "SHOP_RARITY_WEIGHTS": _CfgSpec('{"common":1.0,"uncommon":0.6,"rare":0.3,"legendary":0.1,"exotic":0.03}', str, "JSON mapping of rarity->weight used for shop rotation."),
+    "IMAGE_UPLOAD_MAX_SOURCE_MB": _CfgSpec(8, int, "Max download size (MB) allowed when ingesting image URLs."),
+    "IMAGE_UPLOAD_MAX_DIM": _CfgSpec(1024, int, "Max width/height in pixels for ingested images."),
+    "IMAGE_UPLOAD_MAX_STORED_KB": _CfgSpec(300, int, "Max stored file size in KB per ingested image."),
+    "IMAGE_UPLOAD_TOTAL_GB": _CfgSpec(2.0, float, "Total local uploads quota in GB for dashboard-hosted images."),
 }
 
-AUTH_REQUIRED_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Web Admin Access Required</title>
-  <style>
-    body { margin:0; font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#0f172a; color:#e5e7eb; }
-    .wrap { min-height:100vh; display:grid; place-items:center; padding:20px; }
-    .card { max-width:680px; width:100%; background:#0b1220; border:1px solid #1f2937; border-radius:12px; padding:18px; }
-    .title { font-size:1.2rem; font-weight:700; margin-bottom:8px; }
-    .muted { color:#94a3b8; }
-    code { background:#111827; border:1px solid #374151; border-radius:6px; padding:2px 6px; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="title">Token expired or invalid</div>
-      <div class="muted">
-        If you are an admin, use <code>/webadmin</code> in Discord to generate a one-time access link.
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-"""
+AUTH_REQUIRED_HTML = _load_template("auth_required.html")
 
 
-MAIN_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>716Stonks Dashboard</title>
-  <style>
-    :root {
-      --bg: #0f172a; --line: #1f2937; --text: #e5e7eb; --muted: #94a3b8;
-      --up: #22c55e; --down: #ef4444; --btn:#1e293b; --btnH:#334155;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: radial-gradient(1200px 600px at 80% -10%, #1d4ed822, transparent), var(--bg); color: var(--text); }
-    .wrap { max-width: 1400px; margin: 20px auto; padding: 0 14px; display: grid; grid-template-columns: 320px 1fr; gap: 14px; }
-    .card { background: linear-gradient(180deg, #0b1220, #0a101c); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px #00000033; }
-    .head { padding: 14px 14px 8px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-    .title { font-size: 1.1rem; font-weight: 700; }
-    .muted { color: var(--muted); font-size: .85rem; }
-    .side { padding: 10px; max-height: calc(100vh - 40px); overflow: auto; }
-    .btnrow { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
-    button, a.btn { background: var(--btn); border: 1px solid #334155; color: var(--text); padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: .86rem; text-decoration: none; text-align: center; }
-    button:hover, a.btn:hover { background: var(--btnH); }
-    button.active { border-color: #22c55e; }
-    button.alert { background: #7f1d1d; border-color: #ef4444; color: #fee2e2; }
-    table { width: 100%; border-collapse: collapse; }
-    thead th { text-align: left; font-size: .84rem; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); padding: 10px 8px; background: #0b1323; position: sticky; top: 0; }
-    tbody td { padding: 9px 8px; border-bottom: 1px solid #111827; font-size: .92rem; }
-    tbody tr:hover { background: #13203a; }
-    tbody tr.clickable { cursor: pointer; }
-    .thumb { width: 52px; height: 52px; border-radius: 8px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
-    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .up { color: var(--up); font-weight: 600; }
-    .down { color: var(--down); font-weight: 600; }
-    .empty { color: var(--muted); text-align: center; padding: 20px; }
-    .tableWrap { overflow: auto; width: 100%; }
-    .statsBar {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      padding: 10px 14px 12px 14px;
-      border-bottom: 1px solid var(--line);
-      background: #0a1324;
-    }
-    .stat {
-      border: 1px solid #263246;
-      border-radius: 8px;
-      padding: 8px 10px;
-      background: #0c1629;
-    }
-    .statLabel { color: var(--muted); font-size: .78rem; }
-    .statValue { font-size: 1rem; font-weight: 700; margin-top: 2px; }
-    [data-company-open]:hover {
-      background: #1e3a8a66;
-      color: #e0f2fe;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    .rarity-common { color: #ffffff; font-weight: 600; }
-    .rarity-uncommon { color: #22c55e; font-weight: 600; }
-    .rarity-rare { color: #38bdf8; font-weight: 600; }
-    .rarity-legendary { color: #c084fc; font-weight: 600; }
-    .rarity-exotic { color: #f59e0b; font-weight: 700; }
-    @media (max-width: 980px) {
-      .wrap { grid-template-columns: 1fr; }
-      .side { max-height: none; }
-      .head { flex-direction: column; align-items: flex-start; }
-      thead th, tbody td { white-space: nowrap; }
-      .statsBar { grid-template-columns: 1fr; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="head">
-        <div class="title">Views</div>
-        <div class="muted">Tabs</div>
-      </div>
-      <div class="side">
-        <div class="btnrow">
-          <button id="showCompanies" class="active">Show Companies</button>
-          <button id="showCommodities">Show Commodities</button>
-          <button id="showShop">Shop</button>
-          <button id="showPlayers">Show Players</button>
-          <button id="showPerks">Show Perks</button>
-          <button id="showAnnouncements">Announcements</button>
-          <button id="showFeedback">Feedback</button>
-          <button id="showBankActions">Bank Actions</button>
-          <button id="showActionHistory">Action History</button>
-          <button id="showConfigs">Show App Configs</button>
-          <button id="showServerSettings">Server Settings</button>
-          <a class="btn" href="{{ db_access_url }}" target="_blank" rel="noopener">Open Database Access</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="head">
-        <div class="title" id="tableTitle">Companies</div>
-        <div class="muted">refresh 2s · last: <span id="last">-</span></div>
-      </div>
-      <div class="statsBar">
-        <div class="stat">
-          <div class="statLabel">Until Close</div>
-          <div class="statValue" id="statUntilClose">-</div>
-        </div>
-        <div class="stat">
-          <div class="statLabel">Until Next Reset</div>
-          <div class="statValue" id="statUntilReset">-</div>
-        </div>
-        <div class="stat">
-          <div class="statLabel">Companies</div>
-          <div class="statValue" id="statCompanies">-</div>
-        </div>
-        <div class="stat">
-          <div class="statLabel">Users</div>
-          <div class="statValue" id="statUsers">-</div>
-        </div>
-      </div>
-      <div class="tableWrap">
-        <table>
-          <thead id="thead"></thead>
-          <tbody id="rows">
-            <tr><td class="empty">Loading...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script>
-    const VALID_TABS = new Set(["companies", "commodities", "shop", "players", "perks", "announcements", "feedback", "bankActions", "actionHistory", "configs", "serverSettings"]);
-    function normalizeTab(tab) {
-      const t = String(tab || "").trim();
-      return VALID_TABS.has(t) ? t : "companies";
-    }
-    let currentTab = normalizeTab(
-      new URLSearchParams(window.location.search).get("tab")
-      || localStorage.getItem("dashboard_tab")
-      || "companies"
-    );
-    let pollTimer = null;
-    let pollMs = 2000;
-    let untilCloseSeconds = null;
-    let untilResetSeconds = null;
-    const ET_TIMEZONE = "America/New_York";
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    function fmtMoney(v) { return "$" + Number(v).toFixed(2); }
-    function fmtNum(v, d=4) { return Number(v).toFixed(d); }
-    function fmtHMS(totalSeconds) {
-      const s = Math.max(0, Number(totalSeconds) || 0);
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = Math.floor(s % 60);
-      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-    }
-    function esc(text) {
-      return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-    function rarityClass(r) {
-      const t = String(r || "common").toLowerCase().trim();
-      if (t === "uncommon") return "rarity-uncommon";
-      if (t === "rare") return "rarity-rare";
-      if (t === "legendary") return "rarity-legendary";
-      if (t === "exotic") return "rarity-exotic";
-      return "rarity-common";
-    }
-    function fmtEtDate(value) {
-      const dt = value ? new Date(value) : new Date();
-      if (Number.isNaN(dt.getTime())) return String(value || "-");
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: ET_TIMEZONE,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      }).formatToParts(dt);
-      const map = {};
-      parts.forEach((p) => { map[p.type] = p.value; });
-      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
-    }
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function withTab(url, tab) {
-      const t = normalizeTab(tab);
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}tab=${encodeURIComponent(t)}`;
-    }
-    function gotoWithAuth(url) {
-      window.location.href = withAuthToken(withTab(url, currentTab));
-    }
-    function setCurrentTab(tab) {
-      currentTab = normalizeTab(tab);
-      localStorage.setItem("dashboard_tab", currentTab);
-      const qp = new URLSearchParams(window.location.search);
-      qp.set("tab", currentTab);
-      const query = qp.toString();
-      history.replaceState(null, "", `${window.location.pathname}${query ? "?" + query : ""}`);
-    }
-    function setButtons() {
-      document.querySelectorAll("button[id^='show']").forEach((btn) => btn.classList.remove("active"));
-      if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
-      if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
-      if (currentTab === "shop") document.getElementById("showShop").classList.add("active");
-      if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
-      if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
-      if (currentTab === "announcements") document.getElementById("showAnnouncements").classList.add("active");
-      if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
-      if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
-      if (currentTab === "actionHistory") document.getElementById("showActionHistory").classList.add("active");
-      if (currentTab === "configs") document.getElementById("showConfigs").classList.add("active");
-      if (currentTab === "serverSettings") document.getElementById("showServerSettings").classList.add("active");
-    }
-    function sparklineSvg(values, width, height, stroke) {
-      if (!values || values.length < 2) return '<span class="muted">-</span>';
-      const min = Math.min(...values), max = Math.max(...values);
-      const pad = 2, range = (max - min) || 1, step = (width - pad * 2) / Math.max(1, values.length - 1);
-      const points = values.map((v, i) => {
-        const x = pad + i * step;
-        const y = pad + (height - pad * 2) * (1 - (v - min) / range);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      }).join(" ");
-      return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg"><polyline fill="none" stroke="${stroke}" stroke-width="2.2" points="${points}" /></svg>`;
-    }
-    function renderCompanies(rows) {
-      document.getElementById("tableTitle").textContent = "Companies";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Symbol</th><th>Name</th><th>Trend</th><th>Current</th><th>Base</th><th>Change vs Base</th><th>Slope</th><th>Action</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      const controlRow = `<tr>
-        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-          <button id="addCompanyBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Company</button>
-        </td>
-      </tr>`;
-      if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No companies found.</td></tr>';
-      } else {
-        tbody.innerHTML = controlRow + rows.map(r => {
-          const current = Number(r.current_price), base = Number(r.base_price);
-          const pct = base !== 0 ? ((current - base) / base) * 100 : 0;
-          const cls = pct >= 0 ? "up" : "down";
-          const sign = pct >= 0 ? "+" : "";
-          const spark = sparklineSvg(Array.isArray(r.history_prices) ? r.history_prices : [], 170, 36, pct >= 0 ? "#22c55e" : "#ef4444");
-          return `<tr data-symbol="${esc(r.symbol)}">
-            <td class="mono" data-company-open="${esc(r.symbol)}" style="cursor:pointer;"><strong>${esc(r.symbol)}</strong></td>
-            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${esc(r.name || "")}</td>
-            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${spark}</td>
-            <td class="mono">${fmtMoney(current)}</td>
-            <td><input class="mono" data-company-base="${esc(r.symbol)}" type="number" step="0.01" value="${Number(base).toFixed(2)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
-            <td class="mono ${cls}">${sign}${pct.toFixed(2)}%</td>
-            <td><input class="mono" data-company-slope="${esc(r.symbol)}" type="number" step="0.0001" value="${fmtNum(r.slope)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
-            <td>
-              <button data-company-save="${esc(r.symbol)}" style="padding:6px 10px;">Save</button>
-            </td>
-          </tr>`;
-        }).join("");
-      }
-      const addBtn = document.getElementById("addCompanyBtn");
-      if (addBtn) {
-        addBtn.addEventListener("click", async () => {
-          const symbol = (window.prompt("Symbol (e.g. ATEST):", "") || "").trim().toUpperCase();
-          if (!symbol) return;
-          const name = (window.prompt("Company name:", symbol) || "").trim();
-          if (!name) return;
-          const baseRaw = window.prompt("Base price:", "1.00");
-          if (baseRaw === null) return;
-          const slopeRaw = window.prompt("Slope:", "0.0000");
-          if (slopeRaw === null) return;
-          const base = Number(baseRaw);
-          const slope = Number(slopeRaw);
-          if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(slope)) {
-            alert("Invalid base/slope.");
-            return;
-          }
-          addBtn.disabled = true;
-          const old = addBtn.textContent;
-          addBtn.textContent = "Adding...";
-          try {
-            const res = await fetch(withAuthToken("/api/company"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ symbol, name, base_price: base, slope }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              await loadCompanies();
-            }
-          } finally {
-            addBtn.disabled = false;
-            addBtn.textContent = old;
-          }
-        });
-      }
-      document.querySelectorAll("[data-company-open]").forEach((el) => {
-        el.addEventListener("click", () => {
-          const sym = el.getAttribute("data-company-open");
-          gotoWithAuth(`/company/${encodeURIComponent(sym || "")}`);
-        });
-      });
-      document.querySelectorAll("button[data-company-save]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const sym = btn.getAttribute("data-company-save");
-          if (!sym) return;
-          const baseInput = document.querySelector(`input[data-company-base="${CSS.escape(sym)}"]`);
-          const slopeInput = document.querySelector(`input[data-company-slope="${CSS.escape(sym)}"]`);
-          if (!baseInput || !slopeInput) return;
-          const payload = {
-            base_price: Number(baseInput.value),
-            slope: Number(slopeInput.value),
-          };
-          btn.disabled = true;
-          const originalText = btn.textContent;
-          btn.textContent = "Saving...";
-          try {
-            const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(sym)}/update`), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(()=>({error:"Failed"}));
-              btn.textContent = err.error || "Failed";
-            } else {
-              btn.textContent = "Saved";
-              setTimeout(() => { btn.textContent = originalText; }, 800);
-              await loadCompanies();
-            }
-          } catch (_e) {
-            btn.textContent = "Failed";
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-    }
-    function renderCommodities(rows) {
-      document.getElementById("tableTitle").textContent = "Commodities";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Spawn Weight</th><th>Tags</th><th>Description</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      const controlRow = `<tr>
-        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-          <button id="addCommodityBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Commodity</button>
-        </td>
-      </tr>`;
-      if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No commodities found.</td></tr>';
-      } else {
-        const fallbackSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52"><rect width="100%" height="100%" fill="#0b1323"/><text x="50%" y="50%" fill="#94a3b8" font-size="9" text-anchor="middle" dominant-baseline="middle">No Img</text></svg>';
-        const fallback = `data:image/svg+xml;utf8,${encodeURIComponent(fallbackSvg)}`;
-        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-commodity="${esc(r.name)}">
-          <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
-          <td><strong>${esc(r.name)}</strong></td>
-          <td class="mono">${fmtMoney(r.price)}</td>
-          <td><span class="${rarityClass(r.rarity)}">${esc((r.rarity || "common").toUpperCase())}</span></td>
-          <td class="mono">${esc(String(Number(r.spawn_weight_override || 0).toFixed(4)))}</td>
-          <td>${esc(String((r.tags || []).join(", ")))}</td>
-          <td>${esc(r.description || "")}</td>
-        </tr>`).join("");
-      }
-      const addBtn = document.getElementById("addCommodityBtn");
-      if (addBtn) {
-        addBtn.addEventListener("click", async () => {
-          const name = (window.prompt("Commodity name:", "") || "").trim();
-          if (!name) return;
-          const priceRaw = window.prompt("Price:", "1.00");
-          if (priceRaw === null) return;
-          const rarity = (window.prompt("Rarity (common/uncommon/rare/legendary/exotic):", "common") || "common").trim().toLowerCase();
-          const spawnWeightRaw = window.prompt("Spawn weight override (0 = rarity default):", "0");
-          if (spawnWeightRaw === null) return;
-          const image_url = (window.prompt("Image URL (optional):", "") || "").trim();
-          const tags = (window.prompt("Tags (comma-separated, optional):", "") || "").trim();
-          const description = (window.prompt("Description (optional):", "") || "").trim();
-          const price = Number(priceRaw);
-          const spawn_weight_override = Number(spawnWeightRaw);
-          if (!Number.isFinite(price) || price <= 0) {
-            alert("Invalid price.");
-            return;
-          }
-          if (!Number.isFinite(spawn_weight_override) || spawn_weight_override < 0) {
-            alert("Invalid spawn weight override.");
-            return;
-          }
-          addBtn.disabled = true;
-          const old = addBtn.textContent;
-          addBtn.textContent = "Adding...";
-          try {
-            const res = await fetch(withAuthToken("/api/commodity"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, price, rarity, spawn_weight_override, image_url, tags, description }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              await loadCommodities();
-            }
-          } finally {
-            addBtn.disabled = false;
-            addBtn.textContent = old;
-          }
-        });
-      }
-      document.querySelectorAll("tr[data-commodity]").forEach((tr) => {
-        tr.addEventListener("click", () => {
-          const name = tr.getAttribute("data-commodity");
-          gotoWithAuth(`/commodity/${encodeURIComponent(name)}`);
-        });
-      });
-    }
-    function renderPlayers(rows) {
-      document.getElementById("tableTitle").textContent = "Players";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>User</th><th>Rank</th><th>Bank</th><th>Networth</th><th>Owe</th><th>Trading Limit</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No players found.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr class="clickable" data-user="${esc(r.user_id)}">
-        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(r.user_id)}</div></td>
-        <td>${esc(r.rank || "-")}</td>
-        <td class="mono">${fmtMoney(r.bank)}</td>
-        <td class="mono">${fmtMoney(r.networth)}</td>
-        <td class="mono">${fmtMoney(r.owe || 0)}</td>
-        <td class="mono">${
-          r.trade_limit_enabled
-            ? `${Number(r.trade_limit_remaining || 0)}/${Number(r.trade_limit_limit || 0)}`
-            : "Disabled"
-        }</td>
-      </tr>`).join("");
-      document.querySelectorAll("tr[data-user]").forEach((tr) => {
-        tr.addEventListener("click", () => {
-          const uid = tr.getAttribute("data-user");
-          gotoWithAuth(`/player/${encodeURIComponent(uid)}`);
-        });
-      });
-    }
-    function renderShop(data) {
-      const rows = Array.isArray(data.items) ? data.items : [];
-      const all = Array.isArray(data.available) ? data.available : [];
-      document.getElementById("tableTitle").textContent = `Shop (Bucket ${Number(data.bucket || 0)})`;
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Slot</th><th>Name</th><th>Price</th><th>Rarity</th><th>Availability</th><th>Swap To</th><th>Action</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      const controlRow = `<tr>
-        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-          <button id="refreshShopBtn" style="padding:6px 10px;background:#1d4ed8;border-color:#2563eb;color:#dbeafe;">Refresh Random Set</button>
-        </td>
-      </tr>`;
-      if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No active shop items.</td></tr>';
-      } else {
-        tbody.innerHTML = controlRow + rows.map((r, idx) => {
-          const name = String(r.name || "");
-          const options = all
-            .filter((n) => n !== name)
-            .map((n) => `<option value="${esc(n)}">${esc(n)}</option>`)
-            .join("");
-          return `<tr>
-            <td class="mono">${idx + 1}</td>
-            <td><strong>${esc(name)}</strong></td>
-            <td class="mono">${fmtMoney(r.price || 0)}</td>
-            <td><span class="${rarityClass(r.rarity)}">${esc(String(r.rarity || "common").toUpperCase())}</span></td>
-            <td class="${r.in_stock ? 'up' : 'down'}">${r.in_stock ? "IN STOCK" : "OUT OF STOCK"}</td>
-            <td>
-              <select data-shop-swap-target="${idx}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
-                <option value="">(choose)</option>
-                ${options}
-              </select>
-            </td>
-            <td style="display:flex;gap:6px;flex-wrap:wrap;">
-              <button data-shop-toggle="${esc(name)}" style="padding:6px 10px;${r.in_stock ? "background:#7f1d1d;border-color:#ef4444;color:#fee2e2;" : "background:#14532d;border-color:#22c55e;color:#dcfce7;"}">${r.in_stock ? "Set OUT" : "Set IN"}</button>
-              <button data-shop-swap="${idx}" style="padding:6px 10px;">Swap</button>
-            </td>
-          </tr>`;
-        }).join("");
-      }
-
-      const refreshBtn = document.getElementById("refreshShopBtn");
-      if (refreshBtn) {
-        refreshBtn.addEventListener("click", async () => {
-          refreshBtn.disabled = true;
-          const old = refreshBtn.textContent;
-          refreshBtn.textContent = "Refreshing...";
-          try {
-            const res = await fetch(withAuthToken("/api/shop/refresh"), { method: "POST" });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Refresh failed" }));
-              alert(err.error || "Refresh failed");
-            }
-            await loadShop();
-          } finally {
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = old;
-          }
-        });
-      }
-
-      document.querySelectorAll("button[data-shop-toggle]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const name = btn.getAttribute("data-shop-toggle");
-          if (!name) return;
-          const makeInStock = btn.textContent?.includes("Set IN");
-          btn.disabled = true;
-          try {
-            const res = await fetch(withAuthToken("/api/shop/availability"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, in_stock: !!makeInStock }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Update failed" }));
-              alert(err.error || "Update failed");
-            }
-            await loadShop();
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-
-      document.querySelectorAll("button[data-shop-swap]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const slotRaw = btn.getAttribute("data-shop-swap");
-          if (slotRaw === null) return;
-          const slot = Number(slotRaw);
-          const sel = document.querySelector(`select[data-shop-swap-target="${CSS.escape(slotRaw)}"]`);
-          const new_name = String(sel?.value || "").trim();
-          if (!new_name) return;
-          btn.disabled = true;
-          try {
-            const res = await fetch(withAuthToken("/api/shop/swap"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ slot, new_name }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Swap failed" }));
-              alert(err.error || "Swap failed");
-            }
-            await loadShop();
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-    }
-    async function renderPerks(rows) {
-      document.getElementById("tableTitle").textContent = "Perks";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Name</th><th>Enabled</th><th>Priority</th><th>Stack Mode</th><th>Max Stacks</th><th>Requirements</th><th>Effects</th><th>Description</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      const controlRow = `<tr>
-        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-          <button id="addPerkBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Perk</button>
-          <span style="margin-left:10px;" class="muted">Preview user:</span>
-          <select id="perkPreviewUser" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;min-width:220px;"></select>
-          <button id="perkPreviewRefresh" style="padding:6px 10px;">Refresh Preview</button>
-          <div id="perkPreviewBox" class="muted" style="margin-top:8px;"></div>
-        </td>
-      </tr>`;
-      if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No perks found.</td></tr>';
-      } else {
-        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-perk-id="${esc(String(r.id || ""))}">
-          <td><strong>${esc(r.name || "")}</strong></td>
-          <td>${Number(r.enabled || 0) ? "Yes" : "No"}</td>
-          <td class="mono">${esc(String(r.priority ?? 100))}</td>
-          <td>${esc(String(r.stack_mode || "add"))}</td>
-          <td class="mono">${esc(String(r.max_stacks ?? 1))}</td>
-          <td class="mono">${esc(String(r.requirements_count ?? 0))}</td>
-          <td class="mono">${esc(String(r.effects_count ?? 0))}</td>
-          <td>${esc(String(r.description || ""))}</td>
-        </tr>`).join("");
-      }
-      await loadPerkPreviewUsers();
-      bindPerkPreviewRefresh();
-      const addBtn = document.getElementById("addPerkBtn");
-      if (addBtn) {
-        addBtn.addEventListener("click", async () => {
-          const name = (window.prompt("Perk name:", "") || "").trim();
-          if (!name) return;
-          const description = (window.prompt("Description (optional):", "") || "").trim();
-          addBtn.disabled = true;
-          const old = addBtn.textContent;
-          addBtn.textContent = "Adding...";
-          try {
-            const res = await fetch(withAuthToken("/api/perk"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, description }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              const data = await res.json();
-              const id = Number(data.id || 0);
-              if (id > 0) {
-                gotoWithAuth(`/perk/${id}`);
-                return;
-              }
-              await loadPerks();
-            }
-          } finally {
-            addBtn.disabled = false;
-            addBtn.textContent = old;
-          }
-        });
-      }
-      document.querySelectorAll("tr[data-perk-id]").forEach((tr) => {
-        tr.addEventListener("click", () => {
-          const id = tr.getAttribute("data-perk-id");
-          if (!id) return;
-          gotoWithAuth(`/perk/${encodeURIComponent(id)}`);
-        });
-      });
-    }
-    function mdPreview(text) {
-      const source = String(text || "");
-      if (window.marked && typeof window.marked.parse === "function") {
-        try {
-          return window.marked.parse(source, {
-            gfm: true,
-            breaks: true,
-          });
-        } catch (_e) {}
-      }
-      const safe = esc(source);
-      return safe.split(String.fromCharCode(10)).join("<br>");
-    }
-    function renderCloseRankingPreview(rows) {
-      const list = Array.isArray(rows) ? rows : [];
-      if (!list.length) {
-        return "<strong>#1</strong> @PlayerOne — Networth <code>$0.00</code><br><strong>#2</strong> @PlayerTwo — Networth <code>$0.00</code><br><strong>#3</strong> @PlayerThree — Networth <code>$0.00</code>";
-      }
-      return list.slice(0, 3).map((p, idx) => {
-        const name = esc(String(p.display_name || `User ${p.user_id || "?"}`));
-        const nw = Number(p.networth || 0).toFixed(2);
-        return `<strong>#${idx + 1}</strong> ${name} — Networth <code>$${nw}</code>`;
-      }).join("<br>");
-    }
-    async function renderAnnouncements(data) {
-      const markdown = String(data.markdown || "");
-      const newsRows = Array.isArray(data.news || []) ? data.news : [];
-      const rankingRows = Array.isArray(data.rankings || []) ? data.rankings : [];
-      document.getElementById("tableTitle").textContent = "Announcements";
-      document.getElementById("thead").innerHTML = "";
-      const tbody = document.getElementById("rows");
-      const newsHtml = newsRows.length
-        ? newsRows.map((n) => `
-            <tr data-news-id="${esc(String(n.id || ""))}">
-              <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-                <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
-                  <div>
-                    <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
-                    <input data-news-title="${esc(String(n.id || ""))}" value="${esc(String(n.title || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-                  </div>
-                  <div>
-                    <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
-                    <input data-news-sort="${esc(String(n.id || ""))}" type="number" value="${esc(String(n.sort_order ?? 0))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-                  </div>
-                  <div>
-                    <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
-                    <select data-news-enabled="${esc(String(n.id || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
-                      <option value="1"${Number(n.enabled || 0) ? " selected" : ""}>Yes</option>
-                      <option value="0"${Number(n.enabled || 0) ? "" : " selected"}>No</option>
-                    </select>
-                  </div>
-                </div>
-                <div style="margin-top:8px;">
-                  <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
-                  <textarea data-news-body="${esc(String(n.id || ""))}" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(String(n.body || ""))}</textarea>
-                </div>
-                <div style="margin-top:8px;">
-                  <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
-                  <input data-news-image="${esc(String(n.id || ""))}" value="${esc(String(n.image_url || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-                </div>
-                <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
-                  <button data-news-save="${esc(String(n.id || ""))}" style="padding:6px 10px;">Save</button>
-                  <button data-news-del="${esc(String(n.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button>
-                  <span class="muted">id ${esc(String(n.id || ""))}</span>
-                </div>
-              </td>
-            </tr>
-          `).join("")
-        : `<tr><td class="empty">No closing news items yet.</td></tr>`;
-      tbody.innerHTML = `
-        <tr>
-          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-            <div style="font-weight:700;margin-bottom:8px;">Close Announcement Markdown</div>
-            <textarea id="closeAnnouncementMd" style="width:100%;min-height:140px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(markdown)}</textarea>
-            <div style="margin-top:8px;">
-              <button id="saveCloseAnnouncement" style="padding:6px 10px;">Save Announcement</button>
-            </div>
-            <div style="margin-top:10px;font-weight:700;">Preview</div>
-            <div id="closeAnnouncementPreview" style="margin-top:6px;padding:10px;border:1px solid #1f2937;border-radius:8px;background:#0b1323;">
-              ${mdPreview(markdown)}
-              <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
-              <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
-              <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-              <div style="font-weight:700;">Close News Embeds</div>
-              <button id="addCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add News</button>
-            </div>
-            <div id="addCloseNewsForm" style="margin-top:10px;display:none;">
-              <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
-                <div>
-                  <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
-                  <input id="newNewsTitle" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-                </div>
-                <div>
-                  <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
-                  <input id="newNewsSort" type="number" value="0" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-                </div>
-                <div>
-                  <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
-                  <select id="newNewsEnabled" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
-                    <option value="1" selected>Yes</option>
-                    <option value="0">No</option>
-                  </select>
-                </div>
-              </div>
-              <div style="margin-top:8px;">
-                <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
-                <textarea id="newNewsBody" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;"></textarea>
-              </div>
-              <div style="margin-top:8px;">
-                <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
-                <input id="newNewsImage" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-              </div>
-              <div style="margin-top:8px;display:flex;gap:8px;">
-                <button id="saveNewCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">Create</button>
-                <button id="cancelNewCloseNews" style="padding:6px 10px;">Cancel</button>
-              </div>
-            </div>
-          </td>
-        </tr>
-        ${newsHtml}
-      `;
-      const mdInput = document.getElementById("closeAnnouncementMd");
-      const mdPreviewBox = document.getElementById("closeAnnouncementPreview");
-      if (mdInput && mdPreviewBox) {
-        mdInput.addEventListener("input", () => {
-          const html = `
-            ${mdPreview(mdInput.value)}
-            <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
-            <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
-            <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
-          `;
-          mdPreviewBox.innerHTML = html;
-        });
-      }
-      const saveBtn = document.getElementById("saveCloseAnnouncement");
-      if (saveBtn && mdInput) {
-        saveBtn.addEventListener("click", async () => {
-          saveBtn.disabled = true;
-          const old = saveBtn.textContent;
-          saveBtn.textContent = "Saving...";
-          try {
-            const res = await fetch(withAuthToken("/api/close-announcement"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ markdown: mdInput.value }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Save failed" }));
-              alert(err.error || "Save failed");
-            } else {
-              saveBtn.textContent = "Saved";
-              setTimeout(() => { saveBtn.textContent = old; }, 800);
-            }
-          } finally {
-            saveBtn.disabled = false;
-          }
-        });
-      }
-      const addBtn = document.getElementById("addCloseNews");
-      if (addBtn) {
-        addBtn.addEventListener("click", async () => {
-          const form = document.getElementById("addCloseNewsForm");
-          if (form) form.style.display = "block";
-          addBtn.style.display = "none";
-        });
-      }
-      const cancelAddBtn = document.getElementById("cancelNewCloseNews");
-      if (cancelAddBtn) {
-        cancelAddBtn.addEventListener("click", () => {
-          const form = document.getElementById("addCloseNewsForm");
-          const addButton = document.getElementById("addCloseNews");
-          if (form) form.style.display = "none";
-          if (addButton) addButton.style.display = "";
-        });
-      }
-      const saveNewBtn = document.getElementById("saveNewCloseNews");
-      if (saveNewBtn) {
-        saveNewBtn.addEventListener("click", async () => {
-          const title = String((document.getElementById("newNewsTitle") || {}).value || "").trim();
-          const body = String((document.getElementById("newNewsBody") || {}).value || "");
-          const image_url = String((document.getElementById("newNewsImage") || {}).value || "").trim();
-          const sort_order = Number(String((document.getElementById("newNewsSort") || {}).value || "0"));
-          const enabled = Number(String((document.getElementById("newNewsEnabled") || {}).value || "1")) ? 1 : 0;
-          if (!title) {
-            alert("Title is required.");
-            return;
-          }
-          saveNewBtn.disabled = true;
-          const res = await fetch(withAuthToken("/api/close-news"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
-          });
-          saveNewBtn.disabled = false;
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "Create failed" }));
-            alert(err.error || "Create failed");
-            return;
-          }
-          await loadAnnouncements();
-        });
-      }
-      document.querySelectorAll("button[data-news-save]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const id = btn.getAttribute("data-news-save");
-          if (!id) return;
-          const titleEl = document.querySelector(`input[data-news-title="${CSS.escape(id)}"]`);
-          const bodyEl = document.querySelector(`textarea[data-news-body="${CSS.escape(id)}"]`);
-          const imageEl = document.querySelector(`input[data-news-image="${CSS.escape(id)}"]`);
-          const sortEl = document.querySelector(`input[data-news-sort="${CSS.escape(id)}"]`);
-          const enabledEl = document.querySelector(`select[data-news-enabled="${CSS.escape(id)}"]`);
-          const title = String(titleEl ? titleEl.value : "").trim();
-          const body = String(bodyEl ? bodyEl.value : "");
-          const image_url = String(imageEl ? imageEl.value : "").trim();
-          const sort_order = Number(String(sortEl ? sortEl.value : "0"));
-          const enabled = Number(String(enabledEl ? enabledEl.value : "1")) ? 1 : 0;
-          if (!title) {
-            alert("Title is required.");
-            return;
-          }
-          btn.disabled = true;
-          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
-          });
-          btn.disabled = false;
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "Update failed" }));
-            alert(err.error || "Update failed");
-            return;
-          }
-          await loadAnnouncements();
-        });
-      });
-      document.querySelectorAll("button[data-news-del]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const id = btn.getAttribute("data-news-del");
-          if (!id || !window.confirm("Delete this news item?")) return;
-          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), { method: "DELETE" });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "Delete failed" }));
-            alert(err.error || "Delete failed");
-            return;
-          }
-          await loadAnnouncements();
-        });
-      });
-    }
-    async function loadPerkPreviewUsers() {
-      const select = document.getElementById("perkPreviewUser");
-      if (!select) return;
-      try {
-        const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
-        if (!res.ok) {
-          select.innerHTML = '<option value="">(No users)</option>';
-          return;
-        }
-        const data = await res.json();
-        const players = Array.isArray(data.players) ? data.players : [];
-        if (!players.length) {
-          select.innerHTML = '<option value="">(No users)</option>';
-          const box = document.getElementById("perkPreviewBox");
-          if (box) box.textContent = "No players available for preview.";
-          return;
-        }
-        const old = String(select.value || "");
-        select.innerHTML = players.map((p) => {
-          const uid = String(p.user_id || "");
-          const name = String(p.display_name || `User ${uid}`);
-          return `<option value="${esc(uid)}">${esc(name)} (${esc(uid)})</option>`;
-        }).join("");
-        if (old && [...select.options].some((o) => o.value === old)) {
-          select.value = old;
-        }
-        await loadPerkPreview();
-      } catch (_e) {
-        select.innerHTML = '<option value="">(Failed to load)</option>';
-      }
-    }
-    function bindPerkPreviewRefresh() {
-      const btn = document.getElementById("perkPreviewRefresh");
-      const select = document.getElementById("perkPreviewUser");
-      if (!btn || !select) return;
-      btn.onclick = async () => { await loadPerkPreview(); };
-      select.onchange = async () => { await loadPerkPreview(); };
-    }
-    async function loadPerkPreview() {
-      const select = document.getElementById("perkPreviewUser");
-      const box = document.getElementById("perkPreviewBox");
-      if (!select || !box) return;
-      const userId = String(select.value || "");
-      if (!userId) {
-        box.textContent = "Select a player to preview.";
-        return;
-      }
-      box.textContent = "Loading preview...";
-      try {
-        const res = await fetch(withAuthToken(`/api/perk-preview?user_id=${encodeURIComponent(userId)}`), { cache: "no-store" });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          box.textContent = String(data.error || "Failed to load preview.");
-          return;
-        }
-        const matched = Array.isArray(data.matched_perks) ? data.matched_perks : [];
-        const header = `Rank: ${data.rank} · Income $${Number(data.base_income || 0).toFixed(2)} -> $${Number(data.final_income || 0).toFixed(2)} · Limits ${Number(data.base_trade_limits || 0).toFixed(0)} -> ${Number(data.final_trade_limits || 0).toFixed(0)} · Networth $${Number(data.base_networth || 0).toFixed(2)} -> $${Number(data.final_networth || 0).toFixed(2)}`;
-        if (!matched.length) {
-          box.textContent = `${header} · No triggered perks.`;
-          return;
-        }
-        const lines = matched.map((m) => {
-          const disp = String(m.display || "").trim();
-          if (disp) return `${m.name}(x${m.stacks}) (${disp})`;
-          return `${m.name}(x${m.stacks}) (income ${Number(m.add || 0).toFixed(2)}, x${Number(m.mul || 1).toFixed(2)})`;
-        });
-        box.textContent = `${header} · Triggered: ${lines.join(" | ")}`;
-      } catch (_e) {
-        box.textContent = "Failed to load preview.";
-      }
-    }
-    function renderActionHistory(rows) {
-      document.getElementById("tableTitle").textContent = "Action History";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>When (UTC)</th><th>User</th><th>Action</th><th>Target</th><th>Qty</th><th>Unit</th><th>Total</th><th>Details</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      const controlRow = `<tr>
-        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
-          <button id="purgeActionHistoryBtn" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Purge All History</button>
-        </td>
-      </tr>`;
-      if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No player actions recorded yet.</td></tr>';
-      } else {
-        tbody.innerHTML = controlRow + rows.map((r) => `<tr>
-        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
-        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
-        <td>${esc(String(r.action_type || "").toUpperCase())}</td>
-        <td>${esc(String(r.target_type || "").toUpperCase())}: <span class="mono">${esc(r.target_symbol || "-")}</span></td>
-        <td class="mono">${fmtNum(r.quantity || 0, 2)}</td>
-        <td class="mono">${fmtMoney(r.unit_price || 0)}</td>
-        <td class="mono">${fmtMoney(r.total_amount || 0)}</td>
-        <td>${esc(r.details || "")}</td>
-      </tr>`).join("");
-      }
-      const purgeBtn = document.getElementById("purgeActionHistoryBtn");
-      if (purgeBtn) {
-        purgeBtn.addEventListener("click", async () => {
-          const ok = window.confirm("Purge all action history? This cannot be undone.");
-          if (!ok) return;
-          purgeBtn.disabled = true;
-          const old = purgeBtn.textContent;
-          purgeBtn.textContent = "Purging...";
-          try {
-            const res = await fetch(withAuthToken("/api/action-history"), { method: "DELETE" });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Failed" }));
-              purgeBtn.textContent = err.error || "Failed";
-              purgeBtn.disabled = false;
-              return;
-            }
-            await loadActionHistory();
-          } catch (_e) {
-            purgeBtn.textContent = "Failed";
-            purgeBtn.disabled = false;
-            return;
-          }
-          purgeBtn.textContent = old;
-          purgeBtn.disabled = false;
-        });
-      }
-    }
-    function renderFeedback(rows) {
-      document.getElementById("tableTitle").textContent = "Feedback";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>ID</th><th>When (ET)</th><th>Message</th><th>Action</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr data-feedback-id="${esc(String(r.id || ""))}">
-        <td class="mono">${esc(String(r.id || ""))}</td>
-        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
-        <td>${esc(r.message || "")}</td>
-        <td><button data-feedback-delete="${esc(String(r.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
-      </tr>`).join("");
-      document.querySelectorAll("button[data-feedback-delete]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const id = btn.getAttribute("data-feedback-delete");
-          if (!id) return;
-          btn.disabled = true;
-          const original = btn.textContent;
-          btn.textContent = "Deleting...";
-          try {
-            const res = await fetch(withAuthToken(`/api/feedback/${encodeURIComponent(id)}`), { method: "DELETE" });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Failed" }));
-              btn.textContent = err.error || "Failed";
-              btn.disabled = false;
-              return;
-            }
-            const tr = document.querySelector(`tr[data-feedback-id="${CSS.escape(id)}"]`);
-            if (tr) tr.remove();
-            if (!document.querySelector("tr[data-feedback-id]")) {
-              document.getElementById("rows").innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
-            }
-          } catch (_e) {
-            btn.textContent = "Failed";
-            btn.disabled = false;
-            return;
-          }
-          btn.textContent = original;
-          btn.disabled = false;
-        });
-      });
-    }
-    function renderBankActions(rows) {
-      document.getElementById("tableTitle").textContent = "Bank Actions";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>ID</th><th>Created (UTC)</th><th>User</th><th>Type</th><th>Amount</th><th>Reason</th><th>Decision</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr data-bank-request="${esc(String(r.id))}">
-        <td class="mono">${esc(String(r.id))}</td>
-        <td class="mono">${esc(r.created_at || "-")}</td>
-        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
-        <td>${esc(String(r.request_type || "").toUpperCase())}</td>
-        <td class="mono">${fmtMoney(r.amount || 0)}</td>
-        <td>${esc(r.reason || "-")}</td>
-        <td>
-          <input data-bank-reason="${esc(String(r.id))}" placeholder="Optional reason..." style="width:100%;padding:6px 8px;margin-bottom:6px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button data-bank-approve="${esc(String(r.id))}" style="padding:6px 10px;background:#166534;border-color:#22c55e;">Approve</button>
-            <button data-bank-deny="${esc(String(r.id))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;">Deny</button>
-          </div>
-        </td>
-      </tr>`).join("");
-
-      document.querySelectorAll("button[data-bank-approve],button[data-bank-deny]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const id = btn.getAttribute("data-bank-approve") || btn.getAttribute("data-bank-deny");
-          if (!id) return;
-          const isApprove = btn.hasAttribute("data-bank-approve");
-          const reasonInput = document.querySelector(`input[data-bank-reason="${CSS.escape(id)}"]`);
-          const reason = reasonInput ? String(reasonInput.value || "").trim() : "";
-          const url = isApprove
-            ? `/api/bank-requests/${encodeURIComponent(id)}/approve`
-            : `/api/bank-requests/${encodeURIComponent(id)}/deny`;
-          btn.disabled = true;
-          const original = btn.textContent;
-          btn.textContent = isApprove ? "Approving..." : "Denying...";
-          try {
-            const res = await fetch(withAuthToken(url), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ reason }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Failed" }));
-              btn.textContent = err.error || "Failed";
-            } else {
-              const tr = document.querySelector(`tr[data-bank-request="${CSS.escape(id)}"]`);
-              if (tr) tr.remove();
-              if (!document.querySelector("tr[data-bank-request]")) {
-                document.getElementById("rows").innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
-              }
-            }
-          } catch (_e) {
-            btn.textContent = "Failed";
-          } finally {
-            btn.disabled = false;
-            if (btn.textContent !== "Failed") btn.textContent = original;
-          }
-        });
-      });
-    }
-    function renderConfigs(rows) {
-      document.getElementById("tableTitle").textContent = "App Configs";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Name</th><th>Value</th><th>Default</th><th>Type</th><th>Description</th><th>Action</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No app configs found.</td></tr>';
-        return;
-      }
-      function prettyConfigValue(name, value) {
-        const raw = String(value ?? "");
-        if (name !== "SHOP_RARITY_WEIGHTS") return raw;
-        try {
-          return JSON.stringify(JSON.parse(raw), null, 2);
-        } catch (_e) {
-          return raw;
-        }
-      }
-      function valueEditorHtml(row) {
-        const name = String(row.name || "");
-        const value = prettyConfigValue(name, row.value);
-        if (name === "SHOP_RARITY_WEIGHTS") {
-          return `<textarea class="cfg-value mono" data-config-input="${esc(name)}" style="width:100%;min-height:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;resize:vertical;">${esc(value)}</textarea>`;
-        }
-        return `<input class="cfg-value mono" data-config-input="${esc(name)}" value="${esc(value)}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />`;
-      }
-      function defaultCellHtml(row) {
-        const name = String(row.name || "");
-        const value = prettyConfigValue(name, row.default);
-        if (name === "SHOP_RARITY_WEIGHTS") {
-          return `<pre class="mono" style="margin:0;white-space:pre-wrap;word-break:break-word;background:#0b1323;border:1px solid #334155;border-radius:6px;padding:6px 8px;">${esc(value)}</pre>`;
-        }
-        return `<span class="mono">${esc(String(row.default))}</span>`;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr data-config="${esc(r.name)}">
-        <td class="mono"><strong>${esc(r.name)}</strong></td>
-        <td>${valueEditorHtml(r)}</td>
-        <td>${defaultCellHtml(r)}</td>
-        <td>${esc(r.type || "-")}</td>
-        <td>${esc(r.description || "")}</td>
-        <td><button class="cfg-save" data-config-save="${esc(r.name)}" style="padding:6px 10px;">Save</button></td>
-      </tr>`).join("");
-      document.querySelectorAll("button[data-config-save]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const name = btn.getAttribute("data-config-save");
-          const input = document.querySelector(`input[data-config-input="${CSS.escape(name)}"]`);
-          if (!input) return;
-          const rawValue = input.value;
-          btn.disabled = true;
-          const originalText = btn.textContent;
-          btn.textContent = "Saving...";
-          try {
-            const res = await fetch(withAuthToken(`/api/app-config/${encodeURIComponent(name)}/update`), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ value: rawValue }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(()=>({error:"Save failed"}));
-              btn.textContent = err.error || "Failed";
-            } else {
-              const data = await res.json();
-              input.value = String(data.value);
-              btn.textContent = "Saved";
-              setTimeout(() => { btn.textContent = originalText; }, 800);
-            }
-          } catch (_e) {
-            btn.textContent = "Failed";
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-    }
-    function renderServerSettings() {
-      document.getElementById("tableTitle").textContent = "Server Settings";
-      document.getElementById("thead").innerHTML = `<tr>
-        <th>Action</th><th>Description</th><th>Run</th><th>Status</th>
-      </tr>`;
-      const tbody = document.getElementById("rows");
-      tbody.innerHTML = `<tr>
-        <td><strong>Create Database Backup</strong></td>
-        <td>Create a point-in-time copy of the database now.</td>
-        <td><button id="runBackupNow" style="padding:6px 10px;">Run</button></td>
-        <td id="backupStatus" class="mono">-</td>
-      </tr>`;
-      const btn = document.getElementById("runBackupNow");
-      const status = document.getElementById("backupStatus");
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        status.textContent = "Running...";
-        try {
-          const res = await fetch(withAuthToken("/api/server-actions/backup"), { method: "POST" });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            status.textContent = data.error || "Failed";
-          } else {
-            status.textContent = `OK: ${String(data.backup_path || "")}`;
-          }
-        } catch (_e) {
-          status.textContent = "Failed";
-        } finally {
-          btn.disabled = false;
-        }
-      });
-
-      loadBackupsIntoServerSettings();
-    }
-    async function loadBackupsIntoServerSettings() {
-      const tbody = document.getElementById("rows");
-      try {
-        const res = await fetch(withAuthToken("/api/server-actions/backups"), { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json();
-        const backups = Array.isArray(data.backups) ? data.backups : [];
-        if (!backups.length) {
-          tbody.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="empty">No backups found.</td></tr>`);
-          return;
-        }
-        backups.forEach((b) => {
-          const downloadUrl = withAuthToken(`/api/server-actions/backups/${encodeURIComponent(b.name)}/download`);
-          const row = `<tr data-backup="${esc(b.name)}">
-            <td><strong>Backup File</strong></td>
-            <td class="mono">${esc(b.name)}<br><span class="muted">${esc(String(b.size_human || ""))}</span></td>
-            <td style="display:flex;gap:6px;flex-wrap:wrap;">
-              <a href="${downloadUrl}" style="display:inline-block;padding:6px 10px;border:1px solid #334155;border-radius:6px;background:#1f2937;color:#e5e7eb;text-decoration:none;">Download</a>
-              <button data-delete-backup="${esc(b.name)}" style="padding:6px 10px;background:#7f1d1d;border-color:#b91c1c;">Delete</button>
-            </td>
-            <td class="mono" data-backup-status="${esc(b.name)}">-</td>
-          </tr>`;
-          tbody.insertAdjacentHTML("beforeend", row);
-        });
-        document.querySelectorAll("button[data-delete-backup]").forEach((btn) => {
-          btn.addEventListener("click", async () => {
-            const name = btn.getAttribute("data-delete-backup");
-            if (!name) return;
-            const status = document.querySelector(`[data-backup-status="${CSS.escape(name)}"]`);
-            btn.disabled = true;
-            if (status) status.textContent = "Deleting...";
-            try {
-              const delRes = await fetch(withAuthToken(`/api/server-actions/backups/${encodeURIComponent(name)}`), { method: "DELETE" });
-              const delData = await delRes.json().catch(() => ({}));
-              if (!delRes.ok) {
-                if (status) status.textContent = delData.error || "Failed";
-              } else {
-                const tr = document.querySelector(`tr[data-backup="${CSS.escape(name)}"]`);
-                if (tr) tr.remove();
-              }
-            } catch (_e) {
-              if (status) status.textContent = "Failed";
-            } finally {
-              btn.disabled = false;
-            }
-          });
-        });
-      } catch (_e) {
-        tbody.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="empty">Failed to load backups.</td></tr>`);
-      }
-    }
-    async function loadCompanies() {
-      const res = await fetch(withAuthToken("/api/stocks"), { cache: "no-store" });
-      const data = await res.json();
-      renderCompanies(data.stocks || []);
-      document.getElementById("last").textContent = fmtEtDate(data.server_time_utc || "");
-    }
-    async function loadCommodities() {
-      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
-      const data = await res.json();
-      renderCommodities(data.commodities || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadShop() {
-      const res = await fetch(withAuthToken("/api/shop"), { cache: "no-store" });
-      const data = await res.json();
-      renderShop(data || {});
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadPlayers() {
-      const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
-      const data = await res.json();
-      renderPlayers(data.players || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadPerks() {
-      const res = await fetch(withAuthToken("/api/perks"), { cache: "no-store" });
-      const data = await res.json();
-      await renderPerks(data.perks || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadAnnouncements() {
-      const [aRes, nRes, pRes, gmRes] = await Promise.all([
-        fetch(withAuthToken("/api/close-announcement"), { cache: "no-store" }),
-        fetch(withAuthToken("/api/close-news"), { cache: "no-store" }),
-        fetch(withAuthToken("/api/players"), { cache: "no-store" }),
-        fetch(withAuthToken("/api/app-config/GM_ID"), { cache: "no-store" }),
-      ]);
-      if (!aRes.ok || !nRes.ok || !pRes.ok || !gmRes.ok) {
-        const aErr = await aRes.text().catch(() => "");
-        const nErr = await nRes.text().catch(() => "");
-        const pErr = await pRes.text().catch(() => "");
-        const gmErr = await gmRes.text().catch(() => "");
-        throw new Error(`Announcements load failed (close-announcement=${aRes.status}, close-news=${nRes.status}, players=${pRes.status}, gm=${gmRes.status}) ${aErr || nErr || pErr || gmErr}`.trim());
-      }
-      const aData = await aRes.json().catch(() => ({}));
-      const nData = await nRes.json().catch(() => ({}));
-      const pData = await pRes.json().catch(() => ({}));
-      const gmData = await gmRes.json().catch(() => ({}));
-      const gmId = String(gmData?.config?.value || "").trim();
-      const rankings = (Array.isArray(pData.players) ? pData.players : [])
-        .filter((x) => !gmId || String(x.user_id || "") !== gmId)
-        .slice()
-        .sort((x, y) => Number(y.networth || 0) - Number(x.networth || 0))
-        .slice(0, 3);
-      await renderAnnouncements({
-        markdown: String(aData.markdown || ""),
-        news: Array.isArray(nData.news) ? nData.news : [],
-        rankings,
-      });
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadActionHistory() {
-      const res = await fetch(withAuthToken("/api/action-history"), { cache: "no-store" });
-      const data = await res.json();
-      renderActionHistory(data.actions || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadFeedback() {
-      const res = await fetch(withAuthToken("/api/feedback"), { cache: "no-store" });
-      const data = await res.json();
-      renderFeedback(data.feedback || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadBankActions() {
-      const res = await fetch(withAuthToken("/api/bank-requests?status=pending"), { cache: "no-store" });
-      const data = await res.json();
-      renderBankActions(data.requests || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function loadHeaderStats() {
-      try {
-        const res = await fetch(withAuthToken("/api/dashboard-stats"), { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (Number.isFinite(Number(data.seconds_until_close))) {
-          untilCloseSeconds = Math.max(0, Number(data.seconds_until_close));
-          document.getElementById("statUntilClose").textContent = fmtHMS(untilCloseSeconds);
-        } else {
-          document.getElementById("statUntilClose").textContent = data.until_close || "-";
-        }
-        if (Number.isFinite(Number(data.seconds_until_reset))) {
-          untilResetSeconds = Math.max(0, Number(data.seconds_until_reset));
-          document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
-        } else {
-        document.getElementById("statUntilReset").textContent = data.until_reset || "-";
-        }
-        document.getElementById("statCompanies").textContent = String(data.company_count ?? "-");
-        document.getElementById("statUsers").textContent = String(data.user_count ?? "-");
-        const bankBtn = document.getElementById("showBankActions");
-        const feedbackBtn = document.getElementById("showFeedback");
-        if (bankBtn) bankBtn.classList.toggle("alert", Number(data.bank_pending_count || 0) > 0);
-        if (feedbackBtn) feedbackBtn.classList.toggle("alert", Number(data.feedback_count || 0) > 0);
-      } catch (_e) {}
-    }
-    function startHeaderTicker() {
-      setInterval(() => {
-        if (!Number.isFinite(untilCloseSeconds)) return;
-        untilCloseSeconds = Math.max(0, untilCloseSeconds - 1);
-        document.getElementById("statUntilClose").textContent = fmtHMS(untilCloseSeconds);
-      }, 1000);
-      setInterval(() => {
-        if (!Number.isFinite(untilResetSeconds)) return;
-        untilResetSeconds = Math.max(0, untilResetSeconds - 1);
-        document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
-      }, 1000);
-    }
-    async function loadConfigs() {
-      const res = await fetch(withAuthToken("/api/app-configs"), { cache: "no-store" });
-      const data = await res.json();
-      renderConfigs(data.configs || []);
-      document.getElementById("last").textContent = fmtEtDate();
-    }
-    async function tick() {
-      const active = document.activeElement;
-      const editing =
-        active &&
-        (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT");
-      if (editing) return;
-      try {
-        await loadHeaderStats();
-        if (currentTab === "companies") await loadCompanies();
-        else if (currentTab === "commodities") await loadCommodities();
-        else if (currentTab === "shop") await loadShop();
-        else if (currentTab === "players") await loadPlayers();
-        else if (currentTab === "perks") await loadPerks();
-        else if (currentTab === "announcements") await loadAnnouncements();
-        else if (currentTab === "feedback") await loadFeedback();
-        else if (currentTab === "bankActions") await loadBankActions();
-        else if (currentTab === "actionHistory") await loadActionHistory();
-        else if (currentTab === "configs") await loadConfigs();
-        else return;
-      } catch (e) {
-        console.error("Dashboard tab load failed:", e);
-        document.getElementById("rows").innerHTML = `<tr><td class="empty">Failed to load ${esc(currentTab)}: ${esc(String(e && e.message ? e.message : e))}</td></tr>`;
-      }
-    }
-    async function syncPollInterval() {
-      try {
-        const res = await fetch(withAuthToken("/api/app-config/TICK_INTERVAL"), { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json();
-        const seconds = Number(data?.config?.value);
-        if (!Number.isFinite(seconds) || seconds <= 0) return;
-        const nextMs = Math.max(1000, Math.round(seconds * 1000));
-        if (nextMs === pollMs && pollTimer) return;
-        pollMs = nextMs;
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = setInterval(tick, pollMs);
-      } catch (_e) {}
-    }
-    document.getElementById("showCompanies").addEventListener("click", () => { setCurrentTab("companies"); setButtons(); tick(); });
-    document.getElementById("showCommodities").addEventListener("click", () => { setCurrentTab("commodities"); setButtons(); tick(); });
-    document.getElementById("showShop").addEventListener("click", () => { setCurrentTab("shop"); setButtons(); tick(); });
-    document.getElementById("showPlayers").addEventListener("click", () => { setCurrentTab("players"); setButtons(); tick(); });
-    document.getElementById("showPerks").addEventListener("click", () => { setCurrentTab("perks"); setButtons(); tick(); });
-    document.getElementById("showAnnouncements").addEventListener("click", () => { setCurrentTab("announcements"); setButtons(); tick(); });
-    document.getElementById("showFeedback").addEventListener("click", () => { setCurrentTab("feedback"); setButtons(); tick(); });
-    document.getElementById("showBankActions").addEventListener("click", () => { setCurrentTab("bankActions"); setButtons(); tick(); });
-    document.getElementById("showActionHistory").addEventListener("click", () => { setCurrentTab("actionHistory"); setButtons(); tick(); });
-    document.getElementById("showConfigs").addEventListener("click", () => { setCurrentTab("configs"); setButtons(); tick(); });
-    document.getElementById("showServerSettings").addEventListener("click", () => { setCurrentTab("serverSettings"); setButtons(); renderServerSettings(); });
-    setCurrentTab(currentTab);
-    setButtons();
-    tick();
-    syncPollInterval();
-    startHeaderTicker();
-    setInterval(syncPollInterval, 30000);
-  </script>
-</body>
-</html>
-"""
+MAIN_HTML = _load_template("main.html")
 
 
-DETAIL_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>{{ symbol }} · 716Stonks</title>
-  <style>
-    :root {
-      --bg: #0f172a; --panel: #111827; --line: #1f2937; --text: #e5e7eb; --muted: #94a3b8; --btn:#334155; --btnH:#475569;
-    }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .wrap { max-width: 1100px; margin: 20px auto; padding: 0 14px; display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
-    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .title { font-size: 1.2rem; font-weight: 700; margin-bottom: 8px; }
-    .muted { color: var(--muted); font-size: .85rem; }
-    .chartWrap { height: 380px; border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: #0b1323; }
-    #chart { width: 100%; height: 100%; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
-    .row.one { grid-template-columns: 1fr; }
-    label { display:block; font-size:.82rem; color: var(--muted); margin-bottom: 4px; }
-    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
-    textarea { min-height: 96px; resize: vertical; }
-    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
-    button:hover { background: var(--btnH); }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
-    @media (max-width: 1024px) {
-      .wrap { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 700px) {
-      .row { grid-template-columns: 1fr; }
-      .chartWrap { height: 290px; }
-      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div class="title">{{ symbol }} · Live Graph</div>
-        <a id="backLink" href="/">Back to Dashboard</a>
-      </div>
-      <div class="muted">Realtime refresh: 2s · Last: <span id="last">-</span></div>
-      <div style="margin:8px 0 10px 0;"><button id="viewToggle">Showing: Last 80</button></div>
-      <div class="chartWrap"><svg id="chart" viewBox="0 0 900 360"></svg></div>
-    </div>
-    <div class="card">
-      <div class="title">Edit Parameters</div>
-      <div class="row">
-        <div><label>Name</label><input id="name" /></div>
-        <div><label>Current Price</label><input id="current_price" type="number" step="0.01" /></div>
-      </div>
-      <div class="row">
-        <div><label>Base Price</label><input id="base_price" type="number" step="0.01" /></div>
-        <div><label>Slope</label><input id="slope" type="number" step="0.0001" /></div>
-      </div>
-      <div class="row">
-        <div><label>Drift (%)</label><input id="drift" type="number" step="0.001" /></div>
-        <div><label>Liquidity</label><input id="liquidity" type="number" step="0.01" /></div>
-      </div>
-      <div class="row">
-        <div><label>Impact Power</label><input id="impact_power" type="number" step="0.001" /></div>
-        <div><label>Founded Year</label><input id="founded_year" type="number" step="1" /></div>
-      </div>
-      <div class="row">
-        <div><label>Location</label><input id="location" /></div>
-        <div><label>Industry</label><input id="industry" /></div>
-      </div>
-      <div class="row one">
-        <div><label>Evaluation</label><textarea id="evaluation"></textarea></div>
-      </div>
-      <div class="row one">
-        <div><label>Description</label><textarea id="description"></textarea></div>
-      </div>
-      <button id="saveBtn">Save</button>
-      <button id="deleteBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Company</button>
-      <div class="muted" id="msg" style="margin-top:8px;"></div>
-    </div>
-  </div>
+DETAIL_HTML = _load_template("company_detail.html")
 
-  <script>
-    const SYMBOL = {{ symbol|tojson }};
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    const ET_TIMEZONE = "America/New_York";
-    const RECENT_COUNT = 80;
-    let showRecent = true;
-    let historyAll = [];
-    function el(id){ return document.getElementById(id); }
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function wireBackLink() {
-      const back = el("backLink");
-      if (back) {
-        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
-        const sep = "/".includes("?") ? "&" : "?";
-        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
-      }
-    }
-    function fmtEtDate(value) {
-      const dt = value ? new Date(value) : new Date();
-      if (Number.isNaN(dt.getTime())) return String(value || "-");
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: ET_TIMEZONE,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      }).formatToParts(dt);
-      const map = {};
-      parts.forEach((p) => { map[p.type] = p.value; });
-      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
-    }
+COMMODITY_DETAIL_HTML = _load_template("commodity_detail.html")
 
-    function drawLine(values) {
-      const svg = el("chart");
-      const w = 900, h = 360;
-      const left = 60, right = 18, top = 16, bottom = 42;
-      const pw = w - left - right, ph = h - top - bottom;
-      if (!values || values.length < 2) {
-        svg.innerHTML = "";
-        return;
-      }
-      const min = Math.min(...values), max = Math.max(...values), range = (max-min)||1;
-      const step = pw / Math.max(1, values.length - 1);
-      const pts = values.map((v,i)=>{
-        const x = left + i * step;
-        const y = top + ph * (1 - ((v-min)/range));
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      }).join(" ");
-      const up = values[values.length-1] >= values[0];
-      const hGrid = Array.from({length: 6}, (_, i) => {
-        const y = top + (ph * i / 5);
-        return `<line x1="${left}" y1="${y}" x2="${w-right}" y2="${y}" stroke="#1f2937" stroke-width="1" />`;
-      }).join("");
-      const vGrid = Array.from({length: 6}, (_, i) => {
-        const x = left + (pw * i / 5);
-        return `<line x1="${x}" y1="${top}" x2="${x}" y2="${h-bottom}" stroke="#1f2937" stroke-width="1" />`;
-      }).join("");
-      svg.innerHTML = `
-        ${hGrid}
-        ${vGrid}
-        <line x1="${left}" y1="${h-bottom}" x2="${w-right}" y2="${h-bottom}" stroke="#475569" stroke-width="1.2" />
-        <line x1="${left}" y1="${top}" x2="${left}" y2="${h-bottom}" stroke="#475569" stroke-width="1.2" />
-        <text x="${left}" y="${top-3}" fill="#94a3b8" font-size="11">${max.toFixed(2)}</text>
-        <text x="${left}" y="${h-bottom+14}" fill="#94a3b8" font-size="11">${min.toFixed(2)}</text>
-        <text x="${left}" y="${h-8}" fill="#94a3b8" font-size="11">0</text>
-        <text x="${w-right-24}" y="${h-8}" fill="#94a3b8" font-size="11">${values.length-1}</text>
-        <text x="${w/2-30}" y="${h-8}" fill="#94a3b8" font-size="12">X: Tick Index</text>
-        <text x="${left+8}" y="${top+14}" fill="#94a3b8" font-size="12">Y: Price ($)</text>
-        <polyline fill="none" stroke="${up ? '#22c55e' : '#ef4444'}" stroke-width="3" points="${pts}" />
-      `;
-    }
+PLAYER_DETAIL_HTML = _load_template("player_detail.html")
 
-    function fillForm(c) {
-      el("name").value = c.name || "";
-      el("current_price").value = Number(c.current_price).toFixed(2);
-      el("base_price").value = Number(c.base_price).toFixed(2);
-      el("slope").value = Number(c.slope).toFixed(4);
-      el("drift").value = Number(c.drift).toFixed(3);
-      el("liquidity").value = Number(c.liquidity).toFixed(2);
-      el("impact_power").value = Number(c.impact_power).toFixed(3);
-      el("founded_year").value = Number(c.founded_year || 2000).toFixed(0);
-      el("location").value = c.location || "";
-      el("industry").value = c.industry || "";
-      el("evaluation").value = c.evaluation || "";
-      el("description").value = c.description || "";
-    }
+APP_CONFIG_DETAIL_HTML = _load_template("app_config_detail.html")
 
-    function refreshChart() {
-      const values = showRecent ? historyAll.slice(-RECENT_COUNT) : historyAll;
-      drawLine(values);
-      el("viewToggle").textContent = showRecent ? `Showing: Last ${RECENT_COUNT}` : "Showing: All History";
-    }
+PERK_DETAIL_HTML = _load_template("perk_detail.html")
 
-    async function load() {
-      const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}`), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data.company) return;
-      fillForm(data.company);
-      historyAll = Array.isArray(data.history_prices) ? data.history_prices : [];
-      refreshChart();
-      el("last").textContent = fmtEtDate(data.server_time_utc || "");
-    }
-
-    async function save() {
-      const payload = {
-        name: el("name").value,
-        current_price: Number(el("current_price").value),
-        base_price: Number(el("base_price").value),
-        slope: Number(el("slope").value),
-        drift: Number(el("drift").value),
-        liquidity: Number(el("liquidity").value),
-        impact_power: Number(el("impact_power").value),
-        founded_year: Number(el("founded_year").value),
-        location: el("location").value,
-        industry: el("industry").value,
-        evaluation: el("evaluation").value,
-        description: el("description").value,
-      };
-      const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        el("msg").textContent = "Saved.";
-        await load();
-      } else {
-        const err = await res.json().catch(()=>({error:"Failed"}));
-        el("msg").textContent = err.error || "Save failed.";
-      }
-    }
-
-    async function removeCompany() {
-      const ok = window.confirm(`Delete company ${SYMBOL}? This cannot be undone.`);
-      if (!ok) return;
-      const btn = el("deleteBtn");
-      const old = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "Deleting...";
-      try {
-        const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}`), {
-          method: "DELETE",
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(()=>({error:"Delete failed"}));
-          el("msg").textContent = err.error || "Delete failed.";
-          btn.disabled = false;
-          btn.textContent = old;
-          return;
-        }
-        window.location.href = withAuthToken("/");
-      } catch (_e) {
-        el("msg").textContent = "Delete failed.";
-        btn.disabled = false;
-        btn.textContent = old;
-      }
-    }
-
-    el("saveBtn").addEventListener("click", save);
-    el("deleteBtn").addEventListener("click", removeCompany);
-    el("viewToggle").addEventListener("click", () => {
-      showRecent = !showRecent;
-      refreshChart();
-    });
-    wireBackLink();
-    load();
-    setInterval(load, 2000);
-  </script>
-</body>
-</html>
-"""
-
-COMMODITY_DETAIL_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>{{ name }} · Commodity</title>
-  <style>
-    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .wrap { max-width: 920px; margin: 20px auto; padding: 0 14px; }
-    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-    .title { font-size:1.2rem; font-weight:700; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
-    .row.one { grid-template-columns:1fr; }
-    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
-    textarea { min-height: 110px; resize: vertical; }
-    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
-    button:hover { background: var(--btnH); }
-    .muted { color:var(--muted); font-size:.85rem; }
-    .preview { width: 300px; height: 300px; max-width: 100%; border-radius: 10px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { border-bottom:1px solid #1f2937; padding:6px; vertical-align: middle; font-size:.86rem; }
-    th { color: var(--muted); text-align:left; }
-    .small-btn { padding:7px 10px; font-size:.82rem; }
-    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
-    @media (max-width: 760px) {
-      .row { grid-template-columns: 1fr; }
-      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
-      .preview { width: 100%; height: auto; aspect-ratio: 1 / 1; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div class="title">Commodity · {{ name }}</div>
-        <a id="backLink" href="/">Back to Dashboard</a>
-      </div>
-      <div class="row">
-        <div><label>Name</label><input id="name" /></div>
-        <div><label>Price</label><input id="price" type="number" step="0.01" /></div>
-      </div>
-      <div class="row">
-        <div>
-          <label>Rarity</label>
-          <select id="rarity">
-            <option value="common">common</option>
-            <option value="uncommon">uncommon</option>
-            <option value="rare">rare</option>
-            <option value="legendary">legendary</option>
-            <option value="exotic">exotic</option>
-          </select>
-        </div>
-        <div><label>Spawn Weight Override (0 = rarity default)</label><input id="spawn_weight_override" type="number" step="0.0001" min="0" /></div>
-      </div>
-      <div class="row">
-        <div><label>Image URL</label><input id="image_url" /></div>
-        <div></div>
-      </div>
-      <div class="row one">
-        <div><label>Tags (comma-separated)</label><input id="tags" /></div>
-      </div>
-      <div class="row">
-        <div><label>Thumbnail Preview</label><img id="preview" class="preview" alt="Commodity thumbnail" /></div>
-        <div></div>
-      </div>
-      <div class="row one">
-        <div><label>Description</label><textarea id="description"></textarea></div>
-      </div>
-      <div class="row">
-        <div><label>Perk Name (optional)</label><input id="perk_name" /></div>
-        <div><label>Perk Min Qty</label><input id="perk_min_qty" type="number" step="1" min="1" value="1" /></div>
-      </div>
-      <div class="row one">
-        <div><label>Perk Description</label><textarea id="perk_description"></textarea></div>
-      </div>
-      <div class="row one">
-        <div>
-          <label>Perk Effects (aligned with Perks editor)</label>
-          <table>
-            <thead>
-              <tr>
-                <th>Target</th>
-                <th>Mode</th>
-                <th>Value</th>
-                <th>Scale Source</th>
-                <th>Scale Key</th>
-                <th>Scale Factor</th>
-                <th>Cap</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="effectsRows"></tbody>
-          </table>
-          <div class="row" style="margin-top:8px;">
-            <div>
-              <label>New Effect</label>
-              <select id="new_eff_target">
-                <option value="income">income</option>
-                <option value="trade_limits">trade_limits</option>
-                <option value="networth">networth</option>
-              </select>
-            </div>
-            <div>
-              <label>Mode</label>
-              <select id="new_eff_mode">
-                <option value="flat">flat</option>
-                <option value="multiplier">multiplier</option>
-                <option value="per_item">per_item</option>
-              </select>
-            </div>
-          </div>
-          <div class="row">
-            <div><label>Value</label><input id="new_eff_value" type="number" step="0.0001" value="0" /></div>
-            <div><label>Scale Source</label><select id="new_eff_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
-          </div>
-          <div class="row">
-            <div><label>Scale Key</label><select id="new_eff_key"></select></div>
-            <div><label>Scale Factor</label><input id="new_eff_scale_factor" type="number" step="0.0001" value="0" /></div>
-          </div>
-          <div class="row">
-            <div><label>Cap (0 = no cap)</label><input id="new_eff_cap" type="number" step="0.0001" value="0" /></div>
-            <div style="display:flex;align-items:flex-end;"><button id="addEffectBtn" class="small-btn" type="button">Add Effect</button></div>
-          </div>
-          <div class="row one">
-            <div><label>Serialized JSON (read-only)</label><textarea id="perk_effects_json" readonly>[]</textarea></div>
-          </div>
-        </div>
-      </div>
-      <button id="saveBtn">Save</button>
-      <div id="msg" class="muted" style="margin-top:8px;"></div>
-    </div>
-  </div>
-  <script>
-    const COMMODITY = {{ name|tojson }};
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    const FALLBACK = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='22' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
-    let EFFECTS = [];
-    let COMMODITY_NAMES = [];
-    function el(id){ return document.getElementById(id); }
-    function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch])); }
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function optionsForCommodityKey(selected) {
-      if (!COMMODITY_NAMES.length) return '<option value="">(No commodities)</option>';
-      return COMMODITY_NAMES.map((n) => {
-        const sel = String(n).toLowerCase() === String(selected || "").toLowerCase() ? " selected" : "";
-        return `<option value="${esc(n)}"${sel}>${esc(n)}</option>`;
-      }).join("");
-    }
-    function syncEffectsJsonBox() {
-      el("perk_effects_json").value = JSON.stringify(EFFECTS, null, 2);
-    }
-    function renderEffectsRows() {
-      const tbody = el("effectsRows");
-      if (!EFFECTS.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="muted">No effects configured.</td></tr>';
-        syncEffectsJsonBox();
-        return;
-      }
-      tbody.innerHTML = EFFECTS.map((eff, i) => `
-        <tr data-eff-index="${i}">
-          <td><select data-eff-target="${i}"><option value="income"${eff.target_stat === "income" ? " selected" : ""}>income</option><option value="trade_limits"${eff.target_stat === "trade_limits" ? " selected" : ""}>trade_limits</option><option value="networth"${eff.target_stat === "networth" ? " selected" : ""}>networth</option></select></td>
-          <td><select data-eff-mode="${i}"><option value="flat"${eff.value_mode === "flat" ? " selected" : ""}>flat</option><option value="multiplier"${eff.value_mode === "multiplier" ? " selected" : ""}>multiplier</option><option value="per_item"${eff.value_mode === "per_item" ? " selected" : ""}>per_item</option></select></td>
-          <td><input data-eff-value="${i}" type="number" step="0.0001" value="${Number(eff.value || 0)}" /></td>
-          <td><select data-eff-source="${i}"><option value="none"${String(eff.scale_source || "none") === "none" ? " selected" : ""}>none</option><option value="commodity_qty"${String(eff.scale_source || "none") === "commodity_qty" ? " selected" : ""}>commodity_qty</option></select></td>
-          <td><select data-eff-key="${i}">${optionsForCommodityKey(eff.scale_key || COMMODITY)}</select></td>
-          <td><input data-eff-scale-factor="${i}" type="number" step="0.0001" value="${Number(eff.scale_factor || 0)}" /></td>
-          <td><input data-eff-cap="${i}" type="number" step="0.0001" value="${Number(eff.cap || 0)}" /></td>
-          <td><button class="small-btn" data-del-eff="${i}" type="button">Delete</button></td>
-        </tr>
-      `).join("");
-
-      for (const btn of document.querySelectorAll("[data-del-eff]")) {
-        btn.addEventListener("click", () => {
-          const idx = Number(btn.getAttribute("data-del-eff"));
-          if (Number.isFinite(idx) && idx >= 0 && idx < EFFECTS.length) {
-            EFFECTS.splice(idx, 1);
-            renderEffectsRows();
-          }
-        });
-      }
-      syncEffectsJsonBox();
-    }
-    function collectEffectsFromDom() {
-      const rows = document.querySelectorAll("tr[data-eff-index]");
-      const next = [];
-      for (const row of rows) {
-        const idx = Number(row.getAttribute("data-eff-index"));
-        const target = document.querySelector(`[data-eff-target="${idx}"]`)?.value || "income";
-        const mode = document.querySelector(`[data-eff-mode="${idx}"]`)?.value || "flat";
-        const value = Number(document.querySelector(`[data-eff-value="${idx}"]`)?.value || 0);
-        const source = document.querySelector(`[data-eff-source="${idx}"]`)?.value || "none";
-        const key = document.querySelector(`[data-eff-key="${idx}"]`)?.value || COMMODITY;
-        const scaleFactor = Number(document.querySelector(`[data-eff-scale-factor="${idx}"]`)?.value || 0);
-        const cap = Number(document.querySelector(`[data-eff-cap="${idx}"]`)?.value || 0);
-        next.push({
-          target_stat: target,
-          value_mode: mode,
-          value: Number.isFinite(value) ? value : 0,
-          scale_source: source,
-          scale_key: key,
-          scale_factor: Number.isFinite(scaleFactor) ? scaleFactor : 0,
-          cap: Number.isFinite(cap) ? cap : 0,
-        });
-      }
-      EFFECTS = next;
-      syncEffectsJsonBox();
-    }
-    async function loadCommodityNames() {
-      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      COMMODITY_NAMES = (Array.isArray(data.commodities) ? data.commodities : [])
-        .map((r) => String(r.name || "").trim())
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b));
-      el("new_eff_key").innerHTML = optionsForCommodityKey(COMMODITY);
-    }
-    function wireBackLink() {
-      const back = el("backLink");
-      if (back) {
-        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
-        const sep = "/".includes("?") ? "&" : "?";
-        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
-      }
-    }
-    function syncPreview() {
-      const img = el("preview");
-      img.onerror = () => { img.onerror = null; img.src = FALLBACK; };
-      img.src = el("image_url").value || FALLBACK;
-    }
-    async function load() {
-      await loadCommodityNames();
-      const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}`), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      const c = data.commodity;
-      el("name").value = c.name || "";
-      el("price").value = Number(c.price).toFixed(2);
-      el("rarity").value = c.rarity || "common";
-      el("spawn_weight_override").value = Number(c.spawn_weight_override || 0).toFixed(4);
-      el("image_url").value = c.image_url || "";
-      el("tags").value = String((c.tags || []).join(", "));
-      el("description").value = c.description || "";
-      el("perk_name").value = c.perk_name || "";
-      el("perk_description").value = c.perk_description || "";
-      el("perk_min_qty").value = Number(c.perk_min_qty || 1);
-      try {
-        const parsed = JSON.parse((c.perk_effects_json || "").trim() || "[]");
-        EFFECTS = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
-      } catch (_e) {
-        EFFECTS = [];
-      }
-      renderEffectsRows();
-      syncPreview();
-    }
-    async function save() {
-      collectEffectsFromDom();
-      let perkEffectsJson = (el("perk_effects_json").value || "").trim();
-      if (!perkEffectsJson) perkEffectsJson = "[]";
-      try {
-        const parsed = JSON.parse(perkEffectsJson);
-        if (!Array.isArray(parsed) && typeof parsed !== "object") {
-          throw new Error("Perk Effects JSON must be an object or array.");
-        }
-      } catch (e) {
-        el("msg").textContent = "Invalid Perk Effects JSON.";
-        return;
-      }
-      const payload = {
-        name: el("name").value,
-        price: Number(el("price").value),
-        rarity: el("rarity").value,
-        spawn_weight_override: Number(el("spawn_weight_override").value),
-        image_url: el("image_url").value,
-        tags: el("tags").value,
-        description: el("description").value,
-        perk_name: el("perk_name").value,
-        perk_description: el("perk_description").value,
-        perk_min_qty: Number(el("perk_min_qty").value || 1),
-        perk_effects_json: perkEffectsJson,
-      };
-      const res = await fetch(withAuthToken(`/api/commodity/${encodeURIComponent(COMMODITY)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        el("msg").textContent = "Saved.";
-      } else {
-        const err = await res.json().catch(()=>({error:"Failed"}));
-        el("msg").textContent = err.error || "Save failed.";
-      }
-      await load();
-    }
-    el("addEffectBtn").addEventListener("click", () => {
-      collectEffectsFromDom();
-      EFFECTS.push({
-        target_stat: el("new_eff_target").value,
-        value_mode: el("new_eff_mode").value,
-        value: Number(el("new_eff_value").value || 0),
-        scale_source: el("new_eff_source").value,
-        scale_key: el("new_eff_key").value || COMMODITY,
-        scale_factor: Number(el("new_eff_scale_factor").value || 0),
-        cap: Number(el("new_eff_cap").value || 0),
-      });
-      renderEffectsRows();
-    });
-    el("saveBtn").addEventListener("click", save);
-    el("image_url").addEventListener("input", syncPreview);
-    wireBackLink();
-    load();
-  </script>
-</body>
-</html>
-"""
-
-PLAYER_DETAIL_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Player {{ user_id }}</title>
-  <style>
-    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .wrap { max-width: 920px; margin: 20px auto; padding: 0 14px; }
-    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-    .title { font-size:1.2rem; font-weight:700; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
-    .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:8px; }
-    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
-    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
-    button:hover { background: var(--btnH); }
-    .muted { color:var(--muted); font-size:.85rem; }
-    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
-    .inventory-card { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-    .inventory-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px; flex-wrap:wrap; }
-    .inventory-grid { display:grid; grid-template-columns: 1fr auto auto; gap:8px; align-items:center; }
-    .qty-input { max-width: 110px; }
-    .small-btn { padding:7px 10px; }
-    @media (max-width: 760px) {
-      .row { grid-template-columns: 1fr; }
-      .row3 { grid-template-columns: 1fr; }
-      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
-      .inventory-grid { grid-template-columns: 1fr; }
-      .qty-input { max-width: unset; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div class="title">Player · {{ user_id }}</div>
-        <a id="backLink" href="/">Back to Dashboard</a>
-      </div>
-      <div class="row">
-        <div><label>Display Name (read-only)</label><input id="display_name" readonly /></div>
-        <div><label>Joined At (read-only)</label><input id="joined_at" readonly /></div>
-      </div>
-      <div class="row">
-        <div><label>Bank</label><input id="bank" type="number" step="0.01" /></div>
-        <div><label>Networth</label><input id="networth" type="number" step="0.01" /></div>
-      </div>
-      <div class="row">
-        <div><label>Owe</label><input id="owe" type="number" step="0.01" /></div>
-        <div><label>Rank</label><input id="rank" /></div>
-      </div>
-      <div class="row">
-        <div><label>Current Trade Limit (read-only)</label><input id="trade_limit_status" readonly /></div>
-        <div><label>Trade Usage Action</label><button id="resetTradeBtn" type="button" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Reset Trade Usage</button></div>
-      </div>
-      <button id="saveBtn">Save</button>
-      <div id="msg" class="muted" style="margin-top:8px;"></div>
-
-      <div class="inventory-card">
-        <div class="inventory-head">
-          <div class="title" style="font-size:1rem;">Commodities</div>
-          <div class="muted" id="inventorySummary">Loading...</div>
-        </div>
-        <div class="row3">
-          <div>
-            <label>Add/Remove Commodity</label>
-            <select id="invCommodity"></select>
-          </div>
-          <div>
-            <label>Delta (can be negative)</label>
-            <input id="invDelta" type="number" step="1" value="1" />
-          </div>
-          <div style="display:flex; align-items:flex-end;">
-            <button id="applyDeltaBtn" class="small-btn" type="button">Apply Delta</button>
-          </div>
-        </div>
-        <div id="inventoryRows" class="inventory-grid"></div>
-      </div>
-    </div>
-  </div>
-  <script>
-    const USER_ID = {{ user_id|tojson }};
-    let INVENTORY = [];
-    let AVAILABLE = [];
-    function el(id){ return document.getElementById(id); }
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function wireBackLink() {
-      const back = el("backLink");
-      if (back) {
-        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
-        const sep = "/".includes("?") ? "&" : "?";
-        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
-      }
-    }
-    async function load() {
-      const [playerRes, invRes] = await Promise.all([
-        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}`), { cache: "no-store" }),
-        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities`), { cache: "no-store" }),
-      ]);
-      if (!playerRes.ok) return;
-      const data = await playerRes.json();
-      const p = data.player;
-      el("display_name").value = p.display_name || "";
-      el("joined_at").value = p.joined_at || "";
-      el("bank").value = Number(p.bank).toFixed(2);
-      el("networth").value = Number(p.networth).toFixed(2);
-      el("owe").value = Number(p.owe || 0).toFixed(2);
-      el("rank").value = p.rank || "";
-      if (p.trade_limit_enabled) {
-        el("trade_limit_status").value =
-          `${Number(p.trade_limit_remaining || 0)}/${Number(p.trade_limit_limit || 0)} shares remaining `
-          + `(${Number(p.trade_limit_used || 0)} used, ${Number(p.trade_limit_window_minutes || 0).toFixed(2)} min window)`;
-      } else {
-        el("trade_limit_status").value = "Disabled";
-      }
-      if (invRes.ok) {
-        const invData = await invRes.json();
-        INVENTORY = Array.isArray(invData.inventory) ? invData.inventory : [];
-        AVAILABLE = Array.isArray(invData.available) ? invData.available : [];
-        renderInventory();
-      }
-    }
-
-    function renderInventory() {
-      const rows = el("inventoryRows");
-      const summary = el("inventorySummary");
-      const select = el("invCommodity");
-      const totalQty = INVENTORY.reduce((n, r) => n + Number(r.quantity || 0), 0);
-      summary.textContent = `${totalQty} total units`;
-
-      const names = AVAILABLE.length ? AVAILABLE : INVENTORY.map((r) => String(r.name || ""));
-      select.innerHTML = names.map((n) => {
-        const key = encodeURIComponent(String(n));
-        return `<option value="${key}">${n}</option>`;
-      }).join("");
-      if (!select.value && names.length) select.value = encodeURIComponent(String(names[0]));
-
-      if (!INVENTORY.length) {
-        rows.innerHTML = `<div class="muted">No commodities owned.</div>`;
-        return;
-      }
-      rows.innerHTML = INVENTORY.map((r) => {
-        const name = String(r.name || "");
-        const key = encodeURIComponent(name);
-        const qty = Number(r.quantity || 0);
-        return `
-          <div><strong>${name}</strong></div>
-          <input class="qty-input" data-qty-key="${key}" type="number" step="1" min="0" value="${qty}" />
-          <button class="small-btn" data-save-qty="${key}" type="button">Set Qty</button>
-        `;
-      }).join("");
-
-      document.querySelectorAll("button[data-save-qty]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const key = btn.getAttribute("data-save-qty");
-          const input = document.querySelector(`input[data-qty-key="${CSS.escape(key)}"]`);
-          if (!input) return;
-          const qty = Number(input.value);
-          const name = decodeURIComponent(String(key || ""));
-          await setCommodityQty(name, qty);
-        });
-      });
-    }
-
-    async function setCommodityQty(name, quantity) {
-      const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities/set`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ commodity_name: name, quantity }),
-      });
-      if (res.ok) {
-        el("msg").textContent = `Updated ${name}.`;
-      } else {
-        const err = await res.json().catch(()=>({error:"Failed"}));
-        el("msg").textContent = err.error || "Update failed.";
-      }
-      await load();
-    }
-
-    async function applyDelta() {
-      const key = String(el("invCommodity").value || "").trim();
-      const name = decodeURIComponent(key);
-      const delta = Number(el("invDelta").value || 0);
-      if (!name || !Number.isFinite(delta) || delta === 0) {
-        el("msg").textContent = "Pick a commodity and non-zero delta.";
-        return;
-      }
-      const cur = INVENTORY.find((r) => String(r.name) === name);
-      const nextQty = Math.max(0, Number(cur?.quantity || 0) + Math.trunc(delta));
-      await setCommodityQty(name, nextQty);
-    }
-    async function save() {
-      const payload = {
-        bank: Number(el("bank").value),
-        networth: Number(el("networth").value),
-        owe: Number(el("owe").value),
-        rank: el("rank").value,
-      };
-      const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        el("msg").textContent = "Saved.";
-      } else {
-        const err = await res.json().catch(()=>({error:"Failed"}));
-        el("msg").textContent = err.error || "Save failed.";
-      }
-      await load();
-    }
-    async function resetTradeUsage() {
-      const btn = el("resetTradeBtn");
-      const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "Resetting...";
-      try {
-        const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/reset-trade-usage`), {
-          method: "POST",
-        });
-        if (res.ok) {
-          el("msg").textContent = "Trade usage reset.";
-        } else {
-          const err = await res.json().catch(()=>({error:"Failed"}));
-          el("msg").textContent = err.error || "Reset failed.";
-        }
-      } finally {
-        btn.disabled = false;
-        btn.textContent = original;
-      }
-      await load();
-    }
-    el("saveBtn").addEventListener("click", save);
-    el("resetTradeBtn").addEventListener("click", resetTradeUsage);
-    el("applyDeltaBtn").addEventListener("click", applyDelta);
-    wireBackLink();
-    load();
-  </script>
-</body>
-</html>
-"""
-
-APP_CONFIG_DETAIL_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>{{ config_name }} · App Config</title>
-  <style>
-    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .wrap { max-width: 920px; margin: 20px auto; padding: 0 14px; }
-    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-    .title { font-size:1.2rem; font-weight:700; }
-    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input, textarea { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
-    textarea { min-height: 80px; resize: vertical; }
-    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; margin-top: 10px; }
-    button:hover { background: var(--btnH); }
-    .muted { color:var(--muted); font-size:.85rem; margin-top:8px; }
-    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
-    @media (max-width: 760px) {
-      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div class="title">App Config · {{ config_name }}</div>
-        <a id="backLink" href="/">Back to Dashboard</a>
-      </div>
-      <label>Name (read-only)</label>
-      <input id="name" readonly />
-      <label style="margin-top:8px;">Type (read-only)</label>
-      <input id="type" readonly />
-      <label style="margin-top:8px;">Default (read-only)</label>
-      <input id="default" readonly />
-      <label style="margin-top:8px;">Description (read-only)</label>
-      <textarea id="description" readonly></textarea>
-      <label style="margin-top:8px;">Value</label>
-      <input id="value" />
-      <button id="saveBtn">Save</button>
-      <div id="msg" class="muted"></div>
-    </div>
-  </div>
-  <script>
-    const CONFIG_NAME = {{ config_name|tojson }};
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    function el(id){ return document.getElementById(id); }
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function wireBackLink() {
-      const back = el("backLink");
-      if (back) {
-        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
-        const sep = "/".includes("?") ? "&" : "?";
-        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
-      }
-    }
-    async function load() {
-      const res = await fetch(withAuthToken(`/api/app-config/${encodeURIComponent(CONFIG_NAME)}`), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      const c = data.config;
-      el("name").value = c.name;
-      el("type").value = c.type || "";
-      el("default").value = String(c.default);
-      el("description").value = c.description || "";
-      el("value").value = String(c.value);
-    }
-    async function save() {
-      const res = await fetch(withAuthToken(`/api/app-config/${encodeURIComponent(CONFIG_NAME)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value: el("value").value }),
-      });
-      if (res.ok) {
-        el("msg").textContent = "Saved.";
-      } else {
-        const err = await res.json().catch(()=>({error:"Failed"}));
-        el("msg").textContent = err.error || "Save failed.";
-      }
-      await load();
-    }
-    el("saveBtn").addEventListener("click", save);
-    wireBackLink();
-    load();
-  </script>
-</body>
-</html>
-"""
-
-PERK_DETAIL_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Perk {{ perk_id }} · 716Stonks</title>
-  <style>
-    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .wrap { max-width: 1100px; margin: 20px auto; padding: 0 14px; display:grid; grid-template-columns: 1fr; gap: 12px; }
-    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-    .title { font-size:1.2rem; font-weight:700; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
-    .row.one { grid-template-columns:1fr; }
-    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
-    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
-    textarea { min-height: 86px; resize: vertical; }
-    button { padding:8px 11px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
-    button:hover { background: var(--btnH); }
-    table { width:100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #1f2937; padding: 7px 6px; text-align: left; }
-    th { color: var(--muted); font-size:.84rem; }
-    .muted { color:var(--muted); font-size:.85rem; }
-    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
-    @media (max-width: 760px) {
-      .row { grid-template-columns: 1fr; }
-      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div class="title">Perk Editor · #{{ perk_id }}</div>
-        <a id="backLink" href="/">Back to Dashboard</a>
-      </div>
-      <div class="row">
-        <div><label>Name</label><input id="name" /></div>
-        <div><label>Priority</label><input id="priority" type="number" step="1" /></div>
-      </div>
-      <div class="row">
-        <div><label>Enabled (1/0)</label><input id="enabled" type="number" step="1" min="0" max="1" /></div>
-        <div><label>Stack Mode</label><select id="stack_mode"><option value="add">add</option><option value="override">override</option><option value="max_only">max_only</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>Max Stacks</label><input id="max_stacks" type="number" step="1" min="1" /></div>
-        <div></div>
-      </div>
-      <div class="row one">
-        <div><label>Description</label><textarea id="description"></textarea></div>
-      </div>
-      <button id="savePerkBtn">Save Perk</button>
-      <button id="deletePerkBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Perk</button>
-      <div id="msg" class="muted" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <div class="top"><div class="title">Requirements</div></div>
-      <table>
-        <thead><tr><th>ID</th><th>Group</th><th>Type</th><th>Commodity</th><th>Op</th><th>Value</th><th>Action</th></tr></thead>
-        <tbody id="reqRows"><tr><td colspan="7" class="muted">Loading...</td></tr></tbody>
-      </table>
-      <div class="row" style="margin-top:10px;">
-        <div><label>Group</label><input id="new_req_group" type="number" step="1" value="1" /></div>
-        <div><label>Type</label><select id="new_req_type"><option value="commodity_qty">commodity_qty</option><option value="tag_qty">tag_qty</option><option value="any_single_commodity_qty">any_single_commodity_qty</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>Commodity Name</label><select id="new_req_commodity"></select></div>
-        <div><label>Operator</label><select id="new_req_operator"><option>>=</option><option>></option><option><=</option><option><</option><option>==</option><option>!=</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>Value (quantity)</label><input id="new_req_value" type="number" step="1" min="0" value="1" /></div>
-        <div><button id="addReqBtn" style="margin-top:25px;">+ Add Requirement</button></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="top"><div class="title">Effects</div></div>
-      <table>
-        <thead><tr><th>ID</th><th>Target</th><th>Mode</th><th>Value</th><th>Scale Src</th><th>Scale Key</th><th>Scale Factor</th><th>Cap</th><th>Action</th></tr></thead>
-        <tbody id="effectRows"><tr><td colspan="9" class="muted">Loading...</td></tr></tbody>
-      </table>
-      <div class="row" style="margin-top:10px;">
-        <div><label>Target Stat</label><select id="new_eff_target"><option value="income">income</option><option value="trade_limits">trade_limits</option><option value="networth">networth</option></select></div>
-        <div><label>Value Mode</label><select id="new_eff_mode"><option value="flat">flat</option><option value="multiplier">multiplier</option><option value="per_item">per_item</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>Value</label><input id="new_eff_value" type="number" step="0.01" value="0" /></div>
-        <div><label>Scale Source</label><select id="new_eff_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>Scale Key (commodity name)</label><select id="new_eff_key"></select></div>
-        <div><label>Scale Factor</label><input id="new_eff_factor" type="number" step="0.01" value="0" /></div>
-      </div>
-      <div class="row">
-        <div><label>Cap (0=none)</label><input id="new_eff_cap" type="number" step="0.01" value="0" /></div>
-        <div><button id="addEffBtn" style="margin-top:25px;">+ Add Effect</button></div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const PERK_ID = Number({{ perk_id|tojson }});
-    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
-    let commodityNames = [];
-    let commodityTags = [];
-    function el(id){ return document.getElementById(id); }
-    function esc(text) {
-      return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-    function withAuthToken(url) {
-      if (!URL_AUTH_TOKEN) return url;
-      const sep = url.includes("?") ? "&" : "?";
-      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
-    }
-    function wireBackLink() {
-      const back = el("backLink");
-      if (back) {
-        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
-        const sep = "/".includes("?") ? "&" : "?";
-        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
-      }
-    }
-    function commoditySelectOptions(selectedName) {
-      const selected = String(selectedName || "");
-      const names = [...commodityNames];
-      if (selected && !names.some((n) => n.toLowerCase() === selected.toLowerCase())) {
-        names.push(selected);
-      }
-      names.sort((a, b) => a.localeCompare(b));
-      if (!names.length) return '<option value="">(No commodities)</option>';
-      return names.map((name) => {
-        const isSel = String(name) === selected ? " selected" : "";
-        return `<option value="${esc(name)}"${isSel}>${esc(name)}</option>`;
-      }).join("");
-    }
-    function scaleKeySelectOptions(selectedName) {
-      return commoditySelectOptions(selectedName);
-    }
-    function requirementKeyOptions(reqType, selectedName) {
-      const selected = String(selectedName || "");
-      const fromType = String(reqType || "commodity_qty");
-      const values = fromType === "tag_qty"
-        ? [...commodityTags]
-        : (fromType === "any_single_commodity_qty" ? ["*"] : [...commodityNames]);
-      if (selected && !values.some((n) => n.toLowerCase() === selected.toLowerCase())) {
-        values.push(selected);
-      }
-      values.sort((a, b) => a.localeCompare(b));
-      if (!values.length) return '<option value="">(None)</option>';
-      return values.map((v) => `<option value="${esc(v)}"${String(v) === selected ? " selected" : ""}>${esc(v)}</option>`).join("");
-    }
-    async function loadCommodityNames() {
-      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      const rows = Array.isArray(data.commodities) ? data.commodities : [];
-      commodityNames = rows
-        .map((r) => String(r.name || "").trim())
-        .filter((n) => n.length > 0);
-      commodityTags = Array.from(new Set(
-        rows
-          .flatMap((r) => Array.isArray(r.tags) ? r.tags : [])
-          .map((t) => String(t || "").trim())
-          .filter((t) => t.length > 0)
-      ));
-      const select = el("new_req_commodity");
-      if (select) {
-        const current = String(select.value || "");
-        const reqType = String(el("new_req_type")?.value || "commodity_qty");
-        select.innerHTML = requirementKeyOptions(reqType, current);
-      }
-      const effSelect = el("new_eff_key");
-      if (effSelect) {
-        const current = String(effSelect.value || "");
-        effSelect.innerHTML = scaleKeySelectOptions(current);
-      }
-    }
-    async function load() {
-      await loadCommodityNames();
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}`), { cache: "no-store" });
-      if (!res.ok) {
-        el("msg").textContent = "Perk not found.";
-        return;
-      }
-      const data = await res.json();
-      const p = data.perk || {};
-      el("name").value = p.name || "";
-      el("description").value = p.description || "";
-      el("enabled").value = Number(p.enabled || 0);
-      el("priority").value = Number(p.priority || 100);
-      el("stack_mode").value = p.stack_mode || "add";
-      el("max_stacks").value = Number(p.max_stacks || 1);
-      renderRequirements(Array.isArray(data.requirements) ? data.requirements : []);
-      renderEffects(Array.isArray(data.effects) ? data.effects : []);
-      const newSelect = el("new_req_commodity");
-      if (newSelect && !newSelect.value && commodityNames.length) {
-        newSelect.value = commodityNames[0];
-      }
-      const newEffSelect = el("new_eff_key");
-      if (newEffSelect && !newEffSelect.value && commodityNames.length) {
-        newEffSelect.value = commodityNames[0];
-      }
-    }
-    function renderRequirements(rows) {
-      const tbody = el("reqRows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="muted">No requirements yet.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr data-req-id="${esc(String(r.id))}">
-        <td class="mono">${esc(String(r.id))}</td>
-        <td><input data-req-group="${esc(String(r.id))}" type="number" step="1" value="${esc(String(r.group_id || 1))}" /></td>
-        <td><select data-req-type="${esc(String(r.id))}"><option value="commodity_qty"${String(r.req_type || "commodity_qty") === "commodity_qty" ? " selected" : ""}>commodity_qty</option><option value="tag_qty"${String(r.req_type || "") === "tag_qty" ? " selected" : ""}>tag_qty</option><option value="any_single_commodity_qty"${String(r.req_type || "") === "any_single_commodity_qty" ? " selected" : ""}>any_single_commodity_qty</option></select></td>
-        <td><select data-req-commodity="${esc(String(r.id))}">${requirementKeyOptions(String(r.req_type || "commodity_qty"), String(r.commodity_name || ""))}</select></td>
-        <td><input data-req-operator="${esc(String(r.id))}" value="${esc(String(r.operator || ">="))}" /></td>
-        <td><input data-req-value="${esc(String(r.id))}" type="number" step="1" min="0" value="${esc(String(Number(r.value || 1).toFixed(0)))}" /></td>
-        <td><button data-req-save="${esc(String(r.id))}">Save</button> <button data-req-del="${esc(String(r.id))}" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
-      </tr>`).join("");
-      document.querySelectorAll("select[data-req-type]").forEach((sel) => {
-        sel.addEventListener("change", () => {
-          const reqId = sel.getAttribute("data-req-type");
-          if (!reqId) return;
-          const keySel = document.querySelector(`select[data-req-commodity="${CSS.escape(reqId)}"]`);
-          if (!keySel) return;
-          const current = String(keySel.value || "");
-          keySel.innerHTML = requirementKeyOptions(String(sel.value || "commodity_qty"), current);
-        });
-      });
-      document.querySelectorAll("button[data-req-save]").forEach((btn) => {
-        btn.addEventListener("click", () => updateRequirement(btn.getAttribute("data-req-save")));
-      });
-      document.querySelectorAll("button[data-req-del]").forEach((btn) => {
-        btn.addEventListener("click", () => deleteRequirement(btn.getAttribute("data-req-del")));
-      });
-    }
-    function renderEffects(rows) {
-      const tbody = el("effectRows");
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="muted">No effects yet.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map((r) => `<tr data-eff-id="${esc(String(r.id))}">
-        <td class="mono">${esc(String(r.id))}</td>
-        <td><input data-eff-target="${esc(String(r.id))}" value="${esc(String(r.target_stat || "income"))}" /></td>
-        <td><input data-eff-mode="${esc(String(r.id))}" value="${esc(String(r.value_mode || "flat"))}" /></td>
-        <td><input data-eff-value="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.value || 0))}" /></td>
-        <td><input data-eff-source="${esc(String(r.id))}" value="${esc(String(r.scale_source || "none"))}" /></td>
-        <td><select data-eff-key="${esc(String(r.id))}">${scaleKeySelectOptions(String(r.scale_key || ""))}</select></td>
-        <td><input data-eff-factor="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.scale_factor || 0))}" /></td>
-        <td><input data-eff-cap="${esc(String(r.id))}" type="number" step="0.01" value="${esc(String(r.cap || 0))}" /></td>
-        <td><button data-eff-save="${esc(String(r.id))}">Save</button> <button data-eff-del="${esc(String(r.id))}" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
-      </tr>`).join("");
-      document.querySelectorAll("button[data-eff-save]").forEach((btn) => {
-        btn.addEventListener("click", () => updateEffect(btn.getAttribute("data-eff-save")));
-      });
-      document.querySelectorAll("button[data-eff-del]").forEach((btn) => {
-        btn.addEventListener("click", () => deleteEffect(btn.getAttribute("data-eff-del")));
-      });
-    }
-    async function savePerk() {
-      const payload = {
-        name: el("name").value.trim(),
-        description: el("description").value,
-        enabled: Number(el("enabled").value),
-        priority: Number(el("priority").value),
-        stack_mode: el("stack_mode").value,
-        max_stacks: Number(el("max_stacks").value),
-      };
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Save failed" }));
-        el("msg").textContent = err.error || "Save failed.";
-        return;
-      }
-      el("msg").textContent = "Perk saved.";
-      await load();
-    }
-    async function deletePerk() {
-      if (!window.confirm("Delete this perk?")) return;
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}`), { method: "DELETE" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Delete failed" }));
-        el("msg").textContent = err.error || "Delete failed.";
-        return;
-      }
-      window.location.href = withAuthToken("/");
-    }
-    async function addRequirement() {
-      const payload = {
-        group_id: Number(el("new_req_group").value),
-        req_type: el("new_req_type").value,
-        commodity_name: el("new_req_commodity").value.trim(),
-        operator: el("new_req_operator").value,
-        value: Number(el("new_req_value").value),
-      };
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Add failed" }));
-        el("msg").textContent = err.error || "Add requirement failed.";
-        return;
-      }
-      await load();
-    }
-    async function updateRequirement(reqId) {
-      if (!reqId) return;
-      const payload = {
-        group_id: Number(document.querySelector(`input[data-req-group="${CSS.escape(reqId)}"]`).value),
-        req_type: document.querySelector(`select[data-req-type="${CSS.escape(reqId)}"]`).value,
-        commodity_name: document.querySelector(`select[data-req-commodity="${CSS.escape(reqId)}"]`).value,
-        operator: document.querySelector(`input[data-req-operator="${CSS.escape(reqId)}"]`).value,
-        value: Number(document.querySelector(`input[data-req-value="${CSS.escape(reqId)}"]`).value),
-      };
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements/${encodeURIComponent(reqId)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Update failed" }));
-        el("msg").textContent = err.error || "Update requirement failed.";
-        return;
-      }
-      await load();
-    }
-    async function deleteRequirement(reqId) {
-      if (!reqId || !window.confirm("Delete this requirement?")) return;
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/requirements/${encodeURIComponent(reqId)}`), { method: "DELETE" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Delete failed" }));
-        el("msg").textContent = err.error || "Delete requirement failed.";
-        return;
-      }
-      await load();
-    }
-    async function addEffect() {
-      const payload = {
-        target_stat: el("new_eff_target").value,
-        value_mode: el("new_eff_mode").value,
-        value: Number(el("new_eff_value").value),
-        scale_source: el("new_eff_source").value,
-        scale_key: el("new_eff_key").value.trim(),
-        scale_factor: Number(el("new_eff_factor").value),
-        cap: Number(el("new_eff_cap").value),
-      };
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Add failed" }));
-        el("msg").textContent = err.error || "Add effect failed.";
-        return;
-      }
-      await load();
-    }
-    async function updateEffect(effectId) {
-      if (!effectId) return;
-      const payload = {
-        target_stat: document.querySelector(`input[data-eff-target="${CSS.escape(effectId)}"]`).value,
-        value_mode: document.querySelector(`input[data-eff-mode="${CSS.escape(effectId)}"]`).value,
-        value: Number(document.querySelector(`input[data-eff-value="${CSS.escape(effectId)}"]`).value),
-        scale_source: document.querySelector(`input[data-eff-source="${CSS.escape(effectId)}"]`).value,
-        scale_key: document.querySelector(`select[data-eff-key="${CSS.escape(effectId)}"]`).value,
-        scale_factor: Number(document.querySelector(`input[data-eff-factor="${CSS.escape(effectId)}"]`).value),
-        cap: Number(document.querySelector(`input[data-eff-cap="${CSS.escape(effectId)}"]`).value),
-      };
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects/${encodeURIComponent(effectId)}/update`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Update failed" }));
-        el("msg").textContent = err.error || "Update effect failed.";
-        return;
-      }
-      await load();
-    }
-    async function deleteEffect(effectId) {
-      if (!effectId || !window.confirm("Delete this effect?")) return;
-      const res = await fetch(withAuthToken(`/api/perk/${encodeURIComponent(PERK_ID)}/effects/${encodeURIComponent(effectId)}`), { method: "DELETE" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Delete failed" }));
-        el("msg").textContent = err.error || "Delete effect failed.";
-        return;
-      }
-      await load();
-    }
-    el("savePerkBtn").addEventListener("click", savePerk);
-    el("deletePerkBtn").addEventListener("click", deletePerk);
-    el("addReqBtn").addEventListener("click", addRequirement);
-    el("addEffBtn").addEventListener("click", addEffect);
-    const newReqType = el("new_req_type");
-    if (newReqType) {
-      newReqType.addEventListener("change", () => {
-        const sel = el("new_req_commodity");
-        if (!sel) return;
-        sel.innerHTML = requirementKeyOptions(String(newReqType.value || "commodity_qty"), String(sel.value || ""));
-      });
-    }
-    wireBackLink();
-    load();
-  </script>
-</body>
-</html>
-"""
+JOB_DETAIL_HTML = _load_template("job_detail.html")
 
 
 def create_app() -> Flask:
@@ -2996,7 +188,19 @@ def create_app() -> Flask:
         return f"config:{name}"
 
     def _normalize_config(name: str, value):
-        if name in {"START_BALANCE", "MARKET_CLOSE_HOUR", "DRIFT_NOISE_FREQUENCY", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES", "TREND_MULTIPLIER", "PAWN_SELL_RATE"}:
+        if name in {
+            "START_BALANCE",
+            "MARKET_CLOSE_HOUR",
+            "DRIFT_NOISE_FREQUENCY",
+            "DRIFT_NOISE_GAIN",
+            "DRIFT_NOISE_LOW_FREQ_RATIO",
+            "DRIFT_NOISE_LOW_GAIN",
+            "TRADING_FEES",
+            "TREND_MULTIPLIER",
+            "PAWN_SELL_RATE",
+            "OWNER_BUY_FEE_RATE",
+            "IMAGE_UPLOAD_TOTAL_GB",
+        }:
             number = float(value)
             if name == "MARKET_CLOSE_HOUR":
                 return max(0.0, min(23.9997222222, number))
@@ -3004,6 +208,10 @@ def create_app() -> Flask:
                 return max(0.0, min(1.0, number))
             if name == "PAWN_SELL_RATE":
                 return max(0.0, min(100.0, number))
+            if name == "OWNER_BUY_FEE_RATE":
+                return max(0.0, min(100.0, number))
+            if name == "IMAGE_UPLOAD_TOTAL_GB":
+                return max(0.1, number)
             if name in {"START_BALANCE", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES"}:
                 return max(0.0, number)
             return number
@@ -3029,7 +237,18 @@ def create_app() -> Flask:
             if not normalized:
                 raise ValueError("SHOP_RARITY_WEIGHTS has no valid entries.")
             return json.dumps(normalized, separators=(",", ":"))
-        if name in {"TICK_INTERVAL", "TRADING_LIMITS", "TRADING_LIMITS_PERIOD", "ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "COMMODITIES_LIMIT"}:
+        if name in {
+            "TICK_INTERVAL",
+            "TRADING_LIMITS",
+            "TRADING_LIMITS_PERIOD",
+            "ANNOUNCEMENT_CHANNEL_ID",
+            "ANNOUNCE_MENTION_ROLE",
+            "GM_ID",
+            "COMMODITIES_LIMIT",
+            "IMAGE_UPLOAD_MAX_SOURCE_MB",
+            "IMAGE_UPLOAD_MAX_DIM",
+            "IMAGE_UPLOAD_MAX_STORED_KB",
+        }:
             if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID"}:
                 text = str(value).strip()
                 if text == "":
@@ -3045,8 +264,16 @@ def create_app() -> Flask:
                 return max(1, number)
             if name == "TRADING_LIMITS_PERIOD":
                 return max(1, number)
+            if name == "ANNOUNCE_MENTION_ROLE":
+                return 1 if number > 0 else 0
             if name == "COMMODITIES_LIMIT":
                 return max(0, number)
+            if name == "IMAGE_UPLOAD_MAX_SOURCE_MB":
+                return max(1, number)
+            if name == "IMAGE_UPLOAD_MAX_DIM":
+                return max(128, number)
+            if name == "IMAGE_UPLOAD_MAX_STORED_KB":
+                return max(64, number)
             return number
         text = str(value).strip()
         return text or str(APP_CONFIG_SPECS[name].default)
@@ -3066,6 +293,175 @@ def create_app() -> Flask:
                         """,
                         (_config_key(name), str(_normalize_config(name, spec.default))),
                     )
+
+    def _uploads_dir() -> Path:
+        path = repo_root / "data" / "uploads"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _public_base_url() -> str:
+        explicit = str(os.getenv("DASHBOARD_PUBLIC_BASE_URL", "")).strip().rstrip("/")
+        if explicit:
+            return explicit
+        return request.host_url.rstrip("/")
+
+    def _media_url_for(filename: str) -> str:
+        return f"{_public_base_url()}/media/uploads/{filename}"
+
+    def _filename_from_stored_image_url(image_url: str) -> str | None:
+        text = str(image_url or "").strip()
+        if not text:
+            return None
+        parsed = urlparse(text)
+        path = parsed.path if parsed.scheme else text
+        marker = "/media/uploads/"
+        if marker not in path:
+            return None
+        name = path.split(marker, 1)[1].strip().split("/", 1)[0]
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            return None
+        return name
+
+    def _is_http_url(text: str) -> bool:
+        try:
+            parsed = urlparse(str(text).strip())
+            return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        except Exception:
+            return False
+
+    def _total_uploaded_bytes() -> int:
+        total = 0
+        for p in _uploads_dir().glob("*"):
+            if p.is_file():
+                total += p.stat().st_size
+        return total
+
+    def _collect_referenced_uploads(conn: sqlite3.Connection) -> set[str]:
+        refs: set[str] = set()
+        rows = conn.execute(
+            """
+            SELECT image_url FROM commodities WHERE image_url != ''
+            UNION ALL
+            SELECT image_url FROM close_news WHERE image_url != ''
+            """
+        ).fetchall()
+        for row in rows:
+            name = _filename_from_stored_image_url(str(row["image_url"] or ""))
+            if name:
+                refs.add(name)
+        return refs
+
+    def _gc_uploaded_images(conn: sqlite3.Connection) -> None:
+        refs = _collect_referenced_uploads(conn)
+        base = _uploads_dir()
+        for p in base.glob("*"):
+            if not p.is_file():
+                continue
+            if p.name not in refs:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def _download_and_ingest_image(image_url: str) -> str:
+        source_limit = max(1, int(_get_config("IMAGE_UPLOAD_MAX_SOURCE_MB"))) * 1024 * 1024
+        max_dim = max(128, int(_get_config("IMAGE_UPLOAD_MAX_DIM")))
+        stored_limit = max(64, int(_get_config("IMAGE_UPLOAD_MAX_STORED_KB"))) * 1024
+        total_limit = int(max(0.1, float(_get_config("IMAGE_UPLOAD_TOTAL_GB"))) * 1024 * 1024 * 1024)
+
+        req = Request(
+            image_url,
+            headers={
+                "User-Agent": "716Stonks-Dashboard/1.0",
+                "Accept": "image/*,*/*;q=0.8",
+            },
+        )
+        raw = bytearray()
+        try:
+            with urlopen(req, timeout=15) as resp:
+                content_type = str(resp.headers.get("Content-Type", "")).lower()
+                if content_type and "image" not in content_type:
+                    raise ValueError("URL did not return an image content-type.")
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+                    if len(raw) > source_limit:
+                        raise ValueError(f"Image is too large (max {source_limit // (1024 * 1024)}MB source).")
+        except URLError as e:
+            raise ValueError(f"Failed to download image URL: {e}") from e
+
+        try:
+            with Image.open(io.BytesIO(raw)) as img_src:
+                if img_src.mode in {"RGBA", "LA", "P"}:
+                    img_base = img_src.convert("RGBA")
+                else:
+                    img_base = img_src.convert("RGB")
+        except (UnidentifiedImageError, OSError) as e:
+            raise ValueError("Downloaded data is not a valid image.") from e
+
+        if max(img_base.size) > max_dim:
+            img_base.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
+        best: bytes | None = None
+        working = img_base
+        for _attempt in range(7):
+            for quality in (86, 80, 74, 68, 62, 56, 50, 44, 38, 32):
+                buf = io.BytesIO()
+                working.save(buf, format="WEBP", quality=quality, method=6)
+                data = buf.getvalue()
+                if best is None or len(data) < len(best):
+                    best = data
+                if len(data) <= stored_limit:
+                    best = data
+                    break
+            if best is not None and len(best) <= stored_limit:
+                break
+            w, h = working.size
+            if w <= 192 or h <= 192:
+                break
+            next_size = (max(128, int(w * 0.85)), max(128, int(h * 0.85)))
+            working = working.resize(next_size, Image.Resampling.LANCZOS)
+
+        if best is None:
+            raise ValueError("Unable to convert image.")
+        if len(best) > stored_limit:
+            raise ValueError(f"Image is still too large after compression (must be <= {stored_limit // 1024}KB).")
+
+        digest = hashlib.sha256(best).hexdigest()[:24]
+        filename = f"{digest}.webp"
+        dest = _uploads_dir() / filename
+        if not dest.exists():
+            current_total = _total_uploaded_bytes()
+            if current_total + len(best) > total_limit:
+                raise ValueError("Upload quota reached. Delete unused images or increase IMAGE_UPLOAD_TOTAL_GB.")
+            dest.write_bytes(best)
+        return _media_url_for(filename)
+
+    def _normalize_image_url_for_storage(conn: sqlite3.Connection, raw_value: object) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        filename = _filename_from_stored_image_url(value)
+        if filename:
+            return _media_url_for(filename)
+        if _is_http_url(value):
+            stored = _download_and_ingest_image(value)
+            return stored
+        raise ValueError("image_url must be empty or a valid http/https URL.")
+
+    def _normalize_image_url_with_status(conn: sqlite3.Connection, raw_value: object) -> tuple[str, str]:
+        value = str(raw_value or "").strip()
+        if not value:
+            return "", "cleared"
+        filename = _filename_from_stored_image_url(value)
+        if filename:
+            return _media_url_for(filename), "unchanged"
+        if _is_http_url(value):
+            stored = _download_and_ingest_image(value)
+            return stored, "ingested"
+        raise ValueError("image_url must be empty or a valid http/https URL.")
 
     def _ensure_perk_tables() -> None:
         with _connect() as conn:
@@ -3170,6 +566,14 @@ def create_app() -> Flask:
                     ALTER TABLE perk_requirements_new RENAME TO perk_requirements;
                     """
                 )
+            # Canonicalize legacy alias to avoid req_type confusion.
+            conn.execute(
+                """
+                UPDATE perk_requirements
+                SET req_type = 'any_single_commodity_qty'
+                WHERE LOWER(TRIM(req_type)) = 'any_single_commodities_qty'
+                """
+            )
 
     def _ensure_commodity_tags_table() -> None:
         with _connect() as conn:
@@ -3186,6 +590,60 @@ def create_app() -> Flask:
                 );
                 """
             )
+
+    def _ensure_jobs_tables() -> None:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    job_type TEXT NOT NULL DEFAULT 'chance',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    cooldown_ticks INTEGER NOT NULL DEFAULT 0,
+                    reward_min REAL NOT NULL DEFAULT 0,
+                    reward_max REAL NOT NULL DEFAULT 0,
+                    success_rate REAL NOT NULL DEFAULT 1.0,
+                    duration_ticks INTEGER NOT NULL DEFAULT 0,
+                    duration_minutes REAL NOT NULL DEFAULT 0,
+                    quiz_question TEXT NOT NULL DEFAULT '',
+                    quiz_answer TEXT NOT NULL DEFAULT '',
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(guild_id, name)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_jobs (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    job_id INTEGER NOT NULL,
+                    next_available_tick INTEGER NOT NULL DEFAULT 0,
+                    running_until_tick INTEGER NOT NULL DEFAULT 0,
+                    running_until_epoch REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id, job_id),
+                    FOREIGN KEY (job_id)
+                        REFERENCES jobs (id)
+                    ON DELETE CASCADE
+                );
+                """
+            )
+            job_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(jobs);").fetchall()
+            }
+            if job_cols and "duration_minutes" not in job_cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN duration_minutes REAL NOT NULL DEFAULT 0;")
+                conn.execute(
+                    "UPDATE jobs SET duration_minutes = CAST(duration_ticks AS REAL) WHERE duration_minutes <= 0;"
+                )
+            user_job_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(user_jobs);").fetchall()
+            }
+            if user_job_cols and "running_until_epoch" not in user_job_cols:
+                conn.execute(
+                    "ALTER TABLE user_jobs ADD COLUMN running_until_epoch REAL NOT NULL DEFAULT 0;"
+                )
 
     def _ensure_commodities_columns() -> None:
         with _connect() as conn:
@@ -3214,6 +672,30 @@ def create_app() -> Flask:
                     "ALTER TABLE commodities ADD COLUMN perk_effects_json TEXT NOT NULL DEFAULT '';"
                 )
 
+    def _ensure_company_owners_table() -> None:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS company_owners (
+                    guild_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, symbol, user_id),
+                    FOREIGN KEY (guild_id, symbol)
+                        REFERENCES companies (guild_id, symbol)
+                        ON DELETE CASCADE
+                );
+                """
+            )
+            conn.executescript(
+                """
+                INSERT OR IGNORE INTO company_owners (guild_id, symbol, user_id)
+                SELECT guild_id, symbol, owner_user_id
+                FROM companies
+                WHERE owner_user_id > 0;
+                """
+            )
+
     def _parse_tags(raw: object) -> list[str]:
         text = str(raw or "")
         parts = [p.strip().lower() for p in text.split(",")]
@@ -3224,6 +706,50 @@ def create_app() -> Flask:
             if tag not in tags:
                 tags.append(tag)
         return tags
+
+    def _parse_owner_user_ids(raw: object) -> list[int]:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        text = text.replace(";", ",").replace("|", ",")
+        tokens = [t.strip() for t in text.split(",")]
+        out: list[int] = []
+        seen: set[int] = set()
+        for token in tokens:
+            if not token:
+                continue
+            if token.startswith("+"):
+                token = token[1:]
+            if not token.isdigit():
+                continue
+            uid = int(token)
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            out.append(uid)
+        return out
+
+    def _set_company_owners(
+        conn: sqlite3.Connection,
+        guild_id: int,
+        symbol: str,
+        owner_user_ids: list[int],
+    ) -> None:
+        conn.execute(
+            """
+            DELETE FROM company_owners
+            WHERE guild_id = ? AND symbol = ?
+            """,
+            (guild_id, symbol),
+        )
+        for uid in owner_user_ids:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO company_owners (guild_id, symbol, user_id)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, symbol, uid),
+            )
 
     def _sanitize_stack_mode(raw: object) -> str:
         mode = str(raw or "add").strip().lower()
@@ -3236,6 +762,18 @@ def create_app() -> Flask:
         if op not in {">", ">=", "<", "<=", "==", "!="}:
             return ">="
         return op
+
+    def _sanitize_job_type(raw: object) -> str:
+        t = str(raw or "chance").strip().lower()
+        if t not in {"chance", "quiz", "timed"}:
+            return "chance"
+        return t
+
+    def _normalize_req_type(raw: object) -> str:
+        req_type = str(raw or "commodity_qty").strip().lower() or "commodity_qty"
+        if req_type == "any_single_commodities_qty":
+            return "any_single_commodity_qty"
+        return req_type
 
     def _get_config(name: str):
         spec = APP_CONFIG_SPECS[name]
@@ -3258,6 +796,16 @@ def create_app() -> Flask:
                 """,
                 (_config_key(name), str(normalized)),
             )
+            if name in {"MARKET_CLOSE_HOUR", "DISPLAY_TIMEZONE"}:
+                conn.execute(
+                    "DELETE FROM app_state WHERE key LIKE 'close_event_sent:%'"
+                )
+                conn.execute(
+                    "DELETE FROM app_state WHERE key LIKE 'close_event_armed:%'"
+                )
+                conn.execute(
+                    "DELETE FROM app_state WHERE key LIKE 'rank_income_event:%'"
+                )
         return normalized
 
     def _config_value_for_json(name: str, value):
@@ -3352,13 +900,17 @@ def create_app() -> Flask:
 
     _ensure_config_defaults()
     _ensure_perk_tables()
+    _ensure_jobs_tables()
     _ensure_commodity_tags_table()
     _ensure_commodities_columns()
+    _ensure_company_owners_table()
 
     @app.before_request
     def _auth_gate():
         _cleanup_expired_auth_entries()
         g._new_webadmin_sid = None
+        g.webadmin_authenticated = False
+        g.webadmin_read_only = True
         if request.path == "/favicon.ico":
             return ("", 204)
 
@@ -3371,10 +923,21 @@ def create_app() -> Flask:
             if godtoken_ok or _token_in_grace(token) or _consume_one_time_token(token):
                 sid = _create_session()
                 g._new_webadmin_sid = sid
+                g.webadmin_authenticated = True
+                g.webadmin_read_only = False
                 return None
-            return render_template_string(AUTH_REQUIRED_HTML), 401
 
-        # Strict mode: token is required on every request.
+        # Public read-only mode for dashboard + market data endpoints.
+        public_paths = {
+            "/",
+            "/api/stocks",
+            "/api/dashboard-stats",
+            "/api/app-config/TICK_INTERVAL",
+        }
+        if request.method == "GET" and (
+            request.path in public_paths or request.path.startswith("/media/uploads/")
+        ):
+            return None
         return render_template_string(AUTH_REQUIRED_HTML), 401
 
     @app.after_request
@@ -3425,7 +988,21 @@ def create_app() -> Flask:
         if not db_access_url:
             host = request.host.split(":", 1)[0]
             db_access_url = f"http://{host}:8081"
-        return render_template_string(MAIN_HTML, db_access_url=db_access_url)
+        return render_template_string(
+            MAIN_HTML,
+            db_access_url=db_access_url,
+            read_only_mode=bool(getattr(g, "webadmin_read_only", True)),
+        )
+
+    @app.get("/media/uploads/<path:filename>")
+    def media_uploads(filename: str):
+        name = Path(filename).name
+        if name != filename or "/" in filename or "\\" in filename:
+            return jsonify({"error": "Invalid file path"}), 400
+        path = _uploads_dir() / name
+        if not path.exists() or not path.is_file():
+            return jsonify({"error": "Not found"}), 404
+        return send_file(path)
 
     @app.get("/company/<symbol>")
     def company_page(symbol: str):
@@ -3447,14 +1024,26 @@ def create_app() -> Flask:
     def perk_page(perk_id: int):
         return render_template_string(PERK_DETAIL_HTML, perk_id=perk_id)
 
+    @app.get("/job/<int:job_id>")
+    def job_page(job_id: int):
+        return render_template_string(JOB_DETAIL_HTML, job_id=job_id)
+
     @app.get("/api/stocks")
     def api_stocks():
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT symbol, name, current_price, base_price, slope, drift, liquidity, impact_power, updated_at
+                SELECT guild_id, symbol, name, location, industry, founded_year, description, evaluation,
+                       current_price, base_price, slope, drift, liquidity, impact_power, updated_at
                 FROM companies
                 ORDER BY symbol
+                """
+            ).fetchall()
+            owner_rows = conn.execute(
+                """
+                SELECT guild_id, symbol, user_id
+                FROM company_owners
+                ORDER BY guild_id, symbol, user_id
                 """
             ).fetchall()
             history_rows = conn.execute(
@@ -3477,9 +1066,19 @@ def create_app() -> Flask:
         for h in history_rows:
             sym = str(h["symbol"])
             history_map.setdefault(sym, []).append(float(h["price"]))
+        owners_map: dict[tuple[int, str], list[int]] = {}
+        for o in owner_rows:
+            key = (int(o["guild_id"]), str(o["symbol"]))
+            owners_map.setdefault(key, []).append(int(o["user_id"]))
         stocks: list[dict] = []
         for r in rows:
             row = dict(r)
+            owner_ids = owners_map.get((int(r["guild_id"]), str(r["symbol"])), [])
+            if not owner_ids:
+                legacy_owner = int(row.get("owner_user_id", 0) or 0)
+                owner_ids = [legacy_owner] if legacy_owner > 0 else []
+            row["owner_user_ids"] = [str(uid) for uid in owner_ids]
+            row["owner_user_id"] = str(owner_ids[0]) if owner_ids else "0"
             row["history_prices"] = history_map.get(str(r["symbol"]), [])
             stocks.append(row)
         return jsonify(
@@ -3502,10 +1101,47 @@ def create_app() -> Flask:
                 WHERE status = 'pending'
                 """
             ).fetchone()
+            guild_id = _pick_default_guild_id(conn)
+            sent_row = conn.execute(
+                "SELECT value FROM app_state WHERE key = ?",
+                (f"close_event_sent:{guild_id}",),
+            ).fetchone()
+            armed_row = conn.execute(
+                "SELECT value FROM app_state WHERE key = ?",
+                (f"close_event_armed:{guild_id}",),
+            ).fetchone()
         company_count = int(companies_row["c"]) if companies_row is not None else 0
         user_count = int(users_row["c"]) if users_row is not None else 0
         feedback_count = int(feedback_row["c"]) if feedback_row is not None else 0
         bank_pending_count = int(bank_pending_row["c"]) if bank_pending_row is not None else 0
+        paused_raw = (_state_get("ticks_paused") or "").strip()
+        ticks_paused = paused_raw in {"1", "true", "True", "yes", "on"}
+        close_gate_raw = str(sent_row["value"]) if sent_row is not None else ""
+        close_gate_armed_raw = str(armed_row["value"]) if armed_row is not None else ""
+        close_gate_ready = False
+        close_gate_status = "Waiting"
+        try:
+            tz = ZoneInfo(str(_get_config("DISPLAY_TIMEZONE")))
+        except Exception:
+            tz = timezone.utc
+        close_hour = float(_get_config("MARKET_CLOSE_HOUR"))
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        close_seconds = max(0, min((24 * 3600) - 1, int(round(close_hour * 3600.0))))
+        close_dt = (
+            now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(seconds=close_seconds)
+        )
+        arm_dt = close_dt - timedelta(minutes=5)
+        event_id = f"{close_dt.strftime('%Y-%m-%d')}|{close_hour:.6f}|{str(_get_config('DISPLAY_TIMEZONE'))}"
+        if close_gate_raw == event_id or now_local >= close_dt:
+            close_gate_ready = False
+            close_gate_status = "Sent"
+        elif arm_dt <= now_local < close_dt:
+            close_gate_ready = True
+            close_gate_status = "Ready"
+        else:
+            close_gate_ready = False
+            close_gate_status = "Waiting"
         return jsonify(
             {
                 "until_close": _until_close_text(),
@@ -3516,6 +1152,11 @@ def create_app() -> Flask:
                 "user_count": user_count,
                 "feedback_count": feedback_count,
                 "bank_pending_count": bank_pending_count,
+                "ticks_paused": ticks_paused,
+                "close_gate_ready": close_gate_ready,
+                "close_gate_status": close_gate_status,
+                "close_gate_raw": close_gate_raw or "-",
+                "close_gate_armed_raw": close_gate_armed_raw or "-",
             }
         )
 
@@ -3524,7 +1165,7 @@ def create_app() -> Flask:
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT symbol, name, location, industry, founded_year, description, evaluation,
+                SELECT guild_id, symbol, name, owner_user_id, location, industry, founded_year, description, evaluation,
                        current_price, base_price, slope, drift, liquidity, impact_power,
                        pending_buy, pending_sell, starting_tick, last_tick, updated_at
                 FROM companies
@@ -3534,12 +1175,53 @@ def create_app() -> Flask:
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Company not found"}), 404
+            owner_rows = conn.execute(
+                """
+                SELECT user_id
+                FROM company_owners
+                WHERE guild_id = ? AND symbol = ? COLLATE NOCASE
+                ORDER BY user_id
+                """,
+                (int(row["guild_id"]), symbol),
+            ).fetchall()
+            holder_rows = conn.execute(
+                """
+                SELECT h.user_id, COALESCE(u.display_name, '') AS display_name, h.shares
+                FROM holdings h
+                LEFT JOIN users u
+                    ON u.guild_id = h.guild_id
+                   AND u.user_id = h.user_id
+                WHERE h.guild_id = ? AND h.symbol = ? COLLATE NOCASE AND h.shares > 0
+                ORDER BY h.shares DESC, h.user_id ASC
+                """,
+                (int(row["guild_id"]), symbol),
+            ).fetchall()
             history = _history_for(conn, symbol, limit=None)
+        company = dict(row)
+        owner_ids = [int(r["user_id"]) for r in owner_rows]
+        if not owner_ids:
+            legacy_owner = int(company.get("owner_user_id", 0) or 0)
+            owner_ids = [legacy_owner] if legacy_owner > 0 else []
+        company["owner_user_ids"] = [str(uid) for uid in owner_ids]
+        company["owner_user_id"] = str(owner_ids[0]) if owner_ids else "0"
+        shareholders: list[dict[str, object]] = []
+        for r in holder_rows:
+            uid = str(r["user_id"])
+            display_name = str(r["display_name"] or "").strip() or f"User {uid}"
+            shares = int(r["shares"] or 0)
+            shareholders.append(
+                {
+                    "user_id": uid,
+                    "display_name": display_name,
+                    "shares": shares,
+                }
+            )
         return jsonify(
             {
                 "server_time_utc": datetime.now(timezone.utc).isoformat(),
-                "company": dict(row),
+                "company": company,
                 "history_prices": history,
+                "shareholders": shareholders,
             }
         )
 
@@ -3629,7 +1311,7 @@ def create_app() -> Flask:
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                SELECT guild_id, name, price, rarity, spawn_weight_override, image_url, description,
                        perk_name, perk_description, perk_min_qty, perk_effects_json
                 FROM commodities
                 WHERE name = ? COLLATE NOCASE
@@ -3647,9 +1329,32 @@ def create_app() -> Flask:
                 """,
                 (name,),
             ).fetchall()
+            owner_rows = conn.execute(
+                """
+                SELECT uc.user_id, COALESCE(u.display_name, '') AS display_name, uc.quantity
+                FROM user_commodities uc
+                LEFT JOIN users u
+                  ON u.guild_id = uc.guild_id
+                 AND u.user_id = uc.user_id
+                WHERE uc.guild_id = ? AND uc.commodity_name = ? COLLATE NOCASE AND uc.quantity > 0
+                ORDER BY uc.quantity DESC, uc.user_id ASC
+                """,
+                (int(row["guild_id"]), name),
+            ).fetchall()
         item = dict(row)
         item["tags"] = [str(r["tag"]) for r in tag_rows]
-        return jsonify({"commodity": item})
+        owners = []
+        for r in owner_rows:
+            uid = str(r["user_id"])
+            display_name = str(r["display_name"] or "").strip() or f"User {uid}"
+            owners.append(
+                {
+                    "user_id": uid,
+                    "display_name": display_name,
+                    "quantity": int(r["quantity"] or 0),
+                }
+            )
+        return jsonify({"commodity": item, "owners": owners})
 
     @app.get("/api/players")
     def api_players():
@@ -3761,6 +1466,251 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/jobs")
+    def api_jobs():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, name, description, job_type, enabled, cooldown_ticks,
+                       reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                       quiz_question, quiz_answer, config_json, updated_at
+                FROM jobs
+                WHERE guild_id = ?
+                ORDER BY id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        jobs = [dict(r) for r in rows]
+        rotation = get_active_jobs(guild_id, limit=5)
+        available = [
+            {"id": int(r.get("id", 0)), "name": str(r.get("name", ""))}
+            for r in jobs
+            if int(r.get("enabled", 0)) == 1
+        ]
+        return jsonify(
+            {
+                "jobs": jobs,
+                "rotation": rotation,
+                "available": available,
+            }
+        )
+
+    @app.get("/api/jobs/rotation")
+    def api_jobs_rotation():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            rows = conn.execute(
+                """
+                SELECT id, name, enabled
+                FROM jobs
+                WHERE guild_id = ?
+                ORDER BY id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        available = [{"id": int(r["id"]), "name": str(r["name"])} for r in rows if int(r["enabled"]) == 1]
+        return jsonify({"rotation": get_active_jobs(guild_id, limit=5), "available": available})
+
+    @app.post("/api/jobs/rotation/refresh")
+    def api_jobs_rotation_refresh():
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        rotation = refresh_jobs_rotation(guild_id, limit=5)
+        return jsonify({"ok": True, "rotation": rotation})
+
+    @app.post("/api/jobs/rotation/swap")
+    def api_jobs_rotation_swap():
+        data = request.get_json(silent=True) or {}
+        try:
+            slot = int(data.get("slot", -1))
+            new_job_id = int(data.get("new_job_id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "slot and new_job_id must be integers"}), 400
+        if slot < 0:
+            return jsonify({"error": "slot must be >= 0"}), 400
+        if new_job_id <= 0:
+            return jsonify({"error": "new_job_id must be > 0"}), 400
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        ok = swap_active_job(guild_id, slot, new_job_id, limit=5)
+        if not ok:
+            return jsonify({"error": "swap failed (invalid slot/job or duplicate target)"}), 400
+        return jsonify({"ok": True, "rotation": get_active_jobs(guild_id, limit=5)})
+
+    @app.post("/api/job")
+    def api_job_create():
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        job_type = _sanitize_job_type(data.get("job_type", "chance"))
+        description = str(data.get("description", "")).strip()
+        quiz_question = str(data.get("quiz_question", "")).strip()
+        quiz_answer = str(data.get("quiz_answer", "")).strip()
+        raw_config = data.get("config_json", {})
+        if isinstance(raw_config, dict):
+            cfg_obj = raw_config
+        else:
+            try:
+                cfg_obj = json.loads(str(raw_config or "{}"))
+            except json.JSONDecodeError:
+                return jsonify({"error": "config_json must be valid JSON"}), 400
+            if not isinstance(cfg_obj, dict):
+                return jsonify({"error": "config_json must be a JSON object"}), 400
+        config_json = json.dumps(cfg_obj, separators=(",", ":"))
+        try:
+            enabled = 1 if int(data.get("enabled", 1)) > 0 else 0
+            reward_min = max(0.0, float(data.get("reward_min", 0.0)))
+            reward_max = max(0.0, float(data.get("reward_max", reward_min)))
+            duration_minutes = max(0.0, float(data.get("duration_minutes", data.get("duration_ticks", 0))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid numeric field"}), 400
+        if reward_max < reward_min:
+            reward_min, reward_max = reward_max, reward_min
+        if job_type == "quiz" and not quiz_question:
+            return jsonify({"error": "quiz jobs require quiz_question"}), 400
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        guild_id, name, description, job_type, enabled, cooldown_ticks,
+                        reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                        quiz_question, quiz_answer, config_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        guild_id, name, description, job_type, enabled, 0,
+                        reward_min, reward_max, 1.0, int(duration_minutes), duration_minutes,
+                        quiz_question, quiz_answer, config_json, now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return jsonify({"error": "Job with this name already exists"}), 400
+        return jsonify({"ok": True, "id": int(cur.lastrowid)})
+
+    @app.get("/api/job/<int:job_id>")
+    def api_job_get(job_id: int):
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            row = conn.execute(
+                """
+                SELECT id, guild_id, name, description, job_type, enabled, cooldown_ticks,
+                       reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                       quiz_question, quiz_answer, config_json, updated_at
+                FROM jobs
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, job_id),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Job not found"}), 404
+        return jsonify({"job": dict(row)})
+
+    @app.post("/api/job/<int:job_id>/update")
+    def api_job_update(job_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        if "name" in data:
+            name = str(data.get("name", "")).strip()
+            if not name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            updates["name"] = name
+        if "description" in data:
+            updates["description"] = str(data.get("description", "")).strip()
+        if "job_type" in data:
+            updates["job_type"] = _sanitize_job_type(data.get("job_type", "chance"))
+        if "enabled" in data:
+            updates["enabled"] = 1 if int(data.get("enabled", 1)) > 0 else 0
+        if "duration_minutes" in data or "duration_ticks" in data:
+            try:
+                updates["duration_minutes"] = max(
+                    0.0,
+                    float(data.get("duration_minutes", data.get("duration_ticks", 0))),
+                )
+                updates["duration_ticks"] = max(0, int(float(updates["duration_minutes"])))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid value for duration_minutes"}), 400
+        numeric_float_fields = {"reward_min", "reward_max"}
+        for key in numeric_float_fields:
+            if key in data:
+                try:
+                    updates[key] = max(0.0, float(data.get(key, 0.0)))
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"Invalid value for {key}"}), 400
+        if "quiz_question" in data:
+            updates["quiz_question"] = str(data.get("quiz_question", "")).strip()
+        if "quiz_answer" in data:
+            updates["quiz_answer"] = str(data.get("quiz_answer", "")).strip()
+        if "config_json" in data:
+            raw_config = data.get("config_json", {})
+            if isinstance(raw_config, dict):
+                cfg_obj = raw_config
+            else:
+                try:
+                    cfg_obj = json.loads(str(raw_config or "{}"))
+                except json.JSONDecodeError:
+                    return jsonify({"error": "config_json must be valid JSON"}), 400
+                if not isinstance(cfg_obj, dict):
+                    return jsonify({"error": "config_json must be a JSON object"}), 400
+            updates["config_json"] = json.dumps(cfg_obj, separators=(",", ":"))
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            if "reward_min" in updates or "reward_max" in updates:
+                row = conn.execute(
+                    """
+                    SELECT reward_min, reward_max
+                    FROM jobs
+                    WHERE guild_id = ? AND id = ?
+                    """,
+                    (guild_id, job_id),
+                ).fetchone()
+                if row is None:
+                    return jsonify({"error": "Job not found"}), 404
+                rmin = float(updates.get("reward_min", row["reward_min"]))
+                rmax = float(updates.get("reward_max", row["reward_max"]))
+                if rmax < rmin:
+                    updates["reward_min"] = rmax
+                    updates["reward_max"] = rmin
+            set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+            vals = list(updates.values()) + [guild_id, job_id]
+            try:
+                cur = conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET {set_clause}
+                    WHERE guild_id = ? AND id = ?
+                    """,
+                    vals,
+                )
+            except sqlite3.IntegrityError:
+                return jsonify({"error": "Job name already exists"}), 400
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Job not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/job/<int:job_id>")
+    def api_job_delete(job_id: int):
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            cur = conn.execute(
+                """
+                DELETE FROM jobs
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, job_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Job not found"}), 404
+        return jsonify({"ok": True})
+
     @app.get("/api/action-history")
     def api_action_history():
         with _connect() as conn:
@@ -3865,6 +1815,61 @@ def create_app() -> Flask:
             player["trade_limit_window_minutes"] = 0.0
 
         return jsonify({"player": player})
+
+    @app.get("/api/player/<int:user_id>/bank-history")
+    def api_player_bank_history(user_id: int):
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            rows = conn.execute(
+                """
+                SELECT
+                    ah.id,
+                    ah.created_at,
+                    ah.action_type,
+                    ah.target_type,
+                    ah.target_symbol,
+                    ah.quantity,
+                    ah.unit_price,
+                    ah.total_amount,
+                    ah.details
+                FROM action_history ah
+                WHERE ah.guild_id = ? AND ah.user_id = ?
+                ORDER BY ah.id DESC
+                LIMIT 200
+                """,
+                (guild_id, user_id),
+            ).fetchall()
+
+        debit_actions = {"buy", "loan_repayment"}
+        credit_actions = {"sell", "pawn", "loan_approved", "owner_payout"}
+
+        out: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            action = str(item.get("action_type") or "").strip().lower()
+            amount = float(item.get("total_amount") or 0.0)
+            if action == "job":
+                delta = amount
+            elif action in debit_actions:
+                delta = -abs(amount)
+            elif action in credit_actions:
+                delta = abs(amount)
+            else:
+                delta = 0.0
+            item["delta"] = delta
+            out.append(item)
+
+        return jsonify({"history": out})
 
     @app.get("/api/player/<int:user_id>/commodities")
     def api_player_commodities(user_id: int):
@@ -4104,7 +2109,6 @@ def create_app() -> Flask:
         data = request.get_json(silent=True) or {}
         title = str(data.get("title", "")).strip()
         body = str(data.get("body", ""))
-        image_url = str(data.get("image_url", "")).strip()
         try:
             sort_order = int(data.get("sort_order", 0))
             enabled = 1 if int(data.get("enabled", 1)) != 0 else 0
@@ -4115,6 +2119,10 @@ def create_app() -> Flask:
         now_iso = datetime.now(timezone.utc).isoformat()
         with _connect() as conn:
             guild_id = _pick_default_guild_id(conn)
+            try:
+                image_url, image_status = _normalize_image_url_with_status(conn, data.get("image_url", ""))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
             cur = conn.execute(
                 """
                 INSERT INTO close_news (guild_id, title, body, image_url, sort_order, enabled, updated_at)
@@ -4123,7 +2131,8 @@ def create_app() -> Flask:
                 (guild_id, title, body, image_url, sort_order, enabled, now_iso),
             )
             news_id = int(cur.lastrowid)
-        return jsonify({"ok": True, "id": news_id})
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True, "id": news_id, "image_status": image_status, "image_url": image_url})
 
     @app.post("/api/close-news/<int:news_id>")
     def api_close_news_update(news_id: int):
@@ -4137,7 +2146,7 @@ def create_app() -> Flask:
         if "body" in data:
             updates["body"] = str(data.get("body", ""))
         if "image_url" in data:
-            updates["image_url"] = str(data.get("image_url", "")).strip()
+            updates["image_url"] = data.get("image_url", "")
         if "sort_order" in data:
             try:
                 updates["sort_order"] = int(data.get("sort_order", 0))
@@ -4155,14 +2164,23 @@ def create_app() -> Flask:
         set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         values = list(updates.values())
         values.append(news_id)
+        image_status = "unchanged"
         with _connect() as conn:
+            if "image_url" in updates:
+                try:
+                    updates["image_url"], image_status = _normalize_image_url_with_status(conn, updates["image_url"])
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
+                values = list(updates.values())
+                values.append(news_id)
             cur = conn.execute(
                 f"UPDATE close_news SET {set_clause} WHERE id = ?",
                 values,
             )
             if cur.rowcount <= 0:
                 return jsonify({"error": "News item not found"}), 404
-        return jsonify({"ok": True})
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True, "image_status": image_status, "image_url": str(updates.get("image_url", ""))})
 
     @app.delete("/api/close-news/<int:news_id>")
     def api_close_news_delete(news_id: int):
@@ -4173,6 +2191,7 @@ def create_app() -> Flask:
             )
             if cur.rowcount <= 0:
                 return jsonify({"error": "News item not found"}), 404
+            _gc_uploaded_images(conn)
         return jsonify({"ok": True})
 
     @app.post("/api/company/<symbol>/adjust")
@@ -4215,6 +2234,8 @@ def create_app() -> Flask:
             slope = float(data.get("slope", 0.0))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid base_price/slope"}), 400
+        owner_user_ids = _parse_owner_user_ids(data.get("owner_user_ids", data.get("owner_user_id", "")))
+        canonical_owner = owner_user_ids[0] if owner_user_ids else 0
 
         now_iso = datetime.now(timezone.utc).isoformat()
         tick_raw = _state_get("last_tick")
@@ -4238,14 +2259,15 @@ def create_app() -> Flask:
             conn.execute(
                 """
                 INSERT INTO companies (
-                    guild_id, symbol, name, location, industry, founded_year, description, evaluation,
+                    guild_id, symbol, name, owner_user_id, location, industry, founded_year, description, evaluation,
                     base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell,
                     starting_tick, current_price, last_tick, updated_at
                 )
-                VALUES (?, ?, ?, '', '', 2000, '', '', ?, ?, 0.0, 100.0, 1.0, 0.0, 0.0, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, '', '', 2000, '', '', ?, ?, 0.0, 100.0, 1.0, 0.0, 0.0, ?, ?, ?, ?)
                 """,
-                (guild_id, symbol, name, base_price, slope, tick, base_price, tick, now_iso),
+                (guild_id, symbol, name, canonical_owner, base_price, slope, tick, base_price, tick, now_iso),
             )
+            _set_company_owners(conn, guild_id, symbol, owner_user_ids)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO price_history (guild_id, symbol, tick_index, ts, price)
@@ -4260,6 +2282,8 @@ def create_app() -> Flask:
         data = request.get_json(silent=True) or {}
         allowed = {
             "name": str,
+            "owner_user_id": int,
+            "owner_user_ids": str,
             "location": str,
             "industry": str,
             "founded_year": int,
@@ -4280,13 +2304,20 @@ def create_app() -> Flask:
         for key, caster in allowed.items():
             if key not in data:
                 continue
+            if key == "owner_user_ids":
+                continue
             raw = data.get(key)
             try:
                 value = caster(raw) if caster is not str else str(raw)
             except (TypeError, ValueError):
                 return jsonify({"error": f"Invalid value for {key}"}), 400
             updates[key] = value
-        if not updates:
+        owner_user_ids_raw = data.get("owner_user_ids")
+        owner_user_ids = None
+        if owner_user_ids_raw is not None:
+            owner_user_ids = _parse_owner_user_ids(owner_user_ids_raw)
+
+        if not updates and owner_user_ids is None:
             return jsonify({"error": "No valid fields provided"}), 400
 
         if "base_price" in updates:
@@ -4299,6 +2330,10 @@ def create_app() -> Flask:
             updates["impact_power"] = max(0.1, float(updates["impact_power"]))
         if "founded_year" in updates:
             updates["founded_year"] = max(0, int(updates["founded_year"]))
+        if "owner_user_id" in updates:
+            updates["owner_user_id"] = max(0, int(updates["owner_user_id"]))
+            if owner_user_ids is None:
+                owner_user_ids = _parse_owner_user_ids(updates["owner_user_id"])
         if "starting_tick" in updates:
             updates["starting_tick"] = max(0, int(updates["starting_tick"]))
         if "last_tick" in updates:
@@ -4310,15 +2345,28 @@ def create_app() -> Flask:
 
         with _connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM companies WHERE symbol = ? COLLATE NOCASE",
+                "SELECT guild_id FROM companies WHERE symbol = ? COLLATE NOCASE",
                 (symbol,),
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Company not found"}), 404
-            conn.execute(
-                f"UPDATE companies SET {set_clause}, updated_at = ? WHERE symbol = ? COLLATE NOCASE",
-                values,
-            )
+            guild_id = int(row["guild_id"])
+            if set_clause:
+                conn.execute(
+                    f"UPDATE companies SET {set_clause}, updated_at = ? WHERE symbol = ? COLLATE NOCASE",
+                    values,
+                )
+            elif owner_user_ids is not None:
+                conn.execute(
+                    "UPDATE companies SET updated_at = ? WHERE symbol = ? COLLATE NOCASE",
+                    (datetime.now(timezone.utc).isoformat(), symbol),
+                )
+            if owner_user_ids is not None:
+                _set_company_owners(conn, guild_id, symbol, owner_user_ids)
+                conn.execute(
+                    "UPDATE companies SET owner_user_id = ? WHERE symbol = ? COLLATE NOCASE",
+                    (owner_user_ids[0] if owner_user_ids else 0, symbol),
+                )
         return jsonify({"ok": True})
 
     @app.delete("/api/company/<symbol>")
@@ -4433,6 +2481,11 @@ def create_app() -> Flask:
             guild_id = int(guild_row["guild_id"])
             old_name = str(guild_row["name"])
             next_name = str(updates.get("name", old_name))
+            if "image_url" in updates:
+                try:
+                    updates["image_url"] = _normalize_image_url_for_storage(conn, updates.get("image_url", ""))
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
             if updates:
                 set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
                 values = list(updates.values())
@@ -4456,6 +2509,7 @@ def create_app() -> Flask:
                     """,
                     (guild_id, next_name, tag),
                 )
+            _gc_uploaded_images(conn)
         return jsonify({"ok": True})
 
     @app.post("/api/commodity")
@@ -4473,7 +2527,6 @@ def create_app() -> Flask:
             spawn_weight_override = max(0.0, float(data.get("spawn_weight_override", 0.0)))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid spawn_weight_override"}), 400
-        image_url = str(data.get("image_url", "")).strip()
         description = str(data.get("description", "")).strip()
         perk_name = str(data.get("perk_name", "")).strip()
         perk_description = str(data.get("perk_description", "")).strip()
@@ -4494,6 +2547,10 @@ def create_app() -> Flask:
 
         with _connect() as conn:
             guild_id = _pick_default_guild_id(conn)
+            try:
+                image_url = _normalize_image_url_for_storage(conn, data.get("image_url", ""))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
             existing = conn.execute(
                 """
                 SELECT 1
@@ -4525,6 +2582,7 @@ def create_app() -> Flask:
                     """,
                     (guild_id, name, tag),
                 )
+            _gc_uploaded_images(conn)
         return jsonify({"ok": True, "name": name})
 
     @app.post("/api/player/<int:user_id>/update")
@@ -4671,7 +2729,7 @@ def create_app() -> Flask:
             value = max(0, int(float(data.get("value", 1))))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid group/value"}), 400
-        req_type = str(data.get("req_type", "commodity_qty")).strip().lower() or "commodity_qty"
+        req_type = _normalize_req_type(data.get("req_type", "commodity_qty"))
         commodity_name = str(data.get("commodity_name", "")).strip()
         operator = _sanitize_operator(data.get("operator", ">="))
         if req_type not in {"commodity_qty", "tag_qty", "any_single_commodity_qty"}:
@@ -4706,7 +2764,7 @@ def create_app() -> Flask:
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid group_id"}), 400
         if "req_type" in data:
-            req_type = str(data.get("req_type", "")).strip().lower()
+            req_type = _normalize_req_type(data.get("req_type", ""))
             if req_type not in {"commodity_qty", "tag_qty", "any_single_commodity_qty"}:
                 return jsonify({"error": "Unsupported req_type"}), 400
             updates["req_type"] = req_type
@@ -4937,6 +2995,21 @@ def create_app() -> Flask:
         except Exception as exc:
             return jsonify({"error": f"Backup failed: {exc}"}), 500
         return jsonify({"ok": True, "backup_path": backup_path})
+
+    @app.get("/api/server-actions/ticking")
+    def api_server_action_ticking_get():
+        raw = (_state_get("ticks_paused") or "").strip()
+        paused = raw in {"1", "true", "True", "yes", "on"}
+        return jsonify({"paused": paused})
+
+    @app.post("/api/server-actions/ticking")
+    def api_server_action_ticking_set():
+        data = request.get_json(silent=True) or {}
+        if "paused" not in data:
+            return jsonify({"error": "paused is required"}), 400
+        paused = bool(data.get("paused"))
+        _state_set("ticks_paused", "1" if paused else "0")
+        return jsonify({"ok": True, "paused": paused})
 
     @app.get("/api/server-actions/backups")
     def api_server_action_backups():

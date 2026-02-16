@@ -33,8 +33,26 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
         container.add_item(
             ui.TextDisplay(
                 content=(
-                    "## Bank Services\n"
-                    "Choose a service below.\n\n"
+                    "## 🏛️ Welcome to SaibaBank!\n"
+                )
+            )
+        )
+        if hasattr(ui, "Separator"):
+            container.add_item(ui.Separator())
+        container.add_item(
+            ui.TextDisplay(
+                content=(
+                    "**ABOUT US**\n"
+                    "SaibaBank is one of the world's leading financial institutions, serving individual consumers, small and middle-market businesses and large corporations with a full range of banking, investing, asset management and other financial and risk management products and services."
+                )
+            )
+        )
+        if hasattr(ui, "Separator"):
+            container.add_item(ui.Separator())
+        container.add_item(
+            ui.TextDisplay(
+                content=(
+                    "## Choose a service below.\n\n"
                     "- **Loan**: submit request for GM approval.\n"
                     "- **Pay Loan**: repay part/all of your current owe.\n"
                     "- **Pawn**: sell owned commodity at pawn rate."

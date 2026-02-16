@@ -27,6 +27,8 @@ from stockbot.commands.admingive import setup_admingive
 from stockbot.commands.perks import setup_perks
 from stockbot.commands.previewclose import setup_previewclose
 from stockbot.commands.transactionhistory import setup_transactionhistory
+from stockbot.commands.income import setup_income
+from stockbot.commands.jobs import setup_jobs
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -57,3 +59,5 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_perks(tree)
     setup_previewclose(tree)
     setup_transactionhistory(tree)
+    setup_income(tree)
+    setup_jobs(tree)

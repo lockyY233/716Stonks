@@ -97,7 +97,7 @@ def setup_admingive(tree: app_commands.CommandTree) -> None:
             details=f"Granted by admin {interaction.user.id}",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        await check_and_announce_perk_activations(interaction, target_user_id=target.id)
+        activated = await check_and_announce_perk_activations(interaction, target_user_id=target.id)
 
         new_total = owned_total + int(quantity)
         cap_text = (
@@ -105,8 +105,11 @@ def setup_admingive(tree: app_commands.CommandTree) -> None:
             if limit > 0
             else f" ({new_total} total items)"
         )
+        perk_text = ""
+        if activated:
+            perk_text = "\nActivated perks: " + ", ".join(f"`{name}`" for name in activated)
         await interaction.response.send_message(
-            f"Gave {quantity}x **{commodity_name}** to {target.mention}.{cap_text}",
+            f"Gave {quantity}x **{commodity_name}** to {target.mention}.{cap_text}{perk_text}",
             ephemeral=True,
         )
 

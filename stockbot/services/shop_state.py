@@ -11,10 +11,11 @@ _SHOP_COUNT = 5
 
 
 def current_shop_bucket() -> int:
-    period = max(1, int(get_app_config("TRADING_LIMITS_PERIOD")))
     raw = get_state_value("last_tick")
     tick = int(raw) if raw is not None else 0
-    return max(0, tick // period)
+    # Shop rotation is tick-bound (refreshes each market tick), not tied to
+    # trading-limit reset windows.
+    return max(0, tick)
 
 
 def _items_key(guild_id: int, bucket: int) -> str:

@@ -28,22 +28,25 @@ def setup_previewclose(tree: app_commands.CommandTree) -> None:
 
         guild = interaction.guild
         gm_id = int(get_app_config("GM_ID"))
+        mention_role_enabled = int(get_app_config("ANNOUNCE_MENTION_ROLE")) > 0
         await asyncio.to_thread(recalc_all_networth, guild.id)
         top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 50)
         if gm_id > 0:
             top = [row for row in top if int(row.get("user_id", 0)) != gm_id]
-        top = top[:3]
+        top = top[:5]
         announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         role = discord.utils.get(guild.roles, name=stonkers_role_name)
-        role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
+        role_mention = ""
+        if mention_role_enabled:
+            role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
 
-        lines = build_close_ranking_lines(top)
+        lines = build_close_ranking_lines(top, mention_users=mention_role_enabled)
 
         v2_view = build_market_close_v2_view(
             announcement_md,
             lines,
-            role_mention=f"{role_mention} *(preview)*",
+            role_mention=(f"{role_mention} *(preview)*" if role_mention else ""),
             timeout=300,
         )
         if v2_view is None:

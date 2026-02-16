@@ -28,6 +28,13 @@ def _cmp(actual: float, operator: str, expected: float) -> bool:
     return actual >= expected
 
 
+def _normalize_req_type(raw: object) -> str:
+    value = str(raw or "commodity_qty").strip().lower()
+    if value == "any_single_commodities_qty":
+        return "any_single_commodity_qty"
+    return value
+
+
 def _stack_count(actual: float, operator: str, expected: float) -> int:
     if expected <= 0:
         return 1
@@ -255,7 +262,7 @@ def evaluate_user_perks(
             group_ok = True
             stack_candidates: list[int] = []
             for req in rows:
-                req_type = str(req.get("req_type", "commodity_qty") or "commodity_qty").strip().lower()
+                req_type = _normalize_req_type(req.get("req_type", "commodity_qty"))
                 op = str(req.get("operator", ">=") or ">=").strip()
                 expected = int(float(req.get("value", 1) or 1))
                 if expected < 0:
@@ -444,9 +451,9 @@ async def _pick_announcement_channel(
 async def check_and_announce_perk_activations(
     interaction: Interaction,
     target_user_id: int | None = None,
-) -> None:
+) -> list[str]:
     if interaction.guild is None:
-        return
+        return []
 
     guild_id = interaction.guild.id
     user_id = int(target_user_id or interaction.user.id)
@@ -500,11 +507,11 @@ async def check_and_announce_perk_activations(
             set_state_value(_perk_state_key(guild_id, user_id, perk_id), "0")
 
     if not newly_activated_ids:
-        return
+        return []
 
     channel = await _pick_announcement_channel(interaction.guild, interaction.client)
     if channel is None:
-        return
+        return perk_names
     perk_names = [current_names.get(perk_id, f"perk#{perk_id}") for perk_id in newly_activated_ids]
     blocks: list[str] = []
     for perk_id, perk_name in zip(newly_activated_ids, perk_names):
@@ -521,5 +528,6 @@ async def check_and_announce_perk_activations(
         await channel.send(
             f"<@{user_id}>\n" + "\n\n".join(blocks)
         )
-    except Exception:
-        return
+    except Exception as exc:
+        print(f"[perks] failed to send activation announcement for guild={guild_id} user={user_id}: {exc}")
+    return perk_names

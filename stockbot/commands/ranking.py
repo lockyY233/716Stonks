@@ -27,8 +27,9 @@ def setup_ranking(tree: app_commands.CommandTree) -> None:
         lines: list[str] = []
         for idx, row in enumerate(top_rows, start=1):
             user_id = int(row["user_id"])
+            name = str(row.get("display_name", "")).strip() or f"User {user_id}"
             networth = float(row.get("networth", 0.0))
-            lines.append(f"**#{idx}** <@{user_id}> — `${networth:.2f}`")
+            lines.append(f"**#{idx}** {name} — `${networth:.2f}`")
 
         sender_id = interaction.user.id
         sender_rank = next(
@@ -37,9 +38,10 @@ def setup_ranking(tree: app_commands.CommandTree) -> None:
         )
         if sender_rank is not None and sender_rank > 5:
             sender_row = rows[sender_rank - 1]
+            sender_name = str(sender_row.get("display_name", "")).strip() or f"User {sender_id}"
             sender_networth = float(sender_row.get("networth", 0.0))
             lines.append("")
-            lines.append(f"**Your Rank:** #{sender_rank} <@{sender_id}> — `${sender_networth:.2f}`")
+            lines.append(f"**Your Rank:** #{sender_rank} {sender_name} — `${sender_networth:.2f}`")
 
         embed = Embed(
             title="Top 5 Networth Ranking",

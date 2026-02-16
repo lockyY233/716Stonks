@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import math
 from zoneinfo import ZoneInfo
 
 from stockbot.config.runtime import get_app_config
@@ -46,7 +47,8 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
         for company in companies:
             symbol = company["symbol"]
             base_price = float(company["base_price"])
-            slope = float(company["slope"])
+            # Slope is stored as percent-per-tick (e.g. 0.001 = +0.001% per tick).
+            slope_pct = float(company["slope"])
             # Drift is stored as percent per tick (e.g. 1.5 means +/-1.5%).
             drift_pct = abs(float(company["drift"]))
             drift_ratio = drift_pct / 100.0
@@ -60,8 +62,9 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
             ticks_since_last = max(1, tick_index - last_tick)
             flow = (pending_buy - pending_sell) / liquidity
             nonlinear_impact = (abs(flow) ** impact_power) * (1.0 if flow >= 0 else -1.0)
-            base_delta = (slope * ticks_since_last) + nonlinear_impact
-            next_base_price = max(0.01, base_price + base_delta)
+            trend_factor = math.exp((slope_pct / 100.0) * ticks_since_last)
+            trend_base_price = base_price * trend_factor
+            next_base_price = max(0.01, trend_base_price + nonlinear_impact)
             seed = stable_seed(f"{guild_id}:{symbol}")
             seed_low = stable_seed(f"{guild_id}:{symbol}:low")
             phase_fast = (seed % 10007) / 10007.0
@@ -81,7 +84,7 @@ def process_tick(tick_index: int, guild_ids: list[int]) -> None:
                 guild_id=guild_id,
                 symbol=symbol,
                 base_price=next_base_price,
-                slope=slope,
+                slope=slope_pct,
                 drift=drift_pct,
                 pending_buy=0.0,
                 pending_sell=0.0,

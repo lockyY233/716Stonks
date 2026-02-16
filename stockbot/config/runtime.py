@@ -10,9 +10,11 @@ from stockbot.config.settings import (
     DRIFT_NOISE_GAIN,
     DRIFT_NOISE_LOW_FREQ_RATIO,
     DRIFT_NOISE_LOW_GAIN,
+    OWNER_BUY_FEE_RATE,
     GM_ID,
     MARKET_CLOSE_HOUR,
     ANNOUNCEMENT_CHANNEL_ID,
+    ANNOUNCE_MENTION_ROLE,
     START_BALANCE,
     STONKERS_ROLE_NAME,
     TICK_INTERVAL,
@@ -70,6 +72,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         cast=int,
         description="Discord channel ID used for announcements; 0 means auto-pick.",
     ),
+    "ANNOUNCE_MENTION_ROLE": AppConfigSpec(
+        default=int(ANNOUNCE_MENTION_ROLE),
+        cast=int,
+        description="1 to mention the configured role at close; 0 to disable mention.",
+    ),
     "GM_ID": AppConfigSpec(
         default=int(GM_ID),
         cast=int,
@@ -125,6 +132,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         cast=str,
         description="JSON mapping of rarity->weight used for shop rotation.",
     ),
+    "OWNER_BUY_FEE_RATE": AppConfigSpec(
+        default=float(OWNER_BUY_FEE_RATE),
+        cast=float,
+        description="Owner payout percentage from non-owner buy transaction value.",
+    ),
 }
 
 
@@ -151,6 +163,8 @@ def _normalize(name: str, value: Any) -> Any:
         return text or str(STONKERS_ROLE_NAME)
     if name == "ANNOUNCEMENT_CHANNEL_ID":
         return max(0, int(value))
+    if name == "ANNOUNCE_MENTION_ROLE":
+        return 1 if int(value) > 0 else 0
     if name == "GM_ID":
         return max(0, int(value))
     if name == "DRIFT_NOISE_FREQUENCY":
@@ -193,6 +207,8 @@ def _normalize(name: str, value: Any) -> Any:
         if not normalized:
             return str(SHOP_RARITY_WEIGHTS)
         return json.dumps(normalized, separators=(",", ":"))
+    if name == "OWNER_BUY_FEE_RATE":
+        return max(0.0, min(100.0, float(value)))
     return value
 
 
@@ -252,6 +268,16 @@ def set_app_config(name: str, value: Any) -> Any:
             """,
             (_state_key(name), _to_string(normalized)),
         )
+        if name in {"MARKET_CLOSE_HOUR", "DISPLAY_TIMEZONE"}:
+            conn.execute(
+                "DELETE FROM app_state WHERE key LIKE 'close_event_sent:%'"
+            )
+            conn.execute(
+                "DELETE FROM app_state WHERE key LIKE 'close_event_armed:%'"
+            )
+            conn.execute(
+                "DELETE FROM app_state WHERE key LIKE 'rank_income_event:%'"
+            )
     return normalized
 
 

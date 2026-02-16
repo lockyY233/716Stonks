@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Job {{ job_id }} · 716Stonks</title>
+  <style>
+    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 980px; margin: 20px auto; padding: 0 14px; }
+    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .title { font-size:1.2rem; font-weight:700; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+    .row.one { grid-template-columns:1fr; }
+    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    textarea { min-height: 100px; resize: vertical; }
+    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
+    button:hover { background: var(--btnH); }
+    .muted { color:var(--muted); font-size:.85rem; }
+    table { width:100%; border-collapse: collapse; margin-top: 6px; }
+    th, td { border-bottom:1px solid #1f2937; padding:6px; text-align:left; font-size:.86rem; vertical-align: top; }
+    th { color: var(--muted); }
+    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    @media (max-width: 760px) {
+      .row { grid-template-columns: 1fr; }
+      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="top">
+        <div class="title">Job Editor · #{{ job_id }}</div>
+        <a id="backLink" href="/">Back to Dashboard</a>
+      </div>
+      <div class="row">
+        <div><label>Name</label><input id="name" /></div>
+        <div>
+          <label>Type</label>
+          <select id="job_type">
+            <option value="chance">chance</option>
+            <option value="quiz">quiz</option>
+            <option value="timed">timed</option>
+          </select>
+        </div>
+      </div>
+      <div class="row one">
+        <div><label>Description</label><textarea id="description"></textarea></div>
+      </div>
+      <div class="row">
+        <div><label>Enabled</label><select id="enabled"><option value="1">yes</option><option value="0">no</option></select></div>
+        <div><label>Duration Minutes (timed jobs)</label><input id="duration_minutes" type="number" step="0.01" min="0" /></div>
+      </div>
+      <div class="row">
+        <div><label>Updated At (read-only)</label><input id="updated_at" readonly /></div>
+        <div></div>
+      </div>
+      <div class="row one">
+        <div><label>Quiz Question (quiz jobs)</label><input id="quiz_question" /></div>
+      </div>
+
+      <div class="row one">
+        <div>
+          <label>Chance Outcomes (roll-based, first match wins)</label>
+          <table>
+            <thead><tr><th>Min Roll</th><th>Max Roll</th><th>Min Reward</th><th>Max Reward</th><th>Message</th><th>Action</th></tr></thead>
+            <tbody id="chanceRows"></tbody>
+          </table>
+          <button id="addChanceOutcomeBtn" type="button" style="margin-top:8px;">+ Add Chance Outcome</button>
+        </div>
+      </div>
+
+      <div class="row one">
+        <div>
+          <label>Quiz Dropdown Choices</label>
+          <table>
+            <thead><tr><th>Label</th><th>Value</th><th>Min Reward</th><th>Max Reward</th><th>Message</th><th>Action</th></tr></thead>
+            <tbody id="quizChoiceRows"></tbody>
+          </table>
+          <button id="addQuizChoiceBtn" type="button" style="margin-top:8px;">+ Add Quiz Choice</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div><label>Timed Min Reward</label><input id="timed_reward_min" type="number" step="0.01" value="0" /></div>
+        <div><label>Timed Max Reward</label><input id="timed_reward_max" type="number" step="0.01" value="0" /></div>
+      </div>
+      <div class="row">
+        <div><label>Timed Start Message</label><input id="timed_start_message" /></div>
+        <div><label>Timed Claim Message</label><input id="timed_claim_message" /></div>
+      </div>
+      <button id="saveBtn">Save Job</button>
+      <button id="deleteBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Job</button>
+      <div id="msg" class="muted" style="margin-top:8px;"></div>
+    </div>
+  </div>
+  <script>
+    const JOB_ID = Number({{ job_id|tojson }});
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    let chanceOutcomes = [];
+    let quizChoices = [];
+    function el(id){ return document.getElementById(id); }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function wireBackLink() {
+      const back = el("backLink");
+      if (!back) return;
+      const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "jobs");
+      back.href = withAuthToken(`/?tab=${encodeURIComponent(tab)}`);
+    }
+    function esc(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+    }
+    function renderChanceRows() {
+      const body = el("chanceRows");
+      if (!chanceOutcomes.length) {
+        body.innerHTML = '<tr><td colspan="5" class="muted">No custom chance outcomes.</td></tr>';
+        return;
+      }
+      body.innerHTML = chanceOutcomes.map((o, i) => `
+        <tr>
+          <td><input data-chance-min="${i}" type="number" step="0.01" value="${Number(o.min_roll ?? 0)}" /></td>
+          <td><input data-chance-max="${i}" type="number" step="0.01" value="${Number(o.max_roll ?? 100)}" /></td>
+          <td><input data-chance-rmin="${i}" type="number" step="0.01" value="${Number(o.reward_min ?? o.reward ?? 0)}" /></td>
+          <td><input data-chance-rmax="${i}" type="number" step="0.01" value="${Number(o.reward_max ?? o.reward ?? 0)}" /></td>
+          <td><input data-chance-message="${i}" value="${esc(String(o.message || ""))}" /></td>
+          <td><button data-chance-del="${i}" type="button">Delete</button></td>
+        </tr>
+      `).join("");
+      document.querySelectorAll("button[data-chance-del]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const i = Number(btn.getAttribute("data-chance-del"));
+          if (!Number.isFinite(i)) return;
+          chanceOutcomes.splice(i, 1);
+          renderChanceRows();
+        });
+      });
+    }
+    function collectChanceRows() {
+      chanceOutcomes = Array.from(document.querySelectorAll("[data-chance-min]")).map((node) => {
+        const i = Number(node.getAttribute("data-chance-min"));
+        const min = Number(document.querySelector(`[data-chance-min="${i}"]`)?.value || 0);
+        const max = Number(document.querySelector(`[data-chance-max="${i}"]`)?.value || 100);
+        const rewardMin = Number(document.querySelector(`[data-chance-rmin="${i}"]`)?.value || 0);
+        const rewardMax = Number(document.querySelector(`[data-chance-rmax="${i}"]`)?.value || 0);
+        const message = String(document.querySelector(`[data-chance-message="${i}"]`)?.value || "");
+        return {
+          min_roll: Number.isFinite(min) ? min : 0,
+          max_roll: Number.isFinite(max) ? max : 100,
+          reward_min: Number.isFinite(rewardMin) ? rewardMin : 0,
+          reward_max: Number.isFinite(rewardMax) ? rewardMax : 0,
+          message,
+        };
+      });
+    }
+    function renderQuizChoiceRows() {
+      const body = el("quizChoiceRows");
+      if (!quizChoices.length) {
+        body.innerHTML = '<tr><td colspan="5" class="muted">No quiz choices configured.</td></tr>';
+        return;
+      }
+      body.innerHTML = quizChoices.map((o, i) => `
+        <tr>
+          <td><input data-q-label="${i}" value="${esc(String(o.label || ""))}" /></td>
+          <td><input data-q-value="${i}" value="${esc(String(o.value || ""))}" /></td>
+          <td><input data-q-rmin="${i}" type="number" step="0.01" value="${Number(o.reward_min ?? o.reward ?? 0)}" /></td>
+          <td><input data-q-rmax="${i}" type="number" step="0.01" value="${Number(o.reward_max ?? o.reward ?? 0)}" /></td>
+          <td><input data-q-message="${i}" value="${esc(String(o.message || ""))}" /></td>
+          <td><button data-q-del="${i}" type="button">Delete</button></td>
+        </tr>
+      `).join("");
+      document.querySelectorAll("button[data-q-del]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const i = Number(btn.getAttribute("data-q-del"));
+          if (!Number.isFinite(i)) return;
+          quizChoices.splice(i, 1);
+          renderQuizChoiceRows();
+        });
+      });
+    }
+    function collectQuizChoiceRows() {
+      quizChoices = Array.from(document.querySelectorAll("[data-q-label]")).map((node) => {
+        const i = Number(node.getAttribute("data-q-label"));
+        const label = String(document.querySelector(`[data-q-label="${i}"]`)?.value || "").trim();
+        const value = String(document.querySelector(`[data-q-value="${i}"]`)?.value || "").trim();
+        const rewardMin = Number(document.querySelector(`[data-q-rmin="${i}"]`)?.value || 0);
+        const rewardMax = Number(document.querySelector(`[data-q-rmax="${i}"]`)?.value || 0);
+        const message = String(document.querySelector(`[data-q-message="${i}"]`)?.value || "");
+        return {
+          label,
+          value,
+          reward_min: Number.isFinite(rewardMin) ? rewardMin : 0,
+          reward_max: Number.isFinite(rewardMax) ? rewardMax : 0,
+          message,
+        };
+      }).filter((x) => x.label);
+    }
+    async function load() {
+      const res = await fetch(withAuthToken(`/api/job/${encodeURIComponent(JOB_ID)}`), { cache: "no-store" });
+      if (!res.ok) {
+        el("msg").textContent = "Job not found.";
+        return;
+      }
+      const data = await res.json();
+      const job = data.job || {};
+      el("name").value = String(job.name || "");
+      el("description").value = String(job.description || "");
+      el("job_type").value = String(job.job_type || "chance");
+      el("enabled").value = Number(job.enabled || 0) === 1 ? "1" : "0";
+      el("duration_minutes").value = String(Number(job.duration_minutes || job.duration_ticks || 0));
+      el("quiz_question").value = String(job.quiz_question || "");
+      el("updated_at").value = String(job.updated_at || "");
+      let cfg = {};
+      try { cfg = JSON.parse(String(job.config_json || "{}")); } catch (_e) { cfg = {}; }
+      chanceOutcomes = Array.isArray(cfg.chance_outcomes) ? cfg.chance_outcomes : [];
+      quizChoices = Array.isArray(cfg.quiz_choices) ? cfg.quiz_choices : [];
+      el("timed_reward_min").value = Number(cfg.timed_reward_min || 0).toFixed(2);
+      el("timed_reward_max").value = Number(cfg.timed_reward_max || 0).toFixed(2);
+      el("timed_start_message").value = String(cfg.timed_start_message || "");
+      el("timed_claim_message").value = String(cfg.timed_claim_message || "");
+      renderChanceRows();
+      renderQuizChoiceRows();
+    }
+    async function save() {
+      collectChanceRows();
+      collectQuizChoiceRows();
+      const cfg = {
+        chance_outcomes: chanceOutcomes,
+        quiz_choices: quizChoices,
+        timed_reward_min: Number(el("timed_reward_min").value || "0"),
+        timed_reward_max: Number(el("timed_reward_max").value || "0"),
+        timed_start_message: String(el("timed_start_message").value || ""),
+        timed_claim_message: String(el("timed_claim_message").value || ""),
+      };
+      const payload = {
+        name: String(el("name").value || "").trim(),
+        description: String(el("description").value || ""),
+        job_type: String(el("job_type").value || "chance"),
+        enabled: Number(el("enabled").value || "0"),
+        duration_minutes: Number(el("duration_minutes").value || "0"),
+        quiz_question: String(el("quiz_question").value || ""),
+        quiz_answer: "",
+        config_json: cfg,
+      };
+      const res = await fetch(withAuthToken(`/api/job/${encodeURIComponent(JOB_ID)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Save failed." }));
+        el("msg").textContent = String(err.error || "Save failed.");
+        return;
+      }
+      el("msg").textContent = "Saved.";
+      await load();
+    }
+    async function removeJob() {
+      if (!window.confirm("Delete this job?")) return;
+      const res = await fetch(withAuthToken(`/api/job/${encodeURIComponent(JOB_ID)}`), { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Delete failed." }));
+        el("msg").textContent = String(err.error || "Delete failed.");
+        return;
+      }
+      window.location.href = withAuthToken("/?tab=jobs");
+    }
+    el("addChanceOutcomeBtn").addEventListener("click", () => {
+      chanceOutcomes.push({ min_roll: 0, max_roll: 100, reward_min: 0, reward_max: 0, message: "" });
+      renderChanceRows();
+    });
+    el("addQuizChoiceBtn").addEventListener("click", () => {
+      const idx = quizChoices.length + 1;
+      quizChoices.push({ label: `Choice ${idx}`, value: `choice_${idx}`, reward_min: 0, reward_max: 0, message: "" });
+      renderQuizChoiceRows();
+    });
+    el("saveBtn").addEventListener("click", save);
+    el("deleteBtn").addEventListener("click", removeJob);
+    wireBackLink();
+    load();
+  </script>
+</body>
+</html>

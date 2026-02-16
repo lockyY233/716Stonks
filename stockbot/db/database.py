@@ -43,6 +43,7 @@ def init_db() -> None:
                 guild_id INTEGER NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL DEFAULT 0,
                 location TEXT NOT NULL DEFAULT '',
                 industry TEXT NOT NULL DEFAULT '',
                 founded_year INTEGER NOT NULL DEFAULT 2000,
@@ -60,6 +61,16 @@ def init_db() -> None:
                 last_tick INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, symbol)
+            );
+
+            CREATE TABLE IF NOT EXISTS company_owners (
+                guild_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, symbol, user_id),
+                FOREIGN KEY (guild_id, symbol)
+                    REFERENCES companies (guild_id, symbol)
+                    ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS price_history (
@@ -209,6 +220,39 @@ def init_db() -> None:
                     REFERENCES perks (id)
                     ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                job_type TEXT NOT NULL DEFAULT 'chance',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                cooldown_ticks INTEGER NOT NULL DEFAULT 0,
+                reward_min REAL NOT NULL DEFAULT 0,
+                reward_max REAL NOT NULL DEFAULT 0,
+                success_rate REAL NOT NULL DEFAULT 1.0,
+                duration_ticks INTEGER NOT NULL DEFAULT 0,
+                duration_minutes REAL NOT NULL DEFAULT 0,
+                quiz_question TEXT NOT NULL DEFAULT '',
+                quiz_answer TEXT NOT NULL DEFAULT '',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_jobs (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                next_available_tick INTEGER NOT NULL DEFAULT 0,
+                running_until_tick INTEGER NOT NULL DEFAULT 0,
+                running_until_epoch REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, job_id),
+                FOREIGN KEY (job_id)
+                    REFERENCES jobs (id)
+                    ON DELETE CASCADE
+            );
             """
         )
         _ensure_users_bank_type(conn)
@@ -217,12 +261,15 @@ def init_db() -> None:
         _ensure_networth_column(conn)
         _ensure_owe_column(conn)
         _ensure_company_columns(conn)
+        _ensure_company_owners_table(conn)
+        _backfill_company_owners(conn)
         _ensure_price_history_columns(conn)
         _ensure_commodities_tables(conn)
         _ensure_bank_requests_table(conn)
         _ensure_feedback_table(conn)
         _ensure_close_news_table(conn)
         _ensure_perks_tables(conn)
+        _ensure_jobs_tables(conn)
 
 
 def _ensure_rank_column(conn: sqlite3.Connection) -> None:
@@ -558,6 +605,64 @@ def _ensure_perks_tables(conn: sqlite3.Connection) -> None:
             """
         )
 
+    # Canonicalize legacy alias to avoid req_type confusion.
+    conn.execute(
+        """
+        UPDATE perk_requirements
+        SET req_type = 'any_single_commodity_qty'
+        WHERE LOWER(TRIM(req_type)) = 'any_single_commodities_qty'
+        """
+    )
+
+
+def _ensure_jobs_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            job_type TEXT NOT NULL DEFAULT 'chance',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            cooldown_ticks INTEGER NOT NULL DEFAULT 0,
+            reward_min REAL NOT NULL DEFAULT 0,
+            reward_max REAL NOT NULL DEFAULT 0,
+            success_rate REAL NOT NULL DEFAULT 1.0,
+            duration_ticks INTEGER NOT NULL DEFAULT 0,
+            duration_minutes REAL NOT NULL DEFAULT 0,
+            quiz_question TEXT NOT NULL DEFAULT '',
+            quiz_answer TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            UNIQUE(guild_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_jobs (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            job_id INTEGER NOT NULL,
+            next_available_tick INTEGER NOT NULL DEFAULT 0,
+            running_until_tick INTEGER NOT NULL DEFAULT 0,
+            running_until_epoch REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, job_id),
+            FOREIGN KEY (job_id)
+                REFERENCES jobs (id)
+                ON DELETE CASCADE
+        );
+        """
+    )
+    jobs_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs);").fetchall()}
+    if jobs_cols and "duration_minutes" not in jobs_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN duration_minutes REAL NOT NULL DEFAULT 0;")
+        conn.execute(
+            "UPDATE jobs SET duration_minutes = CAST(duration_ticks AS REAL) WHERE duration_minutes <= 0;"
+        )
+
+    user_jobs_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_jobs);").fetchall()}
+    if user_jobs_cols and "running_until_epoch" not in user_jobs_cols:
+        conn.execute("ALTER TABLE user_jobs ADD COLUMN running_until_epoch REAL NOT NULL DEFAULT 0;")
+
 
 def _ensure_company_columns(conn: sqlite3.Connection) -> None:
     columns = {
@@ -597,6 +702,10 @@ def _ensure_company_columns(conn: sqlite3.Connection) -> None:
     if "location" not in columns:
         conn.execute(
             "ALTER TABLE companies ADD COLUMN location TEXT NOT NULL DEFAULT '';"
+        )
+    if "owner_user_id" not in columns:
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN owner_user_id INTEGER NOT NULL DEFAULT 0;"
         )
     if "industry" not in columns:
         conn.execute(
@@ -644,6 +753,33 @@ def _ensure_price_history_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_company_owners_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS company_owners (
+            guild_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, symbol, user_id),
+            FOREIGN KEY (guild_id, symbol)
+                REFERENCES companies (guild_id, symbol)
+                ON DELETE CASCADE
+        );
+        """
+    )
+
+
+def _backfill_company_owners(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        INSERT OR IGNORE INTO company_owners (guild_id, symbol, user_id)
+        SELECT guild_id, symbol, owner_user_id
+        FROM companies
+        WHERE owner_user_id > 0;
+        """
+    )
+
+
 def _migrate_companies_table(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -651,6 +787,7 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
+            owner_user_id INTEGER NOT NULL DEFAULT 0,
             location TEXT NOT NULL DEFAULT '',
             industry TEXT NOT NULL DEFAULT '',
             founded_year INTEGER NOT NULL DEFAULT 2000,
@@ -674,6 +811,7 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            owner_user_id,
             location,
             industry,
             founded_year,
@@ -695,6 +833,7 @@ def _migrate_companies_table(conn: sqlite3.Connection) -> None:
             0 AS guild_id,
             symbol,
             name,
+            0 AS owner_user_id,
             '' AS location,
             '' AS industry,
             2000 AS founded_year,
@@ -726,6 +865,7 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
+            owner_user_id INTEGER NOT NULL DEFAULT 0,
             location TEXT NOT NULL DEFAULT '',
             industry TEXT NOT NULL DEFAULT '',
             founded_year INTEGER NOT NULL DEFAULT 2000,
@@ -749,6 +889,7 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            owner_user_id,
             location,
             industry,
             founded_year,
@@ -770,6 +911,7 @@ def _migrate_companies_remove_offset(conn: sqlite3.Connection) -> None:
             guild_id,
             symbol,
             name,
+            0 AS owner_user_id,
             '' AS location,
             '' AS industry,
             2000 AS founded_year,

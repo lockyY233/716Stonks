@@ -1,0 +1,1816 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>716Stonks Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a; --line: #1f2937; --text: #e5e7eb; --muted: #94a3b8;
+      --up: #22c55e; --down: #ef4444; --btn:#1e293b; --btnH:#334155;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: radial-gradient(1200px 600px at 80% -10%, #1d4ed822, transparent), var(--bg); color: var(--text); }
+    .wrap { max-width: 1400px; margin: 20px auto; padding: 0 14px; display: grid; grid-template-columns: 320px 1fr; gap: 14px; }
+    .card { background: linear-gradient(180deg, #0b1220, #0a101c); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px #00000033; }
+    .head { padding: 14px 14px 8px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .title { font-size: 1.1rem; font-weight: 700; }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .side { padding: 10px; max-height: calc(100vh - 40px); overflow: auto; }
+    .btnrow { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
+    button, a.btn { background: var(--btn); border: 1px solid #334155; color: var(--text); padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: .86rem; text-decoration: none; text-align: center; }
+    button:hover, a.btn:hover { background: var(--btnH); }
+    button.active { border-color: #22c55e; }
+    button.alert { background: #7f1d1d; border-color: #ef4444; color: #fee2e2; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { text-align: left; font-size: .84rem; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); padding: 10px 8px; background: #0b1323; position: sticky; top: 0; }
+    tbody td { padding: 9px 8px; border-bottom: 1px solid #111827; font-size: .92rem; }
+    tbody tr:hover { background: #13203a; }
+    tbody tr.clickable { cursor: pointer; }
+    .thumb { width: 52px; height: 52px; border-radius: 8px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .up { color: var(--up); font-weight: 600; }
+    .down { color: var(--down); font-weight: 600; }
+    .empty { color: var(--muted); text-align: center; padding: 20px; }
+    .tableWrap { overflow: auto; width: 100%; }
+    .statsBar {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      padding: 10px 14px 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #0a1324;
+    }
+    .stat {
+      border: 1px solid #263246;
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #0c1629;
+    }
+    .statLabel { color: var(--muted); font-size: .78rem; }
+    .statValue { font-size: 1rem; font-weight: 700; margin-top: 2px; }
+    [data-company-open]:hover {
+      background: #1e3a8a66;
+      color: #e0f2fe;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .rarity-common { color: #ffffff; font-weight: 600; }
+    .rarity-uncommon { color: #22c55e; font-weight: 600; }
+    .rarity-rare { color: #38bdf8; font-weight: 600; }
+    .rarity-legendary { color: #c084fc; font-weight: 600; }
+    .rarity-exotic { color: #f59e0b; font-weight: 700; }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+      .side { max-height: none; }
+      .head { flex-direction: column; align-items: flex-start; }
+      thead th, tbody td { white-space: nowrap; }
+      .statsBar { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="head">
+        <div class="title">Views</div>
+        <div class="muted">Tabs</div>
+      </div>
+      <div class="side">
+        <div class="btnrow">
+          <button id="showCompanies" class="active">Show Companies</button>
+          <button id="showCommodities">Show Commodities</button>
+          <button id="showShop">Shop</button>
+          <button id="showPlayers">Show Players</button>
+          <button id="showPerks">Show Perks</button>
+          <button id="showJobs">Jobs</button>
+          <button id="showAnnouncements">Announcements</button>
+          <button id="showFeedback">Feedback</button>
+          <button id="showBankActions">Bank Actions</button>
+          <button id="showActionHistory">Action History</button>
+          <button id="showConfigs">Show App Configs</button>
+          <button id="showServerSettings">Server Settings</button>
+          <a id="dbAccessBtn" class="btn" href="{{ db_access_url }}" target="_blank" rel="noopener">Open Database Access</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="head">
+        <div class="title" id="tableTitle">Companies</div>
+        <div class="muted">refresh 2s · last: <span id="last">-</span></div>
+      </div>
+      <div class="statsBar">
+        <div class="stat">
+          <div class="statLabel">Until Close</div>
+          <div class="statValue" id="statUntilClose">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Until Next Reset</div>
+          <div class="statValue" id="statUntilReset">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Companies</div>
+          <div class="statValue" id="statCompanies">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Users</div>
+          <div class="statValue" id="statUsers">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Ticking</div>
+          <div class="statValue" id="statTicking">-</div>
+        </div>
+        <div class="stat">
+          <div class="statLabel">Close Gate</div>
+          <div class="statValue" id="statCloseGate">-</div>
+        </div>
+      </div>
+      <div class="tableWrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="rows">
+            <tr><td class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    const READ_ONLY_MODE = {{ "true" if read_only_mode else "false" }};
+    const VALID_TABS = new Set(["companies", "commodities", "shop", "players", "perks", "jobs", "announcements", "feedback", "bankActions", "actionHistory", "configs", "serverSettings"]);
+    function normalizeTab(tab) {
+      const t = String(tab || "").trim();
+      return VALID_TABS.has(t) ? t : "companies";
+    }
+    let currentTab = normalizeTab(
+      new URLSearchParams(window.location.search).get("tab")
+      || localStorage.getItem("dashboard_tab")
+      || "companies"
+    );
+    if (READ_ONLY_MODE) currentTab = "companies";
+    let pollTimer = null;
+    let pollMs = 2000;
+    let untilCloseSeconds = null;
+    let untilResetSeconds = null;
+    const ET_TIMEZONE = "America/New_York";
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    function fmtMoney(v) { return "$" + Number(v).toFixed(2); }
+    function fmtNum(v, d=4) { return Number(v).toFixed(d); }
+    function fmtHMS(totalSeconds) {
+      const s = Math.max(0, Number(totalSeconds) || 0);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = Math.floor(s % 60);
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    }
+    function esc(text) {
+      return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function rarityClass(r) {
+      const t = String(r || "common").toLowerCase().trim();
+      if (t === "uncommon") return "rarity-uncommon";
+      if (t === "rare") return "rarity-rare";
+      if (t === "legendary") return "rarity-legendary";
+      if (t === "exotic") return "rarity-exotic";
+      return "rarity-common";
+    }
+    function fmtEtDate(value) {
+      const dt = value ? new Date(value) : new Date();
+      if (Number.isNaN(dt.getTime())) return String(value || "-");
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: ET_TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(dt);
+      const map = {};
+      parts.forEach((p) => { map[p.type] = p.value; });
+      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
+    }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function withTab(url, tab) {
+      const t = normalizeTab(tab);
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}tab=${encodeURIComponent(t)}`;
+    }
+    function gotoWithAuth(url) {
+      window.location.href = withAuthToken(withTab(url, currentTab));
+    }
+    function applyReadOnlyLayout() {
+      if (!READ_ONLY_MODE) return;
+      const ids = [
+        "showCommodities",
+        "showShop",
+        "showPlayers",
+        "showPerks",
+        "showJobs",
+        "showAnnouncements",
+        "showFeedback",
+        "showBankActions",
+        "showActionHistory",
+        "showConfigs",
+        "showServerSettings",
+        "dbAccessBtn",
+      ];
+      ids.forEach((id) => {
+        const node = document.getElementById(id);
+        if (node) node.style.display = "none";
+      });
+      setCurrentTab("companies");
+    }
+    function setCurrentTab(tab) {
+      currentTab = normalizeTab(tab);
+      localStorage.setItem("dashboard_tab", currentTab);
+      const qp = new URLSearchParams(window.location.search);
+      qp.set("tab", currentTab);
+      const query = qp.toString();
+      history.replaceState(null, "", `${window.location.pathname}${query ? "?" + query : ""}`);
+    }
+    let pauseAnnouncementRefreshUntil = 0;
+    function announcementRefreshPaused() {
+      return currentTab === "announcements" && Date.now() < pauseAnnouncementRefreshUntil;
+    }
+    function setButtons() {
+      document.querySelectorAll("button[id^='show']").forEach((btn) => btn.classList.remove("active"));
+      if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
+      if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
+      if (currentTab === "shop") document.getElementById("showShop").classList.add("active");
+      if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
+      if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
+      if (currentTab === "jobs") document.getElementById("showJobs").classList.add("active");
+      if (currentTab === "announcements") document.getElementById("showAnnouncements").classList.add("active");
+      if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
+      if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
+      if (currentTab === "actionHistory") document.getElementById("showActionHistory").classList.add("active");
+      if (currentTab === "configs") document.getElementById("showConfigs").classList.add("active");
+      if (currentTab === "serverSettings") document.getElementById("showServerSettings").classList.add("active");
+    }
+    function sparklineSvg(values, width, height, stroke) {
+      if (!values || values.length < 2) return '<span class="muted">-</span>';
+      const min = Math.min(...values), max = Math.max(...values);
+      const pad = 2, range = (max - min) || 1, step = (width - pad * 2) / Math.max(1, values.length - 1);
+      const points = values.map((v, i) => {
+        const x = pad + i * step;
+        const y = pad + (height - pad * 2) * (1 - (v - min) / range);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg"><polyline fill="none" stroke="${stroke}" stroke-width="2.2" points="${points}" /></svg>`;
+    }
+    function renderCompanies(rows) {
+      document.getElementById("tableTitle").textContent = "Companies";
+      const headHtml = READ_ONLY_MODE
+        ? `<tr><th></th><th>Symbol</th><th>Name</th><th>Trend</th><th>Current</th><th>Change vs Base</th><th>Action</th></tr>`
+        : `<tr><th></th><th>Symbol</th><th>Name</th><th>Trend</th><th>Current</th><th>Base</th><th>Change vs Base</th><th>Slope (%/tick)</th><th>Action</th></tr>`;
+      document.getElementById("thead").innerHTML = headHtml;
+      const tbody = document.getElementById("rows");
+      const controlRow = READ_ONLY_MODE ? "" : `<tr>
+        <td colspan="9" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addCompanyBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Company</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + `<tr><td colspan="${READ_ONLY_MODE ? 8 : 9}" class="empty">No companies found.</td></tr>`;
+      } else {
+        tbody.innerHTML = controlRow + rows.map(r => {
+          const current = Number(r.current_price), base = Number(r.base_price);
+          const pct = base !== 0 ? ((current - base) / base) * 100 : 0;
+          const cls = pct >= 0 ? "up" : "down";
+          const sign = pct >= 0 ? "+" : "";
+          const spark = sparklineSvg(Array.isArray(r.history_prices) ? r.history_prices : [], 170, 36, pct >= 0 ? "#22c55e" : "#ef4444");
+          const detailsHtml = `
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;">
+              <div><span class="muted">Founded</span><div>${esc(String(r.founded_year ?? "-"))}</div></div>
+              <div><span class="muted">Location</span><div>${esc(String(r.location || "-"))}</div></div>
+              <div><span class="muted">Industry</span><div>${esc(String(r.industry || "-"))}</div></div>
+              <div><span class="muted">Evaluation</span><div>${esc(String(r.evaluation || "-"))}</div></div>
+            </div>
+            <div style="margin-top:8px;"><span class="muted">Description</span><div style="margin-top:2px;">${esc(String(r.description || "-"))}</div></div>
+          `;
+          const rowHtml = READ_ONLY_MODE
+            ? `<tr data-symbol="${esc(r.symbol)}">
+            <td><button data-company-expand="${esc(r.symbol)}" aria-expanded="false" style="padding:4px 8px;min-width:28px;" title="Expand details">▶</button></td>
+            <td class="mono"><strong>${esc(r.symbol)}</strong></td>
+            <td>${esc(r.name || "")}</td>
+            <td>${spark}</td>
+            <td class="mono">${fmtMoney(current)}</td>
+            <td class="mono ${cls}">${sign}${pct.toFixed(2)}%</td>
+            <td><span class="muted">Read-only</span></td>
+          </tr>`
+            : `<tr data-symbol="${esc(r.symbol)}">
+            <td><button data-company-expand="${esc(r.symbol)}" aria-expanded="false" style="padding:4px 8px;min-width:28px;" title="Expand details">▶</button></td>
+            <td class="mono" data-company-open="${esc(r.symbol)}" style="cursor:pointer;"><strong>${esc(r.symbol)}</strong></td>
+            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${esc(r.name || "")}</td>
+            <td data-company-open="${esc(r.symbol)}" style="cursor:pointer;">${spark}</td>
+            <td class="mono">${fmtMoney(current)}</td>
+            <td><input class="mono" data-company-base="${esc(r.symbol)}" type="number" step="0.01" value="${Number(base).toFixed(2)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
+            <td class="mono ${cls}">${sign}${pct.toFixed(2)}%</td>
+            <td><input class="mono" data-company-slope="${esc(r.symbol)}" type="number" step="0.0001" value="${fmtNum(r.slope)}" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" /></td>
+            <td><button data-company-save="${esc(r.symbol)}" style="padding:6px 10px;">Save</button></td>
+          </tr>`;
+          return `${rowHtml}
+          <tr data-company-detail="${esc(r.symbol)}" style="display:none;background:#0b1323;">
+            <td></td>
+            <td colspan="${READ_ONLY_MODE ? 6 : 8}" style="padding:10px 8px;">${detailsHtml}</td>
+          </tr>`;
+        }).join("");
+      }
+      document.querySelectorAll("button[data-company-expand]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const sym = btn.getAttribute("data-company-expand");
+          if (!sym) return;
+          const detail = document.querySelector(`tr[data-company-detail="${CSS.escape(sym)}"]`);
+          if (!detail) return;
+          const open = detail.style.display !== "none";
+          detail.style.display = open ? "none" : "table-row";
+          btn.textContent = open ? "▶" : "▼";
+          btn.setAttribute("aria-expanded", open ? "false" : "true");
+        });
+      });
+      const addBtn = document.getElementById("addCompanyBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const symbol = (window.prompt("Symbol (e.g. ATEST):", "") || "").trim().toUpperCase();
+          if (!symbol) return;
+          const name = (window.prompt("Company name:", symbol) || "").trim();
+          if (!name) return;
+          const baseRaw = window.prompt("Base price:", "1.00");
+          if (baseRaw === null) return;
+          const slopeRaw = window.prompt("Slope (% per tick):", "0.0010");
+          if (slopeRaw === null) return;
+          const base = Number(baseRaw);
+          const slope = Number(slopeRaw);
+          if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(slope)) {
+            alert("Invalid base/slope.");
+            return;
+          }
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/company"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol, name, base_price: base, slope }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              await loadCompanies();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("[data-company-open]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const sym = el.getAttribute("data-company-open");
+          gotoWithAuth(`/company/${encodeURIComponent(sym || "")}`);
+        });
+      });
+      document.querySelectorAll("button[data-company-save]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const sym = btn.getAttribute("data-company-save");
+          if (!sym) return;
+          const baseInput = document.querySelector(`input[data-company-base="${CSS.escape(sym)}"]`);
+          const slopeInput = document.querySelector(`input[data-company-slope="${CSS.escape(sym)}"]`);
+          if (!baseInput || !slopeInput) return;
+          const payload = {
+            base_price: Number(baseInput.value),
+            slope: Number(slopeInput.value),
+          };
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = "Saving...";
+          try {
+            const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(sym)}/update`), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(()=>({error:"Failed"}));
+              btn.textContent = err.error || "Failed";
+            } else {
+              btn.textContent = "Saved";
+              setTimeout(() => { btn.textContent = originalText; }, 800);
+              await loadCompanies();
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+    function renderCommodities(rows) {
+      document.getElementById("tableTitle").textContent = "Commodities";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Spawn Weight</th><th>Tags</th><th>Description</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addCommodityBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Commodity</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No commodities found.</td></tr>';
+      } else {
+        const fallbackSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52"><rect width="100%" height="100%" fill="#0b1323"/><text x="50%" y="50%" fill="#94a3b8" font-size="9" text-anchor="middle" dominant-baseline="middle">No Img</text></svg>';
+        const fallback = `data:image/svg+xml;utf8,${encodeURIComponent(fallbackSvg)}`;
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-commodity="${esc(r.name)}">
+          <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
+          <td><strong>${esc(r.name)}</strong></td>
+          <td class="mono">${fmtMoney(r.price)}</td>
+          <td><span class="${rarityClass(r.rarity)}">${esc((r.rarity || "common").toUpperCase())}</span></td>
+          <td class="mono">${esc(String(Number(r.spawn_weight_override || 0).toFixed(4)))}</td>
+          <td>${esc(String((r.tags || []).join(", ")))}</td>
+          <td>${esc(r.description || "")}</td>
+        </tr>`).join("");
+      }
+      const addBtn = document.getElementById("addCommodityBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const name = (window.prompt("Commodity name:", "") || "").trim();
+          if (!name) return;
+          const priceRaw = window.prompt("Price:", "1.00");
+          if (priceRaw === null) return;
+          const rarity = (window.prompt("Rarity (common/uncommon/rare/legendary/exotic):", "common") || "common").trim().toLowerCase();
+          const spawnWeightRaw = window.prompt("Spawn weight override (0 = rarity default):", "0");
+          if (spawnWeightRaw === null) return;
+          const image_url = (window.prompt("Image URL (optional):", "") || "").trim();
+          const tags = (window.prompt("Tags (comma-separated, optional):", "") || "").trim();
+          const description = (window.prompt("Description (optional):", "") || "").trim();
+          const price = Number(priceRaw);
+          const spawn_weight_override = Number(spawnWeightRaw);
+          if (!Number.isFinite(price) || price <= 0) {
+            alert("Invalid price.");
+            return;
+          }
+          if (!Number.isFinite(spawn_weight_override) || spawn_weight_override < 0) {
+            alert("Invalid spawn weight override.");
+            return;
+          }
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/commodity"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, price, rarity, spawn_weight_override, image_url, tags, description }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              await loadCommodities();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("tr[data-commodity]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const name = tr.getAttribute("data-commodity");
+          gotoWithAuth(`/commodity/${encodeURIComponent(name)}`);
+        });
+      });
+    }
+    function renderPlayers(rows) {
+      document.getElementById("tableTitle").textContent = "Players";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>User</th><th>Rank</th><th>Bank</th><th>Networth</th><th>Owe</th><th>Trading Limit</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No players found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr class="clickable" data-user="${esc(r.user_id)}">
+        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(r.user_id)}</div></td>
+        <td>${esc(r.rank || "-")}</td>
+        <td class="mono">${fmtMoney(r.bank)}</td>
+        <td class="mono">${fmtMoney(r.networth)}</td>
+        <td class="mono">${fmtMoney(r.owe || 0)}</td>
+        <td class="mono">${
+          r.trade_limit_enabled
+            ? `${Number(r.trade_limit_remaining || 0)}/${Number(r.trade_limit_limit || 0)}`
+            : "Disabled"
+        }</td>
+      </tr>`).join("");
+      document.querySelectorAll("tr[data-user]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const uid = tr.getAttribute("data-user");
+          gotoWithAuth(`/player/${encodeURIComponent(uid)}`);
+        });
+      });
+    }
+    function renderShop(data) {
+      const rows = Array.isArray(data.items) ? data.items : [];
+      const all = Array.isArray(data.available) ? data.available : [];
+      document.getElementById("tableTitle").textContent = `Shop (Bucket ${Number(data.bucket || 0)})`;
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Slot</th><th>Name</th><th>Price</th><th>Rarity</th><th>Availability</th><th>Swap To</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="refreshShopBtn" style="padding:6px 10px;background:#1d4ed8;border-color:#2563eb;color:#dbeafe;">Refresh Random Set</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No active shop items.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r, idx) => {
+          const name = String(r.name || "");
+          const options = all
+            .filter((n) => n !== name)
+            .map((n) => `<option value="${esc(n)}">${esc(n)}</option>`)
+            .join("");
+          return `<tr>
+            <td class="mono">${idx + 1}</td>
+            <td><strong>${esc(name)}</strong></td>
+            <td class="mono">${fmtMoney(r.price || 0)}</td>
+            <td><span class="${rarityClass(r.rarity)}">${esc(String(r.rarity || "common").toUpperCase())}</span></td>
+            <td class="${r.in_stock ? 'up' : 'down'}">${r.in_stock ? "IN STOCK" : "OUT OF STOCK"}</td>
+            <td>
+              <select data-shop-swap-target="${idx}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                <option value="">(choose)</option>
+                ${options}
+              </select>
+            </td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button data-shop-toggle="${esc(name)}" style="padding:6px 10px;${r.in_stock ? "background:#7f1d1d;border-color:#ef4444;color:#fee2e2;" : "background:#14532d;border-color:#22c55e;color:#dcfce7;"}">${r.in_stock ? "Set OUT" : "Set IN"}</button>
+              <button data-shop-swap="${idx}" style="padding:6px 10px;">Swap</button>
+            </td>
+          </tr>`;
+        }).join("");
+      }
+
+      const refreshBtn = document.getElementById("refreshShopBtn");
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", async () => {
+          refreshBtn.disabled = true;
+          const old = refreshBtn.textContent;
+          refreshBtn.textContent = "Refreshing...";
+          try {
+            const res = await fetch(withAuthToken("/api/shop/refresh"), { method: "POST" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Refresh failed" }));
+              alert(err.error || "Refresh failed");
+            }
+            await loadShop();
+          } finally {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = old;
+          }
+        });
+      }
+
+      document.querySelectorAll("button[data-shop-toggle]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const name = btn.getAttribute("data-shop-toggle");
+          if (!name) return;
+          const makeInStock = btn.textContent?.includes("Set IN");
+          btn.disabled = true;
+          try {
+            const res = await fetch(withAuthToken("/api/shop/availability"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, in_stock: !!makeInStock }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Update failed" }));
+              alert(err.error || "Update failed");
+            }
+            await loadShop();
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      document.querySelectorAll("button[data-shop-swap]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const slotRaw = btn.getAttribute("data-shop-swap");
+          if (slotRaw === null) return;
+          const slot = Number(slotRaw);
+          const sel = document.querySelector(`select[data-shop-swap-target="${CSS.escape(slotRaw)}"]`);
+          const new_name = String(sel?.value || "").trim();
+          if (!new_name) return;
+          btn.disabled = true;
+          try {
+            const res = await fetch(withAuthToken("/api/shop/swap"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ slot, new_name }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Swap failed" }));
+              alert(err.error || "Swap failed");
+            }
+            await loadShop();
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+    async function renderPerks(rows) {
+      document.getElementById("tableTitle").textContent = "Perks";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Name</th><th>Enabled</th><th>Priority</th><th>Stack Mode</th><th>Max Stacks</th><th>Requirements</th><th>Effects</th><th>Description</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addPerkBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Perk</button>
+          <span style="margin-left:10px;" class="muted">Preview user:</span>
+          <select id="perkPreviewUser" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;min-width:220px;"></select>
+          <button id="perkPreviewRefresh" style="padding:6px 10px;">Refresh Preview</button>
+          <div id="perkPreviewBox" class="muted" style="margin-top:8px;"></div>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No perks found.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-perk-id="${esc(String(r.id || ""))}">
+          <td><strong>${esc(r.name || "")}</strong></td>
+          <td>${Number(r.enabled || 0) ? "Yes" : "No"}</td>
+          <td class="mono">${esc(String(r.priority ?? 100))}</td>
+          <td>${esc(String(r.stack_mode || "add"))}</td>
+          <td class="mono">${esc(String(r.max_stacks ?? 1))}</td>
+          <td class="mono">${esc(String(r.requirements_count ?? 0))}</td>
+          <td class="mono">${esc(String(r.effects_count ?? 0))}</td>
+          <td>${esc(String(r.description || ""))}</td>
+        </tr>`).join("");
+      }
+      await loadPerkPreviewUsers();
+      bindPerkPreviewRefresh();
+      const addBtn = document.getElementById("addPerkBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const name = (window.prompt("Perk name:", "") || "").trim();
+          if (!name) return;
+          const description = (window.prompt("Description (optional):", "") || "").trim();
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const res = await fetch(withAuthToken("/api/perk"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, description }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Create failed" }));
+              alert(err.error || "Create failed");
+            } else {
+              const data = await res.json();
+              const id = Number(data.id || 0);
+              if (id > 0) {
+                gotoWithAuth(`/perk/${id}`);
+                return;
+              }
+              await loadPerks();
+            }
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("tr[data-perk-id]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const id = tr.getAttribute("data-perk-id");
+          if (!id) return;
+          gotoWithAuth(`/perk/${encodeURIComponent(id)}`);
+        });
+      });
+    }
+    function renderJobs(data) {
+      const rows = Array.isArray(data?.jobs) ? data.jobs : [];
+      const rotation = Array.isArray(data?.rotation) ? data.rotation : [];
+      const available = Array.isArray(data?.available) ? data.available : [];
+      document.getElementById("tableTitle").textContent = "Jobs";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>ID</th><th>Name</th><th>Type</th><th>Enabled</th><th>Reward Model</th><th>Duration</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const activeSlots = [0, 1, 2, 3, 4].map((idx) => rotation[idx] || null);
+      const rotationRows = activeSlots.map((job, idx) => {
+        const currentId = Number(job?.id || 0);
+        const currentName = String(job?.name || "(empty)");
+        const optionsHtml = available.map((opt) => {
+          const id = Number(opt.id || 0);
+          return `<option value="${esc(String(id))}"${id === currentId ? " selected" : ""}>${esc(String(opt.name || ("#" + (id || "?"))))}</option>`;
+        }).join("");
+        const selectHtml = optionsHtml
+          ? `<select data-job-swap-target="${idx}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${optionsHtml}</select>`
+          : `<span class="muted">No enabled jobs available</span>`;
+        return `<tr>
+          <td class="mono">#${idx + 1}</td>
+          <td class="mono">${currentId > 0 ? esc(String(currentId)) : "-"}</td>
+          <td>${esc(currentName)}</td>
+          <td>${selectHtml}</td>
+          <td><button data-job-swap="${idx}" style="padding:6px 10px;">Swap</button></td>
+        </tr>`;
+      }).join("");
+      const controlRow = `<tr>
+        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button id="addJobBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Job</button>
+            <button id="refreshJobsRotationBtn" style="padding:6px 10px;">Refresh Rotation</button>
+            <span class="muted">Click a job row to open its editor page.</span>
+          </div>
+          <div style="margin-top:10px;border:1px solid #1f2937;border-radius:8px;overflow:hidden;">
+            <table style="width:100%;border-collapse:collapse;">
+              <thead>
+                <tr style="background:#0b1323;">
+                  <th style="padding:8px;text-align:left;border-bottom:1px solid #1f2937;">Slot</th>
+                  <th style="padding:8px;text-align:left;border-bottom:1px solid #1f2937;">Current ID</th>
+                  <th style="padding:8px;text-align:left;border-bottom:1px solid #1f2937;">Current Job</th>
+                  <th style="padding:8px;text-align:left;border-bottom:1px solid #1f2937;">Swap To</th>
+                  <th style="padding:8px;text-align:left;border-bottom:1px solid #1f2937;">Action</th>
+                </tr>
+              </thead>
+              <tbody>${rotationRows}</tbody>
+            </table>
+          </div>
+        </td>
+      </tr>`;
+      const activeIds = new Set(rotation.map((r) => String(r.id || "")));
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No jobs found.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `
+          <tr class="clickable" data-job-id="${esc(String(r.id || ""))}"${activeIds.has(String(r.id || "")) ? ' style="background:#123022;"' : ""}>
+            <td class="mono">${esc(String(r.id || ""))}</td>
+            <td><strong>${esc(String(r.name || ""))}</strong></td>
+            <td>${esc(String(r.job_type || "chance"))}</td>
+            <td>${Number(r.enabled || 0) === 1 ? "yes" : "no"}</td>
+            <td class="mono">Per-outcome ranges</td>
+            <td class="mono">${Number(r.duration_minutes || r.duration_ticks || 0).toFixed(2)} min</td>
+            <td><button data-job-del="${esc(String(r.id))}" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
+          </tr>
+        `).join("");
+      }
+      const addBtn = document.getElementById("addJobBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const name = (window.prompt("Job name:", "") || "").trim();
+          if (!name) return;
+          const job_type = (window.prompt("Job type (chance/quiz/timed):", "chance") || "chance").trim().toLowerCase();
+          const description = (window.prompt("Description:", "") || "").trim();
+          const duration_minutes = Number(window.prompt("Duration minutes (timed type):", "20") || "20");
+          const quiz_question = (window.prompt("Quiz question (quiz type):", "") || "").trim();
+          const res = await fetch(withAuthToken("/api/job"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+              name, job_type, description,
+              duration_minutes, quiz_question, quiz_answer: "", config_json: {}, enabled: 1,
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(()=>({error:"Failed"}));
+            alert(err.error || "Add failed.");
+            return;
+          }
+          const created = await res.json().catch(() => ({}));
+          const id = Number(created.id || 0);
+          if (id > 0) {
+            gotoWithAuth(`/job/${id}`);
+            return;
+          }
+          await loadJobs();
+        });
+      }
+      const refreshRotationBtn = document.getElementById("refreshJobsRotationBtn");
+      if (refreshRotationBtn) {
+        refreshRotationBtn.addEventListener("click", async () => {
+          refreshRotationBtn.disabled = true;
+          const old = refreshRotationBtn.textContent;
+          refreshRotationBtn.textContent = "Refreshing...";
+          try {
+            const res = await fetch(withAuthToken("/api/jobs/rotation/refresh"), { method: "POST" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed to refresh jobs rotation." }));
+              alert(err.error || "Failed to refresh jobs rotation.");
+              return;
+            }
+            await loadJobs();
+          } finally {
+            refreshRotationBtn.disabled = false;
+            refreshRotationBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("button[data-job-swap]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const slotRaw = btn.getAttribute("data-job-swap");
+          if (slotRaw === null) return;
+          const slot = Number(slotRaw);
+          const sel = document.querySelector(`select[data-job-swap-target="${CSS.escape(slotRaw)}"]`);
+          const newJobId = Number(sel?.value || "0");
+          if (!Number.isInteger(slot) || slot < 0 || !Number.isInteger(newJobId) || newJobId <= 0) {
+            alert("Please choose a valid target job.");
+            return;
+          }
+          btn.disabled = true;
+          const old = btn.textContent;
+          btn.textContent = "Swapping...";
+          try {
+            const res = await fetch(withAuthToken("/api/jobs/rotation/swap"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ slot, new_job_id: newJobId }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Swap failed." }));
+              alert(err.error || "Swap failed.");
+              return;
+            }
+            await loadJobs();
+          } finally {
+            btn.disabled = false;
+            btn.textContent = old;
+          }
+        });
+      });
+      document.querySelectorAll("button[data-job-del]").forEach((btn) => {
+        btn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          const id = btn.getAttribute("data-job-del");
+          if (!id || !window.confirm("Delete this job?")) return;
+          const res = await fetch(withAuthToken(`/api/job/${encodeURIComponent(id)}`), { method: "DELETE" });
+          if (!res.ok) {
+            const err = await res.json().catch(()=>({error:"Failed"}));
+            alert(err.error || "Delete failed.");
+            return;
+          }
+          await loadJobs();
+        });
+      });
+      document.querySelectorAll("tr[data-job-id]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const id = tr.getAttribute("data-job-id");
+          if (!id) return;
+          gotoWithAuth(`/job/${encodeURIComponent(id)}`);
+        });
+      });
+    }
+    function mdPreview(text) {
+      const source = String(text || "");
+      if (window.marked && typeof window.marked.parse === "function") {
+        try {
+          return window.marked.parse(source, {
+            gfm: true,
+            breaks: true,
+          });
+        } catch (_e) {}
+      }
+      const safe = esc(source);
+      return safe.split(String.fromCharCode(10)).join("<br>");
+    }
+    function renderCloseRankingPreview(rows) {
+      const list = Array.isArray(rows) ? rows : [];
+      if (!list.length) {
+        return "<strong>#1</strong> @PlayerOne — Networth <code>$0.00</code><br><strong>#2</strong> @PlayerTwo — Networth <code>$0.00</code><br><strong>#3</strong> @PlayerThree — Networth <code>$0.00</code>";
+      }
+      return list.slice(0, 3).map((p, idx) => {
+        const name = esc(String(p.display_name || `User ${p.user_id || "?"}`));
+        const nw = Number(p.networth || 0).toFixed(2);
+        return `<strong>#${idx + 1}</strong> ${name} — Networth <code>$${nw}</code>`;
+      }).join("<br>");
+    }
+    async function renderAnnouncements(data) {
+      const markdown = String(data.markdown || "");
+      const newsRows = Array.isArray(data.news || []) ? data.news : [];
+      const rankingRows = Array.isArray(data.rankings || []) ? data.rankings : [];
+      document.getElementById("tableTitle").textContent = "Announcements";
+      document.getElementById("thead").innerHTML = "";
+      const tbody = document.getElementById("rows");
+      const newsHtml = newsRows.length
+        ? newsRows.map((n) => `
+            <tr data-news-id="${esc(String(n.id || ""))}">
+              <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+                <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
+                    <input data-news-title="${esc(String(n.id || ""))}" value="${esc(String(n.title || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                  </div>
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
+                    <input data-news-sort="${esc(String(n.id || ""))}" type="number" value="${esc(String(n.sort_order ?? 0))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                  </div>
+                  <div>
+                    <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
+                    <select data-news-enabled="${esc(String(n.id || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                      <option value="1"${Number(n.enabled || 0) ? " selected" : ""}>Yes</option>
+                      <option value="0"${Number(n.enabled || 0) ? "" : " selected"}>No</option>
+                    </select>
+                  </div>
+                </div>
+                <div style="margin-top:8px;">
+                  <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
+                  <textarea data-news-body="${esc(String(n.id || ""))}" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(String(n.body || ""))}</textarea>
+                </div>
+                <div style="margin-top:8px;">
+                  <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
+                  <input data-news-image="${esc(String(n.id || ""))}" value="${esc(String(n.image_url || ""))}" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                  <div class="muted" data-news-image-status="${esc(String(n.id || ""))}" style="margin-top:4px;">Status: idle</div>
+                </div>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+                  <button data-news-save="${esc(String(n.id || ""))}" style="padding:6px 10px;">Save</button>
+                  <button data-news-del="${esc(String(n.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button>
+                  <span class="muted">id ${esc(String(n.id || ""))}</span>
+                </div>
+              </td>
+            </tr>
+          `).join("")
+        : `<tr><td class="empty">No closing news items yet.</td></tr>`;
+      tbody.innerHTML = `
+        <tr>
+          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+            <div style="font-weight:700;margin-bottom:8px;">Close Announcement Markdown</div>
+            <textarea id="closeAnnouncementMd" style="width:100%;min-height:140px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">${esc(markdown)}</textarea>
+            <div style="margin-top:8px;">
+              <button id="saveCloseAnnouncement" style="padding:6px 10px;">Save Announcement</button>
+            </div>
+            <div style="margin-top:10px;font-weight:700;">Preview</div>
+            <div id="closeAnnouncementPreview" style="margin-top:6px;padding:10px;border:1px solid #1f2937;border-radius:8px;background:#0b1323;">
+              ${mdPreview(markdown)}
+              <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
+              <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
+              <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="font-weight:700;">Close News Embeds</div>
+              <button id="addCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add News</button>
+            </div>
+            <div id="addCloseNewsForm" style="margin-top:10px;display:none;">
+              <div style="display:grid;grid-template-columns:1fr 130px 120px;gap:8px;align-items:center;">
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Title</label>
+                  <input id="newNewsTitle" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                </div>
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Sort</label>
+                  <input id="newNewsSort" type="number" value="0" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                </div>
+                <div>
+                  <label class="muted" style="display:block;margin-bottom:4px;">Enabled</label>
+                  <select id="newNewsEnabled" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;">
+                    <option value="1" selected>Yes</option>
+                    <option value="0">No</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-top:8px;">
+                <label class="muted" style="display:block;margin-bottom:4px;">Body</label>
+                <textarea id="newNewsBody" style="width:100%;min-height:90px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;"></textarea>
+              </div>
+              <div style="margin-top:8px;">
+                <label class="muted" style="display:block;margin-bottom:4px;">Image URL</label>
+                <input id="newNewsImage" style="width:100%;padding:7px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+                <div class="muted" id="newNewsImageStatus" style="margin-top:4px;">Status: idle</div>
+              </div>
+              <div style="margin-top:8px;display:flex;gap:8px;">
+                <button id="saveNewCloseNews" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">Create</button>
+                <button id="cancelNewCloseNews" style="padding:6px 10px;">Cancel</button>
+              </div>
+            </div>
+          </td>
+        </tr>
+        ${newsHtml}
+      `;
+      const mdInput = document.getElementById("closeAnnouncementMd");
+      const mdPreviewBox = document.getElementById("closeAnnouncementPreview");
+      if (mdInput && mdPreviewBox) {
+        mdInput.addEventListener("input", () => {
+          const html = `
+            ${mdPreview(mdInput.value)}
+            <hr style="border:none;border-top:1px solid #1f2937;margin:10px 0;">
+            <div style="font-weight:700;margin-bottom:6px;">Market Close: Commodity Networth Leaders</div>
+            <div id="closeAnnouncementRankingPreview">${renderCloseRankingPreview(rankingRows)}</div>
+          `;
+          mdPreviewBox.innerHTML = html;
+        });
+      }
+      const saveBtn = document.getElementById("saveCloseAnnouncement");
+      if (saveBtn && mdInput) {
+        saveBtn.addEventListener("click", async () => {
+          saveBtn.disabled = true;
+          const old = saveBtn.textContent;
+          saveBtn.textContent = "Saving...";
+          try {
+            const res = await fetch(withAuthToken("/api/close-announcement"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ markdown: mdInput.value }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Save failed" }));
+              alert(err.error || "Save failed");
+            } else {
+              saveBtn.textContent = "Saved";
+              setTimeout(() => { saveBtn.textContent = old; }, 800);
+            }
+          } finally {
+            saveBtn.disabled = false;
+          }
+        });
+      }
+      const addBtn = document.getElementById("addCloseNews");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          const form = document.getElementById("addCloseNewsForm");
+          if (form) form.style.display = "block";
+          addBtn.style.display = "none";
+        });
+      }
+      const cancelAddBtn = document.getElementById("cancelNewCloseNews");
+      if (cancelAddBtn) {
+        cancelAddBtn.addEventListener("click", () => {
+          const form = document.getElementById("addCloseNewsForm");
+          const addButton = document.getElementById("addCloseNews");
+          if (form) form.style.display = "none";
+          if (addButton) addButton.style.display = "";
+        });
+      }
+      const saveNewBtn = document.getElementById("saveNewCloseNews");
+      if (saveNewBtn) {
+        saveNewBtn.addEventListener("click", async () => {
+          const title = String((document.getElementById("newNewsTitle") || {}).value || "").trim();
+          const body = String((document.getElementById("newNewsBody") || {}).value || "");
+          const image_url = String((document.getElementById("newNewsImage") || {}).value || "").trim();
+          const imageStatusEl = document.getElementById("newNewsImageStatus");
+          const sort_order = Number(String((document.getElementById("newNewsSort") || {}).value || "0"));
+          const enabled = Number(String((document.getElementById("newNewsEnabled") || {}).value || "1")) ? 1 : 0;
+          if (!title) {
+            alert("Title is required.");
+            return;
+          }
+          saveNewBtn.disabled = true;
+          if (imageStatusEl) imageStatusEl.textContent = "Status: processing...";
+          const res = await fetch(withAuthToken("/api/close-news"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
+          });
+          saveNewBtn.disabled = false;
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Create failed" }));
+            if (imageStatusEl) imageStatusEl.textContent = "Status: failed";
+            alert(err.error || "Create failed");
+            return;
+          }
+          const payload = await res.json().catch(() => ({}));
+          if (imageStatusEl) {
+            const st = String(payload.image_status || "");
+            if (st === "ingested") imageStatusEl.textContent = "Status: downloaded + converted";
+            else if (st === "unchanged") imageStatusEl.textContent = "Status: unchanged";
+            else if (st === "cleared") imageStatusEl.textContent = "Status: cleared";
+            else imageStatusEl.textContent = "Status: saved";
+          }
+          await loadAnnouncements();
+        });
+      }
+      document.querySelectorAll("button[data-news-save]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-news-save");
+          if (!id) return;
+          const titleEl = document.querySelector(`input[data-news-title="${CSS.escape(id)}"]`);
+          const bodyEl = document.querySelector(`textarea[data-news-body="${CSS.escape(id)}"]`);
+          const imageEl = document.querySelector(`input[data-news-image="${CSS.escape(id)}"]`);
+          const imageStatusEl = document.querySelector(`[data-news-image-status="${CSS.escape(id)}"]`);
+          const sortEl = document.querySelector(`input[data-news-sort="${CSS.escape(id)}"]`);
+          const enabledEl = document.querySelector(`select[data-news-enabled="${CSS.escape(id)}"]`);
+          const title = String(titleEl ? titleEl.value : "").trim();
+          const body = String(bodyEl ? bodyEl.value : "");
+          const image_url = String(imageEl ? imageEl.value : "").trim();
+          const sort_order = Number(String(sortEl ? sortEl.value : "0"));
+          const enabled = Number(String(enabledEl ? enabledEl.value : "1")) ? 1 : 0;
+          if (!title) {
+            alert("Title is required.");
+            return;
+          }
+          btn.disabled = true;
+          if (imageStatusEl) imageStatusEl.textContent = "Status: processing...";
+          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body, image_url, sort_order, enabled }),
+          });
+          btn.disabled = false;
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Update failed" }));
+            if (imageStatusEl) imageStatusEl.textContent = "Status: failed";
+            alert(err.error || "Update failed");
+            return;
+          }
+          const payload = await res.json().catch(() => ({}));
+          if (imageStatusEl) {
+            const st = String(payload.image_status || "");
+            if (st === "ingested") imageStatusEl.textContent = "Status: downloaded + converted";
+            else if (st === "unchanged") imageStatusEl.textContent = "Status: unchanged";
+            else if (st === "cleared") imageStatusEl.textContent = "Status: cleared";
+            else imageStatusEl.textContent = "Status: saved";
+          }
+          await loadAnnouncements();
+        });
+      });
+      document.querySelectorAll("input[data-news-image],#newNewsImage").forEach((input) => {
+        input.addEventListener("focus", () => {
+          pauseAnnouncementRefreshUntil = Date.now() + 15 * 60 * 1000;
+        });
+        input.addEventListener("blur", () => {
+          pauseAnnouncementRefreshUntil = Date.now() + 3000;
+        });
+      });
+      document.querySelectorAll("button[data-news-del]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-news-del");
+          if (!id || !window.confirm("Delete this news item?")) return;
+          const res = await fetch(withAuthToken(`/api/close-news/${encodeURIComponent(id)}`), { method: "DELETE" });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Delete failed" }));
+            alert(err.error || "Delete failed");
+            return;
+          }
+          await loadAnnouncements();
+        });
+      });
+    }
+    async function loadPerkPreviewUsers() {
+      const select = document.getElementById("perkPreviewUser");
+      if (!select) return;
+      try {
+        const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
+        if (!res.ok) {
+          select.innerHTML = '<option value="">(No users)</option>';
+          return;
+        }
+        const data = await res.json();
+        const players = Array.isArray(data.players) ? data.players : [];
+        if (!players.length) {
+          select.innerHTML = '<option value="">(No users)</option>';
+          const box = document.getElementById("perkPreviewBox");
+          if (box) box.textContent = "No players available for preview.";
+          return;
+        }
+        const old = String(select.value || "");
+        select.innerHTML = players.map((p) => {
+          const uid = String(p.user_id || "");
+          const name = String(p.display_name || `User ${uid}`);
+          return `<option value="${esc(uid)}">${esc(name)} (${esc(uid)})</option>`;
+        }).join("");
+        if (old && [...select.options].some((o) => o.value === old)) {
+          select.value = old;
+        }
+        await loadPerkPreview();
+      } catch (_e) {
+        select.innerHTML = '<option value="">(Failed to load)</option>';
+      }
+    }
+    function bindPerkPreviewRefresh() {
+      const btn = document.getElementById("perkPreviewRefresh");
+      const select = document.getElementById("perkPreviewUser");
+      if (!btn || !select) return;
+      btn.onclick = async () => { await loadPerkPreview(); };
+      select.onchange = async () => { await loadPerkPreview(); };
+    }
+    async function loadPerkPreview() {
+      const select = document.getElementById("perkPreviewUser");
+      const box = document.getElementById("perkPreviewBox");
+      if (!select || !box) return;
+      const userId = String(select.value || "");
+      if (!userId) {
+        box.textContent = "Select a player to preview.";
+        return;
+      }
+      box.textContent = "Loading preview...";
+      try {
+        const res = await fetch(withAuthToken(`/api/perk-preview?user_id=${encodeURIComponent(userId)}`), { cache: "no-store" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          box.textContent = String(data.error || "Failed to load preview.");
+          return;
+        }
+        const matched = Array.isArray(data.matched_perks) ? data.matched_perks : [];
+        const header = `Rank: ${data.rank} · Income $${Number(data.base_income || 0).toFixed(2)} -> $${Number(data.final_income || 0).toFixed(2)} · Limits ${Number(data.base_trade_limits || 0).toFixed(0)} -> ${Number(data.final_trade_limits || 0).toFixed(0)} · Networth $${Number(data.base_networth || 0).toFixed(2)} -> $${Number(data.final_networth || 0).toFixed(2)}`;
+        if (!matched.length) {
+          box.textContent = `${header} · No triggered perks.`;
+          return;
+        }
+        const lines = matched.map((m) => {
+          const disp = String(m.display || "").trim();
+          if (disp) return `${m.name}(x${m.stacks}) (${disp})`;
+          return `${m.name}(x${m.stacks}) (income ${Number(m.add || 0).toFixed(2)}, x${Number(m.mul || 1).toFixed(2)})`;
+        });
+        box.textContent = `${header} · Triggered: ${lines.join(" | ")}`;
+      } catch (_e) {
+        box.textContent = "Failed to load preview.";
+      }
+    }
+    function renderActionHistory(rows) {
+      document.getElementById("tableTitle").textContent = "Action History";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>When (UTC)</th><th>User</th><th>Action</th><th>Target</th><th>Qty</th><th>Unit</th><th>Total</th><th>Details</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="purgeActionHistoryBtn" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Purge All History</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No player actions recorded yet.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr>
+        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
+        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
+        <td>${esc(String(r.action_type || "").toUpperCase())}</td>
+        <td>${esc(String(r.target_type || "").toUpperCase())}: <span class="mono">${esc(r.target_symbol || "-")}</span></td>
+        <td class="mono">${fmtNum(r.quantity || 0, 2)}</td>
+        <td class="mono">${fmtMoney(r.unit_price || 0)}</td>
+        <td class="mono">${fmtMoney(r.total_amount || 0)}</td>
+        <td>${esc(r.details || "")}</td>
+      </tr>`).join("");
+      }
+      const purgeBtn = document.getElementById("purgeActionHistoryBtn");
+      if (purgeBtn) {
+        purgeBtn.addEventListener("click", async () => {
+          const ok = window.confirm("Purge all action history? This cannot be undone.");
+          if (!ok) return;
+          purgeBtn.disabled = true;
+          const old = purgeBtn.textContent;
+          purgeBtn.textContent = "Purging...";
+          try {
+            const res = await fetch(withAuthToken("/api/action-history"), { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              purgeBtn.textContent = err.error || "Failed";
+              purgeBtn.disabled = false;
+              return;
+            }
+            await loadActionHistory();
+          } catch (_e) {
+            purgeBtn.textContent = "Failed";
+            purgeBtn.disabled = false;
+            return;
+          }
+          purgeBtn.textContent = old;
+          purgeBtn.disabled = false;
+        });
+      }
+    }
+    function renderFeedback(rows) {
+      document.getElementById("tableTitle").textContent = "Feedback";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>ID</th><th>When (ET)</th><th>Message</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-feedback-id="${esc(String(r.id || ""))}">
+        <td class="mono">${esc(String(r.id || ""))}</td>
+        <td class="mono">${esc(fmtEtDate(r.created_at || ""))}</td>
+        <td>${esc(r.message || "")}</td>
+        <td><button data-feedback-delete="${esc(String(r.id || ""))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete</button></td>
+      </tr>`).join("");
+      document.querySelectorAll("button[data-feedback-delete]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-feedback-delete");
+          if (!id) return;
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = "Deleting...";
+          try {
+            const res = await fetch(withAuthToken(`/api/feedback/${encodeURIComponent(id)}`), { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              btn.textContent = err.error || "Failed";
+              btn.disabled = false;
+              return;
+            }
+            const tr = document.querySelector(`tr[data-feedback-id="${CSS.escape(id)}"]`);
+            if (tr) tr.remove();
+            if (!document.querySelector("tr[data-feedback-id]")) {
+              document.getElementById("rows").innerHTML = '<tr><td colspan="4" class="empty">No feedback yet.</td></tr>';
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+            btn.disabled = false;
+            return;
+          }
+          btn.textContent = original;
+          btn.disabled = false;
+        });
+      });
+    }
+    function renderBankActions(rows) {
+      document.getElementById("tableTitle").textContent = "Bank Actions";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>ID</th><th>Created (UTC)</th><th>User</th><th>Type</th><th>Amount</th><th>Reason</th><th>Decision</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-bank-request="${esc(String(r.id))}">
+        <td class="mono">${esc(String(r.id))}</td>
+        <td class="mono">${esc(r.created_at || "-")}</td>
+        <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(String(r.user_id || ""))}</div></td>
+        <td>${esc(String(r.request_type || "").toUpperCase())}</td>
+        <td class="mono">${fmtMoney(r.amount || 0)}</td>
+        <td>${esc(r.reason || "-")}</td>
+        <td>
+          <input data-bank-reason="${esc(String(r.id))}" placeholder="Optional reason..." style="width:100%;padding:6px 8px;margin-bottom:6px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button data-bank-approve="${esc(String(r.id))}" style="padding:6px 10px;background:#166534;border-color:#22c55e;">Approve</button>
+            <button data-bank-deny="${esc(String(r.id))}" style="padding:6px 10px;background:#7f1d1d;border-color:#ef4444;">Deny</button>
+          </div>
+        </td>
+      </tr>`).join("");
+
+      document.querySelectorAll("button[data-bank-approve],button[data-bank-deny]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-bank-approve") || btn.getAttribute("data-bank-deny");
+          if (!id) return;
+          const isApprove = btn.hasAttribute("data-bank-approve");
+          const reasonInput = document.querySelector(`input[data-bank-reason="${CSS.escape(id)}"]`);
+          const reason = reasonInput ? String(reasonInput.value || "").trim() : "";
+          const url = isApprove
+            ? `/api/bank-requests/${encodeURIComponent(id)}/approve`
+            : `/api/bank-requests/${encodeURIComponent(id)}/deny`;
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = isApprove ? "Approving..." : "Denying...";
+          try {
+            const res = await fetch(withAuthToken(url), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ reason }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed" }));
+              btn.textContent = err.error || "Failed";
+            } else {
+              const tr = document.querySelector(`tr[data-bank-request="${CSS.escape(id)}"]`);
+              if (tr) tr.remove();
+              if (!document.querySelector("tr[data-bank-request]")) {
+                document.getElementById("rows").innerHTML = '<tr><td colspan="7" class="empty">No pending bank requests.</td></tr>';
+              }
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+          } finally {
+            btn.disabled = false;
+            if (btn.textContent !== "Failed") btn.textContent = original;
+          }
+        });
+      });
+    }
+    function renderConfigs(rows) {
+      document.getElementById("tableTitle").textContent = "App Configs";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Name</th><th>Value</th><th>Default</th><th>Type</th><th>Description</th><th>Action</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No app configs found.</td></tr>';
+        return;
+      }
+      function prettyConfigValue(name, value) {
+        const raw = String(value ?? "");
+        if (name !== "SHOP_RARITY_WEIGHTS") return raw;
+        try {
+          return JSON.stringify(JSON.parse(raw), null, 2);
+        } catch (_e) {
+          return raw;
+        }
+      }
+      function valueEditorHtml(row) {
+        const name = String(row.name || "");
+        const value = prettyConfigValue(name, row.value);
+        if (name === "SHOP_RARITY_WEIGHTS") {
+          return `<textarea class="cfg-value mono" data-config-input="${esc(name)}" style="width:100%;min-height:110px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;resize:vertical;">${esc(value)}</textarea>`;
+        }
+        return `<input class="cfg-value mono" data-config-input="${esc(name)}" value="${esc(value)}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />`;
+      }
+      function defaultCellHtml(row) {
+        const name = String(row.name || "");
+        const value = prettyConfigValue(name, row.default);
+        if (name === "SHOP_RARITY_WEIGHTS") {
+          return `<pre class="mono" style="margin:0;white-space:pre-wrap;word-break:break-word;background:#0b1323;border:1px solid #334155;border-radius:6px;padding:6px 8px;">${esc(value)}</pre>`;
+        }
+        return `<span class="mono">${esc(String(row.default))}</span>`;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr data-config="${esc(r.name)}">
+        <td class="mono"><strong>${esc(r.name)}</strong></td>
+        <td>${valueEditorHtml(r)}</td>
+        <td>${defaultCellHtml(r)}</td>
+        <td>${esc(r.type || "-")}</td>
+        <td>${esc(r.description || "")}</td>
+        <td><button class="cfg-save" data-config-save="${esc(r.name)}" style="padding:6px 10px;">Save</button></td>
+      </tr>`).join("");
+      document.querySelectorAll("button[data-config-save]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const name = btn.getAttribute("data-config-save");
+          const input = document.querySelector(`input[data-config-input="${CSS.escape(name)}"]`);
+          if (!input) return;
+          const rawValue = input.value;
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = "Saving...";
+          try {
+            const res = await fetch(withAuthToken(`/api/app-config/${encodeURIComponent(name)}/update`), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ value: rawValue }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(()=>({error:"Save failed"}));
+              btn.textContent = err.error || "Failed";
+            } else {
+              const data = await res.json();
+              input.value = String(data.value);
+              btn.textContent = "Saved";
+              setTimeout(() => { btn.textContent = originalText; }, 800);
+            }
+          } catch (_e) {
+            btn.textContent = "Failed";
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+    function renderServerSettings() {
+      document.getElementById("tableTitle").textContent = "Server Settings";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Action</th><th>Description</th><th>Run</th><th>Status</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = `<tr>
+        <td><strong>Market Ticking</strong></td>
+        <td>Pause or resume economy tick progression.</td>
+        <td><button id="toggleTickingBtn" style="padding:6px 10px;">Loading...</button></td>
+        <td id="tickingStatus" class="mono">-</td>
+      </tr>
+      <tr>
+        <td><strong>Create Database Backup</strong></td>
+        <td>Create a point-in-time copy of the database now.</td>
+        <td><button id="runBackupNow" style="padding:6px 10px;">Run</button></td>
+        <td id="backupStatus" class="mono">-</td>
+      </tr>`;
+      const tickBtn = document.getElementById("toggleTickingBtn");
+      const tickStatus = document.getElementById("tickingStatus");
+      async function refreshTickingState() {
+        try {
+          const res = await fetch(withAuthToken("/api/server-actions/ticking"), { cache: "no-store" });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            tickStatus.textContent = data.error || "Failed";
+            tickBtn.textContent = "Unavailable";
+            tickBtn.disabled = true;
+            return;
+          }
+          const paused = !!data.paused;
+          tickStatus.textContent = paused ? "Paused" : "Running";
+          tickBtn.textContent = paused ? "Resume Ticking" : "Pause Ticking";
+          tickBtn.style.background = paused ? "#14532d" : "#7f1d1d";
+          tickBtn.style.borderColor = paused ? "#22c55e" : "#ef4444";
+          tickBtn.style.color = paused ? "#dcfce7" : "#fee2e2";
+          tickBtn.disabled = false;
+        } catch (_e) {
+          tickStatus.textContent = "Failed";
+          tickBtn.textContent = "Unavailable";
+          tickBtn.disabled = true;
+        }
+      }
+      tickBtn.addEventListener("click", async () => {
+        tickBtn.disabled = true;
+        const old = tickBtn.textContent;
+        tickBtn.textContent = "Updating...";
+        try {
+          const isPaused = String(tickStatus.textContent || "").toLowerCase().includes("paused");
+          const res = await fetch(withAuthToken("/api/server-actions/ticking"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paused: !isPaused }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            tickStatus.textContent = data.error || "Failed";
+          }
+        } finally {
+          tickBtn.textContent = old;
+          await refreshTickingState();
+        }
+      });
+      refreshTickingState();
+      const btn = document.getElementById("runBackupNow");
+      const status = document.getElementById("backupStatus");
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        status.textContent = "Running...";
+        try {
+          const res = await fetch(withAuthToken("/api/server-actions/backup"), { method: "POST" });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            status.textContent = data.error || "Failed";
+          } else {
+            status.textContent = `OK: ${String(data.backup_path || "")}`;
+          }
+        } catch (_e) {
+          status.textContent = "Failed";
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      loadBackupsIntoServerSettings();
+    }
+    async function loadBackupsIntoServerSettings() {
+      const tbody = document.getElementById("rows");
+      try {
+        const res = await fetch(withAuthToken("/api/server-actions/backups"), { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const backups = Array.isArray(data.backups) ? data.backups : [];
+        if (!backups.length) {
+          tbody.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="empty">No backups found.</td></tr>`);
+          return;
+        }
+        backups.forEach((b) => {
+          const downloadUrl = withAuthToken(`/api/server-actions/backups/${encodeURIComponent(b.name)}/download`);
+          const row = `<tr data-backup="${esc(b.name)}">
+            <td><strong>Backup File</strong></td>
+            <td class="mono">${esc(b.name)}<br><span class="muted">${esc(String(b.size_human || ""))}</span></td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">
+              <a href="${downloadUrl}" style="display:inline-block;padding:6px 10px;border:1px solid #334155;border-radius:6px;background:#1f2937;color:#e5e7eb;text-decoration:none;">Download</a>
+              <button data-delete-backup="${esc(b.name)}" style="padding:6px 10px;background:#7f1d1d;border-color:#b91c1c;">Delete</button>
+            </td>
+            <td class="mono" data-backup-status="${esc(b.name)}">-</td>
+          </tr>`;
+          tbody.insertAdjacentHTML("beforeend", row);
+        });
+        document.querySelectorAll("button[data-delete-backup]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const name = btn.getAttribute("data-delete-backup");
+            if (!name) return;
+            const status = document.querySelector(`[data-backup-status="${CSS.escape(name)}"]`);
+            btn.disabled = true;
+            if (status) status.textContent = "Deleting...";
+            try {
+              const delRes = await fetch(withAuthToken(`/api/server-actions/backups/${encodeURIComponent(name)}`), { method: "DELETE" });
+              const delData = await delRes.json().catch(() => ({}));
+              if (!delRes.ok) {
+                if (status) status.textContent = delData.error || "Failed";
+              } else {
+                const tr = document.querySelector(`tr[data-backup="${CSS.escape(name)}"]`);
+                if (tr) tr.remove();
+              }
+            } catch (_e) {
+              if (status) status.textContent = "Failed";
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (_e) {
+        tbody.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="empty">Failed to load backups.</td></tr>`);
+      }
+    }
+    async function loadCompanies() {
+      const res = await fetch(withAuthToken("/api/stocks"), { cache: "no-store" });
+      const data = await res.json();
+      renderCompanies(data.stocks || []);
+      document.getElementById("last").textContent = fmtEtDate(data.server_time_utc || "");
+    }
+    async function loadCommodities() {
+      const res = await fetch(withAuthToken("/api/commodities"), { cache: "no-store" });
+      const data = await res.json();
+      renderCommodities(data.commodities || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadShop() {
+      const res = await fetch(withAuthToken("/api/shop"), { cache: "no-store" });
+      const data = await res.json();
+      renderShop(data || {});
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadPlayers() {
+      const res = await fetch(withAuthToken("/api/players"), { cache: "no-store" });
+      const data = await res.json();
+      renderPlayers(data.players || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadPerks() {
+      const res = await fetch(withAuthToken("/api/perks"), { cache: "no-store" });
+      const data = await res.json();
+      await renderPerks(data.perks || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadJobs() {
+      const res = await fetch(withAuthToken("/api/jobs"), { cache: "no-store" });
+      const data = await res.json();
+      renderJobs(data || {});
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadAnnouncements() {
+      const [aRes, nRes, pRes, gmRes] = await Promise.all([
+        fetch(withAuthToken("/api/close-announcement"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/close-news"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/players"), { cache: "no-store" }),
+        fetch(withAuthToken("/api/app-config/GM_ID"), { cache: "no-store" }),
+      ]);
+      if (!aRes.ok || !nRes.ok || !pRes.ok || !gmRes.ok) {
+        const aErr = await aRes.text().catch(() => "");
+        const nErr = await nRes.text().catch(() => "");
+        const pErr = await pRes.text().catch(() => "");
+        const gmErr = await gmRes.text().catch(() => "");
+        throw new Error(`Announcements load failed (close-announcement=${aRes.status}, close-news=${nRes.status}, players=${pRes.status}, gm=${gmRes.status}) ${aErr || nErr || pErr || gmErr}`.trim());
+      }
+      const aData = await aRes.json().catch(() => ({}));
+      const nData = await nRes.json().catch(() => ({}));
+      const pData = await pRes.json().catch(() => ({}));
+      const gmData = await gmRes.json().catch(() => ({}));
+      const gmId = String(gmData?.config?.value || "").trim();
+      const rankings = (Array.isArray(pData.players) ? pData.players : [])
+        .filter((x) => !gmId || String(x.user_id || "") !== gmId)
+        .slice()
+        .sort((x, y) => Number(y.networth || 0) - Number(x.networth || 0))
+        .slice(0, 3);
+      await renderAnnouncements({
+        markdown: String(aData.markdown || ""),
+        news: Array.isArray(nData.news) ? nData.news : [],
+        rankings,
+      });
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadActionHistory() {
+      const res = await fetch(withAuthToken("/api/action-history"), { cache: "no-store" });
+      const data = await res.json();
+      renderActionHistory(data.actions || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadFeedback() {
+      const res = await fetch(withAuthToken("/api/feedback"), { cache: "no-store" });
+      const data = await res.json();
+      renderFeedback(data.feedback || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadBankActions() {
+      const res = await fetch(withAuthToken("/api/bank-requests?status=pending"), { cache: "no-store" });
+      const data = await res.json();
+      renderBankActions(data.requests || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadHeaderStats() {
+      try {
+        const res = await fetch(withAuthToken("/api/dashboard-stats"), { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (Number.isFinite(Number(data.seconds_until_close))) {
+          untilCloseSeconds = Math.max(0, Number(data.seconds_until_close));
+          document.getElementById("statUntilClose").textContent = fmtHMS(untilCloseSeconds);
+        } else {
+          document.getElementById("statUntilClose").textContent = data.until_close || "-";
+        }
+        if (Number.isFinite(Number(data.seconds_until_reset))) {
+          untilResetSeconds = Math.max(0, Number(data.seconds_until_reset));
+          document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
+        } else {
+        document.getElementById("statUntilReset").textContent = data.until_reset || "-";
+        }
+        document.getElementById("statCompanies").textContent = String(data.company_count ?? "-");
+        document.getElementById("statUsers").textContent = String(data.user_count ?? "-");
+        const paused = !!data.ticks_paused;
+        const tickingEl = document.getElementById("statTicking");
+        if (tickingEl) {
+          tickingEl.textContent = paused ? "Paused" : "Running";
+          tickingEl.style.color = paused ? "#ef4444" : "#22c55e";
+        }
+        const gateEl = document.getElementById("statCloseGate");
+        if (gateEl) {
+          const ready = !!data.close_gate_ready;
+          const status = String(data.close_gate_status || (ready ? "Ready" : "Waiting"));
+          gateEl.textContent = status;
+          gateEl.style.color = ready ? "#22c55e" : (status === "Sent" ? "#94a3b8" : "#f59e0b");
+          gateEl.title = `close_event_sent: ${String(data.close_gate_raw || "-")}\\nclose_event_armed: ${String(data.close_gate_armed_raw || "-")}`;
+        }
+        const bankBtn = document.getElementById("showBankActions");
+        const feedbackBtn = document.getElementById("showFeedback");
+        if (bankBtn) bankBtn.classList.toggle("alert", Number(data.bank_pending_count || 0) > 0);
+        if (feedbackBtn) feedbackBtn.classList.toggle("alert", Number(data.feedback_count || 0) > 0);
+      } catch (_e) {}
+    }
+    function startHeaderTicker() {
+      setInterval(() => {
+        if (!Number.isFinite(untilCloseSeconds)) return;
+        untilCloseSeconds = Math.max(0, untilCloseSeconds - 1);
+        document.getElementById("statUntilClose").textContent = fmtHMS(untilCloseSeconds);
+      }, 1000);
+      setInterval(() => {
+        if (!Number.isFinite(untilResetSeconds)) return;
+        untilResetSeconds = Math.max(0, untilResetSeconds - 1);
+        document.getElementById("statUntilReset").textContent = `${(untilResetSeconds / 60).toFixed(2)} min`;
+      }, 1000);
+    }
+    async function loadConfigs() {
+      const res = await fetch(withAuthToken("/api/app-configs"), { cache: "no-store" });
+      const data = await res.json();
+      renderConfigs(data.configs || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function tick() {
+      if (announcementRefreshPaused()) return;
+      const active = document.activeElement;
+      const editing =
+        active &&
+        (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT");
+      if (editing) return;
+      try {
+        await loadHeaderStats();
+        if (currentTab === "companies") await loadCompanies();
+        else if (currentTab === "commodities") await loadCommodities();
+        else if (currentTab === "shop") await loadShop();
+        else if (currentTab === "players") await loadPlayers();
+        else if (currentTab === "perks") await loadPerks();
+        else if (currentTab === "jobs") await loadJobs();
+        else if (currentTab === "announcements") await loadAnnouncements();
+        else if (currentTab === "feedback") await loadFeedback();
+        else if (currentTab === "bankActions") await loadBankActions();
+        else if (currentTab === "actionHistory") await loadActionHistory();
+        else if (currentTab === "configs") await loadConfigs();
+        else return;
+      } catch (e) {
+        console.error("Dashboard tab load failed:", e);
+        document.getElementById("rows").innerHTML = `<tr><td class="empty">Failed to load ${esc(currentTab)}: ${esc(String(e && e.message ? e.message : e))}</td></tr>`;
+      }
+    }
+    async function syncPollInterval() {
+      try {
+        const res = await fetch(withAuthToken("/api/app-config/TICK_INTERVAL"), { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const seconds = Number(data?.config?.value);
+        if (!Number.isFinite(seconds) || seconds <= 0) return;
+        const nextMs = Math.max(1000, Math.round(seconds * 1000));
+        if (nextMs === pollMs && pollTimer) return;
+        pollMs = nextMs;
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(tick, pollMs);
+      } catch (_e) {}
+    }
+    document.getElementById("showCompanies").addEventListener("click", () => { setCurrentTab("companies"); setButtons(); tick(); });
+    document.getElementById("showCommodities").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("commodities"); setButtons(); tick(); });
+    document.getElementById("showShop").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("shop"); setButtons(); tick(); });
+    document.getElementById("showPlayers").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("players"); setButtons(); tick(); });
+    document.getElementById("showPerks").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("perks"); setButtons(); tick(); });
+    document.getElementById("showJobs").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("jobs"); setButtons(); tick(); });
+    document.getElementById("showAnnouncements").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("announcements"); setButtons(); tick(); });
+    document.getElementById("showFeedback").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("feedback"); setButtons(); tick(); });
+    document.getElementById("showBankActions").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("bankActions"); setButtons(); tick(); });
+    document.getElementById("showActionHistory").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("actionHistory"); setButtons(); tick(); });
+    document.getElementById("showConfigs").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("configs"); setButtons(); tick(); });
+    document.getElementById("showServerSettings").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("serverSettings"); setButtons(); renderServerSettings(); });
+    applyReadOnlyLayout();
+    setCurrentTab(currentTab);
+    setButtons();
+    tick();
+    syncPollInterval();
+    startHeaderTicker();
+    setInterval(syncPollInterval, 30000);
+  </script>
+</body>
+</html>

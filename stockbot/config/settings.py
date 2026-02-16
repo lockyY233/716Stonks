@@ -14,6 +14,7 @@ DISPLAY_TIMEZONE = "America/New_York"       # Timezone for display only
 MARKET_CLOSE_HOUR = 21.0                    # local close time as decimal hour (e.g. 21.5 = 21:30)
 STONKERS_ROLE_NAME = "📈💰📊Stonkers"        # Role granted on successful registration
 ANNOUNCEMENT_CHANNEL_ID = 0                 # Target channel ID for market close announcements; 0 = auto-pick
+ANNOUNCE_MENTION_ROLE = 1                  # 1 = mention stonkers role in close announcement; 0 = no mention
 GM_ID = 0                                   # Discord user ID for game master; excluded from ranking leaderboards when >0
 DRIFT_NOISE_FREQUENCY = 0.7                 # Normalized [0,1] -> fraction of Nyquist (tick/2)
 DRIFT_NOISE_GAIN = 0.8                      # Multiplier on Perlin output so drift% feels closer to direct amplitude
@@ -25,36 +26,37 @@ TRADING_FEES = 1                         # Fee as % of realized profit on sell t
 COMMODITIES_LIMIT = 5                      # Max total commodity units a player can hold across all commodities; <=0 disables
 PAWN_SELL_RATE = 75                        # Pawn payout rate (% of commodity price when selling to bank)
 SHOP_RARITY_WEIGHTS = '{"common":1.0,"uncommon":0.6,"rare":0.3,"legendary":0.1,"exotic":0.03}'  # Base rarity spawn weights for /shop rotation
+OWNER_BUY_FEE_RATE = 5                     # Company owner earns this % from non-owner buy transaction value
 
 # Rank income paid at market close (once per local date per guild).
 RANK_INCOME = {
     "Civilian": 5.0,
     "-Recruit-": 5.0,
     "[PVT] Private": 11.5,
-    "[PV2] Private Second Class": 15.8,
-    "[PFC] Private First Class": 20.2,
-    "[CPL] Corporal": 26.7,
-    "[SPC] Specialist": 33.3,
-    "[SGT] Sergeant": 42.0,
-    "[SSG] Staff Sergeant": 50.7,
-    "[SFC] Sergeant First Class": 59.4,
-    "[MSG] Master Sergeant": 70.3,
-    "[1SG] First Sergeant": 81.2,
-    "[SGM] Sergeant Major": 94.2,
-    "[CSM] Command Sergeant Major": 107.3,
-    "[SMA] Sergeant Major of the Task Force": 124.8,
-    "[WO1] Warrant Officer 1": 142.2,
-    "[CW2] Chief Warrant Officer 2": 159.7,
-    "[CW3] Chief Warrant Officer 3": 177.1,
-    "[CW4] Chief Warrant Officer 4": 194.6,
-    "[CW5] Chief Warrant Officer 5": 216.4,
-    "[2LT] Second Lieutenant": 242.5,
-    "[1LT] First Liutenant": 268.7,
-    "[CPT] Captain": 299.2,
-    "[MAJ] Major": 334.1,
-    "[LTC] Lieutenant Colonel": 373.3,
-    "[COL] Colonel": 416.9,
-    "[BG] Brigadier General": 465.0,
+    "[PV2] Private Second Class": 7.1,
+    "[PFC] Private First Class": 9.1,
+    "[CPL] Corporal": 12.0,
+    "[SPC] Specialist": 15.0,
+    "[SGT] Sergeant": 18.9,
+    "[SSG] Staff Sergeant": 22.8,
+    "[SFC] Sergeant First Class": 26.7,
+    "[MSG] Master Sergeant": 31.6,
+    "[1SG] First Sergeant": 36.5,
+    "[SGM] Sergeant Major": 42.3,
+    "[CSM] Command Sergeant Major": 48.2,
+    "[SMA] Sergeant Major of the Task Force": 56.1,
+    "[WO1] Warrant Officer 1": 63.9,
+    "[CW2] Chief Warrant Officer 2": 71.8,
+    "[CW3] Chief Warrant Officer 3": 79.6,
+    "[CW4] Chief Warrant Officer 4": 87.5,
+    "[CW5] Chief Warrant Officer 5": 97.3,
+    "[2LT] Second Lieutenant": 109.0,
+    "[1LT] First Liutenant": 120.8,
+    "[CPT] Captain": 134.5,
+    "[MAJ] Major": 150.2,
+    "[LTC] Lieutenant Colonel": 167.8,
+    "[COL] Colonel": 187.4,
+    "[BG] Brigadier General": 209.0,
 }
 
 DEFAULT_RANK = "Civilian"

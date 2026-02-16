@@ -8,12 +8,18 @@ def supports_components_v2() -> bool:
     return all(hasattr(ui, name) for name in ("LayoutView", "Container", "TextDisplay"))
 
 
-def build_close_ranking_lines(top_rows: list[dict]) -> list[str]:
+def build_close_ranking_lines(
+    top_rows: list[dict],
+    *,
+    mention_users: bool = True,
+) -> list[str]:
     lines: list[str] = []
     for idx, row in enumerate(top_rows, start=1):
         user_id = int(row["user_id"])
+        display_name = str(row.get("display_name", "")).strip() or f"User {user_id}"
         networth = float(row.get("networth", 0.0))
-        lines.append(f"**#{idx}** <@{user_id}> — Networth `${networth:.2f}`")
+        user_label = f"<@{user_id}>" if mention_users else display_name
+        lines.append(f"**#{idx}** {user_label} — Networth `${networth:.2f}`")
     return lines
 
 
@@ -88,10 +94,12 @@ async def send_market_close_v2(
         timeout=None,
     )
     if view is None:
+        print("[announce] V2 unavailable: could not build market-close LayoutView/container.")
         return False
     try:
         _ = content_suffix  # kept for caller compatibility; V2 messages cannot use top-level content
         await cast(Any, channel).send(view=view)
         return True
-    except Exception:
+    except Exception as exc:
+        print(f"[announce] V2 send failed: {exc}")
         return False

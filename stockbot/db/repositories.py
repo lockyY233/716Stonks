@@ -6,6 +6,103 @@ from stockbot.config import DB_PATH
 from stockbot.db.database import get_connection, init_db
 
 
+def _parse_owner_user_ids(raw: str | int | list[int] | tuple[int, ...] | None) -> list[int]:
+    if raw is None:
+        return []
+    if isinstance(raw, int):
+        return [raw] if raw > 0 else []
+    if isinstance(raw, (list, tuple)):
+        seen: set[int] = set()
+        out: list[int] = []
+        for item in raw:
+            try:
+                uid = int(item)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            out.append(uid)
+        return out
+    text = str(raw).strip()
+    if not text:
+        return []
+    text = text.replace(";", ",").replace("|", ",")
+    tokens = [t.strip() for t in text.split(",")]
+    seen: set[int] = set()
+    out: list[int] = []
+    for token in tokens:
+        if not token:
+            continue
+        if token.startswith("+"):
+            token = token[1:]
+        if not token.isdigit():
+            continue
+        uid = int(token)
+        if uid <= 0 or uid in seen:
+            continue
+        seen.add(uid)
+        out.append(uid)
+    return out
+
+
+def _set_company_owners(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    symbol: str,
+    owner_user_ids: list[int],
+) -> None:
+    conn.execute(
+        """
+        DELETE FROM company_owners
+        WHERE guild_id = ? AND symbol = ?
+        """,
+        (guild_id, symbol),
+    )
+    for uid in owner_user_ids:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO company_owners (guild_id, symbol, user_id)
+            VALUES (?, ?, ?)
+            """,
+            (guild_id, symbol, uid),
+        )
+
+
+def _hydrate_company_owner_ids(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    companies: list[dict],
+) -> None:
+    if not companies:
+        return
+    symbols = [str(c.get("symbol", "")) for c in companies if str(c.get("symbol", ""))]
+    if not symbols:
+        return
+    placeholders = ",".join(["?"] * len(symbols))
+    rows = conn.execute(
+        f"""
+        SELECT symbol, user_id
+        FROM company_owners
+        WHERE guild_id = ? AND symbol IN ({placeholders})
+        ORDER BY symbol, user_id
+        """,
+        (guild_id, *symbols),
+    ).fetchall()
+    owners_map: dict[str, list[int]] = {}
+    for row in rows:
+        sym = str(row["symbol"])
+        owners_map.setdefault(sym, []).append(int(row["user_id"]))
+    for company in companies:
+        symbol = str(company.get("symbol", ""))
+        owner_ids = owners_map.get(symbol, [])
+        if not owner_ids:
+            legacy_owner = int(company.get("owner_user_id", 0) or 0)
+            owner_ids = [legacy_owner] if legacy_owner > 0 else []
+        company["owner_user_ids"] = owner_ids
+        company["owner_user_id"] = owner_ids[0] if owner_ids else 0
+
+
 def register_user(
     guild_id: int,
     user_id: int,
@@ -57,6 +154,271 @@ def get_users(guild_id: int) -> list[dict]:
             (guild_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_jobs(guild_id: int, enabled_only: bool = False) -> list[dict]:
+    with get_connection() as conn:
+        if enabled_only:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, name, description, job_type, enabled, cooldown_ticks,
+                       reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                       quiz_question, quiz_answer, config_json, updated_at
+                FROM jobs
+                WHERE guild_id = ? AND enabled = 1
+                ORDER BY id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, name, description, job_type, enabled, cooldown_ticks,
+                       reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                       quiz_question, quiz_answer, config_json, updated_at
+                FROM jobs
+                WHERE guild_id = ?
+                ORDER BY id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            duration_minutes = float(item.get("duration_minutes", 0.0) or 0.0)
+            if duration_minutes <= 0.0:
+                duration_minutes = float(item.get("duration_ticks", 0) or 0)
+            item["duration_minutes"] = duration_minutes
+            out.append(item)
+        return out
+
+
+def get_job(guild_id: int, job_id: int) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, guild_id, name, description, job_type, enabled, cooldown_ticks,
+                   reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                   quiz_question, quiz_answer, config_json, updated_at
+            FROM jobs
+            WHERE guild_id = ? AND id = ?
+            """,
+            (guild_id, job_id),
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        duration_minutes = float(item.get("duration_minutes", 0.0) or 0.0)
+        if duration_minutes <= 0.0:
+            duration_minutes = float(item.get("duration_ticks", 0) or 0)
+        item["duration_minutes"] = duration_minutes
+        return item
+
+
+def create_job(
+    guild_id: int,
+    *,
+    name: str,
+    description: str,
+    job_type: str,
+    enabled: int,
+    cooldown_ticks: int,
+    reward_min: float,
+    reward_max: float,
+    success_rate: float,
+    duration_minutes: float,
+    quiz_question: str,
+    quiz_answer: str,
+    config_json: str,
+    updated_at: str,
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO jobs (
+                guild_id, name, description, job_type, enabled, cooldown_ticks,
+                reward_min, reward_max, success_rate, duration_ticks, duration_minutes,
+                quiz_question, quiz_answer, config_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                name,
+                description,
+                job_type,
+                int(enabled),
+                int(cooldown_ticks),
+                float(reward_min),
+                float(reward_max),
+                float(success_rate),
+                max(0, int(float(duration_minutes))),
+                max(0.0, float(duration_minutes)),
+                quiz_question,
+                quiz_answer,
+                config_json,
+                updated_at,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def update_job(guild_id: int, job_id: int, updates: dict[str, object]) -> bool:
+    if not updates:
+        return False
+    sets = []
+    values: list[object] = []
+    for k, v in updates.items():
+        sets.append(f"{k} = ?")
+        values.append(v)
+    values.extend([guild_id, job_id])
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE jobs
+            SET {", ".join(sets)}
+            WHERE guild_id = ? AND id = ?
+            """,
+            values,
+        )
+        return cur.rowcount > 0
+
+
+def delete_job(guild_id: int, job_id: int) -> bool:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM jobs
+            WHERE guild_id = ? AND id = ?
+            """,
+            (guild_id, job_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_user_job_state(guild_id: int, user_id: int, job_id: int) -> dict:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT guild_id, user_id, job_id, next_available_tick, running_until_tick, running_until_epoch
+            FROM user_jobs
+            WHERE guild_id = ? AND user_id = ? AND job_id = ?
+            """,
+            (guild_id, user_id, job_id),
+        ).fetchone()
+        if row is None:
+            return {
+                "guild_id": guild_id,
+                "user_id": user_id,
+                "job_id": job_id,
+                "next_available_tick": 0,
+                "running_until_tick": 0,
+                "running_until_epoch": 0.0,
+            }
+        item = dict(row)
+        item["running_until_epoch"] = float(item.get("running_until_epoch", 0.0) or 0.0)
+        return item
+
+
+def set_user_job_state(
+    guild_id: int,
+    user_id: int,
+    job_id: int,
+    *,
+    next_available_tick: int,
+    running_until_tick: int,
+    running_until_epoch: float = 0.0,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_jobs (
+                guild_id, user_id, job_id, next_available_tick, running_until_tick, running_until_epoch
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, job_id)
+            DO UPDATE SET
+                next_available_tick = excluded.next_available_tick,
+                running_until_tick = excluded.running_until_tick,
+                running_until_epoch = excluded.running_until_epoch
+            """,
+            (
+                guild_id,
+                user_id,
+                job_id,
+                int(next_available_tick),
+                int(running_until_tick),
+                max(0.0, float(running_until_epoch)),
+            ),
+        )
+
+
+def get_user_running_timed_job(guild_id: int, user_id: int, now_tick: int = 0) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                uj.guild_id,
+                uj.user_id,
+                uj.job_id,
+                uj.running_until_tick,
+                uj.running_until_epoch,
+                j.name AS job_name
+            FROM user_jobs uj
+            JOIN jobs j
+              ON j.id = uj.job_id
+             AND j.guild_id = uj.guild_id
+            WHERE uj.guild_id = ?
+              AND uj.user_id = ?
+              AND j.job_type = 'timed'
+              AND (uj.running_until_epoch > 0 OR uj.running_until_tick > ?)
+            ORDER BY
+              CASE
+                WHEN uj.running_until_epoch > 0 THEN uj.running_until_epoch
+                ELSE CAST(uj.running_until_tick AS REAL)
+              END DESC
+            LIMIT 1
+            """,
+            (guild_id, user_id, int(now_tick)),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+
+def list_running_timed_jobs(guild_id: int | None = None, limit: int = 500) -> list[dict]:
+    query = """
+        SELECT
+            uj.guild_id,
+            uj.user_id,
+            uj.job_id,
+            uj.running_until_tick,
+            uj.running_until_epoch,
+            j.name AS job_name
+        FROM user_jobs uj
+        JOIN jobs j
+          ON j.id = uj.job_id
+         AND j.guild_id = uj.guild_id
+        WHERE j.job_type = 'timed'
+          AND j.enabled = 1
+          AND (uj.running_until_epoch > 0 OR uj.running_until_tick > 0)
+    """
+    params: list[object] = []
+    if guild_id is not None:
+        query += " AND uj.guild_id = ?"
+        params.append(int(guild_id))
+    query += """
+        ORDER BY
+          uj.guild_id ASC,
+          CASE
+            WHEN uj.running_until_epoch > 0 THEN uj.running_until_epoch
+            ELSE CAST(uj.running_until_tick AS REAL)
+          END ASC,
+          uj.user_id ASC
+        LIMIT ?
+    """
+    params.append(max(1, int(limit)))
+    with get_connection() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def add_commodity(
@@ -255,6 +617,8 @@ def add_company(
     guild_id: int,
     symbol: str,
     name: str,
+    owner_user_id: int,
+    owner_user_ids: list[int] | None,
     location: str,
     industry: str,
     founded_year: int,
@@ -272,6 +636,10 @@ def add_company(
 ) -> bool:
     base_price = max(0.01, float(base_price))
     current_price = max(0.01, float(current_price))
+    parsed_owner_ids = _parse_owner_user_ids(owner_user_ids)
+    if not parsed_owner_ids:
+        parsed_owner_ids = _parse_owner_user_ids(owner_user_id)
+    canonical_owner = parsed_owner_ids[0] if parsed_owner_ids else 0
     with get_connection() as conn:
         existing = conn.execute(
             "SELECT 1 FROM companies WHERE guild_id = ? AND symbol = ?",
@@ -286,6 +654,7 @@ def add_company(
                 guild_id,
                 symbol,
                 name,
+                owner_user_id,
                 location,
                 industry,
                 founded_year,
@@ -303,12 +672,13 @@ def add_company(
                 last_tick,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
                 symbol,
                 name,
+                canonical_owner,
                 location,
                 industry,
                 founded_year,
@@ -327,6 +697,7 @@ def add_company(
                 updated_at,
             ),
         )
+        _set_company_owners(conn, guild_id, symbol, parsed_owner_ids)
         return True
 
 
@@ -334,27 +705,33 @@ def get_companies(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, name, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, owner_user_id, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ?
             ORDER BY symbol
             """,
             (guild_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        companies = [dict(row) for row in rows]
+        _hydrate_company_owner_ids(conn, guild_id, companies)
+        return companies
 
 
 def get_company(guild_id: int, symbol: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT symbol, name, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
+            SELECT symbol, name, owner_user_id, location, industry, founded_year, description, evaluation, base_price, slope, drift, liquidity, impact_power, pending_buy, pending_sell, starting_tick, current_price, last_tick, updated_at
             FROM companies
             WHERE guild_id = ? AND symbol = ?
             """,
             (guild_id, symbol),
         ).fetchone()
-        return None if row is None else dict(row)
+        if row is None:
+            return None
+        company = dict(row)
+        _hydrate_company_owner_ids(conn, guild_id, [company])
+        return company
 
 
 def update_company_slope(
@@ -495,6 +872,8 @@ def update_company_admin_fields(
 ) -> bool:
     allowed = {
         "name": str,
+        "owner_user_id": int,
+        "owner_user_ids": str,
         "location": str,
         "industry": str,
         "founded_year": int,
@@ -513,11 +892,34 @@ def update_company_admin_fields(
         caster = allowed.get(key)
         if caster is None:
             continue
+        if key == "owner_user_ids":
+            continue
         value = caster(raw) if caster is not str else str(raw)
         sets.append(f"{key} = ?")
         values.append(value)
     if not sets:
-        return False
+        if "owner_user_ids" not in updates:
+            return False
+
+    owner_ids = _parse_owner_user_ids(updates.get("owner_user_ids"))
+    if not owner_ids and "owner_user_id" in updates:
+        owner_ids = _parse_owner_user_ids(updates.get("owner_user_id"))
+    if owner_ids:
+        # Ensure legacy owner column stays mirrored to first owner.
+        owner_idx = next((i for i, field in enumerate(sets) if field == "owner_user_id = ?"), None)
+        if owner_idx is None:
+            sets.append("owner_user_id = ?")
+            values.append(owner_ids[0])
+        else:
+            values[owner_idx] = owner_ids[0]
+    elif "owner_user_ids" in updates:
+        # Explicitly clearing owners.
+        owner_idx = next((i for i, field in enumerate(sets) if field == "owner_user_id = ?"), None)
+        if owner_idx is None:
+            sets.append("owner_user_id = ?")
+            values.append(0)
+        else:
+            values[owner_idx] = 0
 
     with get_connection() as conn:
         cur = conn.execute(
@@ -528,6 +930,8 @@ def update_company_admin_fields(
             """,
             (*values, guild_id, symbol),
         )
+        if "owner_user_ids" in updates or "owner_user_id" in updates:
+            _set_company_owners(conn, guild_id, symbol, owner_ids)
         return cur.rowcount > 0
 
 

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ symbol }} · 716Stonks</title>
+  <style>
+    :root {
+      --bg: #0f172a; --panel: #111827; --line: #1f2937; --text: #e5e7eb; --muted: #94a3b8; --btn:#334155; --btnH:#475569;
+    }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 1100px; margin: 20px auto; padding: 0 14px; display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .title { font-size: 1.2rem; font-weight: 700; margin-bottom: 8px; }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .chartWrap { height: 380px; border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: #0b1323; }
+    #chart { width: 100%; height: 100%; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+    .row.one { grid-template-columns: 1fr; }
+    label { display:block; font-size:.82rem; color: var(--muted); margin-bottom: 4px; }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    textarea { min-height: 96px; resize: vertical; }
+    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
+    button:hover { background: var(--btnH); }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    .holdersTitle { margin-top: 12px; font-size: 1rem; font-weight: 700; }
+    .holdersWrap { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: #0b1323; overflow: auto; max-height: 260px; }
+    .holdersTable { width: 100%; border-collapse: collapse; }
+    .holdersTable th, .holdersTable td { padding: 8px 10px; border-bottom: 1px solid #1f2937; font-size: .88rem; text-align: left; }
+    .holdersTable th { color: var(--muted); font-size: .8rem; font-weight: 600; position: sticky; top: 0; background: #0f1b30; }
+    .holdersEmpty { padding: 10px; color: var(--muted); font-size: .85rem; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @media (max-width: 1024px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 700px) {
+      .row { grid-template-columns: 1fr; }
+      .chartWrap { height: 290px; }
+      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="top">
+        <div class="title">{{ symbol }} · Live Graph</div>
+        <a id="backLink" href="/">Back to Dashboard</a>
+      </div>
+      <div class="muted">Realtime refresh: 2s · Last: <span id="last">-</span></div>
+      <div style="margin:8px 0 10px 0;"><button id="viewToggle">Showing: Last 80</button></div>
+      <div class="chartWrap"><svg id="chart" viewBox="0 0 900 360"></svg></div>
+      <div class="holdersTitle">Shareholders</div>
+      <div class="holdersWrap">
+        <table class="holdersTable">
+          <thead>
+            <tr><th>User</th><th>Shares</th></tr>
+          </thead>
+          <tbody id="holdersRows">
+            <tr><td colspan="2" class="holdersEmpty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="title">Edit Parameters</div>
+      <div class="row">
+        <div><label>Name</label><input id="name" /></div>
+        <div><label>Owner User IDs (CSV, 0 = none)</label><input id="owner_user_ids" /></div>
+      </div>
+      <div class="row">
+        <div><label>Current Price</label><input id="current_price" type="number" step="0.01" /></div>
+        <div></div>
+      </div>
+      <div class="row">
+        <div><label>Base Price</label><input id="base_price" type="number" step="0.01" /></div>
+        <div><label>Slope (%/tick)</label><input id="slope" type="number" step="0.0001" /></div>
+      </div>
+      <div class="row">
+        <div><label>Drift (%)</label><input id="drift" type="number" step="0.001" /></div>
+        <div><label>Liquidity</label><input id="liquidity" type="number" step="0.01" /></div>
+      </div>
+      <div class="row">
+        <div><label>Impact Power</label><input id="impact_power" type="number" step="0.001" /></div>
+        <div><label>Founded Year</label><input id="founded_year" type="number" step="1" /></div>
+      </div>
+      <div class="row">
+        <div><label>Location</label><input id="location" /></div>
+        <div><label>Industry</label><input id="industry" /></div>
+      </div>
+      <div class="row one">
+        <div><label>Evaluation</label><textarea id="evaluation"></textarea></div>
+      </div>
+      <div class="row one">
+        <div><label>Description</label><textarea id="description"></textarea></div>
+      </div>
+      <button id="saveBtn">Save</button>
+      <button id="deleteBtn" style="margin-left:8px;background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Delete Company</button>
+      <div class="muted" id="msg" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <script>
+    const SYMBOL = {{ symbol|tojson }};
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    const ET_TIMEZONE = "America/New_York";
+    const RECENT_COUNT = 80;
+    let showRecent = true;
+    let historyAll = [];
+    function el(id){ return document.getElementById(id); }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function wireBackLink() {
+      const back = el("backLink");
+      if (back) {
+        const tab = String(new URLSearchParams(window.location.search).get("tab") || localStorage.getItem("dashboard_tab") || "companies");
+        const sep = "/".includes("?") ? "&" : "?";
+        back.href = withAuthToken(`/${sep}tab=${encodeURIComponent(tab)}`);
+      }
+    }
+    function fmtEtDate(value) {
+      const dt = value ? new Date(value) : new Date();
+      if (Number.isNaN(dt.getTime())) return String(value || "-");
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: ET_TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(dt);
+      const map = {};
+      parts.forEach((p) => { map[p.type] = p.value; });
+      return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
+    }
+    function esc(text) {
+      return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function drawLine(values) {
+      const svg = el("chart");
+      const w = 900, h = 360;
+      const left = 60, right = 18, top = 16, bottom = 42;
+      const pw = w - left - right, ph = h - top - bottom;
+      if (!values || values.length < 2) {
+        svg.innerHTML = "";
+        return;
+      }
+      const min = Math.min(...values), max = Math.max(...values), range = (max-min)||1;
+      const step = pw / Math.max(1, values.length - 1);
+      const pts = values.map((v,i)=>{
+        const x = left + i * step;
+        const y = top + ph * (1 - ((v-min)/range));
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      const up = values[values.length-1] >= values[0];
+      const hGrid = Array.from({length: 6}, (_, i) => {
+        const y = top + (ph * i / 5);
+        return `<line x1="${left}" y1="${y}" x2="${w-right}" y2="${y}" stroke="#1f2937" stroke-width="1" />`;
+      }).join("");
+      const vGrid = Array.from({length: 6}, (_, i) => {
+        const x = left + (pw * i / 5);
+        return `<line x1="${x}" y1="${top}" x2="${x}" y2="${h-bottom}" stroke="#1f2937" stroke-width="1" />`;
+      }).join("");
+      svg.innerHTML = `
+        ${hGrid}
+        ${vGrid}
+        <line x1="${left}" y1="${h-bottom}" x2="${w-right}" y2="${h-bottom}" stroke="#475569" stroke-width="1.2" />
+        <line x1="${left}" y1="${top}" x2="${left}" y2="${h-bottom}" stroke="#475569" stroke-width="1.2" />
+        <text x="${left}" y="${top-3}" fill="#94a3b8" font-size="11">${max.toFixed(2)}</text>
+        <text x="${left}" y="${h-bottom+14}" fill="#94a3b8" font-size="11">${min.toFixed(2)}</text>
+        <text x="${left}" y="${h-8}" fill="#94a3b8" font-size="11">0</text>
+        <text x="${w-right-24}" y="${h-8}" fill="#94a3b8" font-size="11">${values.length-1}</text>
+        <text x="${w/2-30}" y="${h-8}" fill="#94a3b8" font-size="12">X: Tick Index</text>
+        <text x="${left+8}" y="${top+14}" fill="#94a3b8" font-size="12">Y: Price ($)</text>
+        <polyline fill="none" stroke="${up ? '#22c55e' : '#ef4444'}" stroke-width="3" points="${pts}" />
+      `;
+    }
+
+    function fillForm(c) {
+      el("name").value = c.name || "";
+      const ownerIds = Array.isArray(c.owner_user_ids) ? c.owner_user_ids : [];
+      el("owner_user_ids").value = ownerIds.length ? ownerIds.join(",") : "0";
+      el("current_price").value = Number(c.current_price).toFixed(2);
+      el("base_price").value = Number(c.base_price).toFixed(2);
+      el("slope").value = Number(c.slope).toFixed(4);
+      el("drift").value = Number(c.drift).toFixed(3);
+      el("liquidity").value = Number(c.liquidity).toFixed(2);
+      el("impact_power").value = Number(c.impact_power).toFixed(3);
+      el("founded_year").value = Number(c.founded_year || 2000).toFixed(0);
+      el("location").value = c.location || "";
+      el("industry").value = c.industry || "";
+      el("evaluation").value = c.evaluation || "";
+      el("description").value = c.description || "";
+    }
+
+    function renderShareholders(rows) {
+      const tbody = el("holdersRows");
+      if (!tbody) return;
+      if (!Array.isArray(rows) || rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="2" class="holdersEmpty">No shareholders yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => {
+        const uid = String(r.user_id || "");
+        const name = String(r.display_name || "").trim() || `User ${uid || "?"}`;
+        const shares = Number(r.shares || 0);
+        return `<tr>
+          <td>${esc(name)}<div class="muted mono">${esc(uid)}</div></td>
+          <td class="mono">${Number.isFinite(shares) ? shares.toFixed(0) : "0"}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function refreshChart() {
+      const values = showRecent ? historyAll.slice(-RECENT_COUNT) : historyAll;
+      drawLine(values);
+      el("viewToggle").textContent = showRecent ? `Showing: Last ${RECENT_COUNT}` : "Showing: All History";
+    }
+
+    async function load(opts = {}) {
+      const fillInputs = !!opts.fillInputs;
+      const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}`), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.company) return;
+      if (fillInputs) {
+        fillForm(data.company);
+      }
+      historyAll = Array.isArray(data.history_prices) ? data.history_prices : [];
+      renderShareholders(Array.isArray(data.shareholders) ? data.shareholders : []);
+      refreshChart();
+      el("last").textContent = fmtEtDate(data.server_time_utc || "");
+    }
+
+    async function save() {
+      const payload = {
+        name: el("name").value,
+        owner_user_ids: String(el("owner_user_ids").value || "0").trim(),
+        current_price: Number(el("current_price").value),
+        base_price: Number(el("base_price").value),
+        slope: Number(el("slope").value),
+        drift: Number(el("drift").value),
+        liquidity: Number(el("liquidity").value),
+        impact_power: Number(el("impact_power").value),
+        founded_year: Number(el("founded_year").value),
+        location: el("location").value,
+        industry: el("industry").value,
+        evaluation: el("evaluation").value,
+        description: el("description").value,
+      };
+      const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        el("msg").textContent = "Saved.";
+        await load({ fillInputs: true });
+      } else {
+        const err = await res.json().catch(()=>({error:"Failed"}));
+        el("msg").textContent = err.error || "Save failed.";
+      }
+    }
+
+    async function removeCompany() {
+      const ok = window.confirm(`Delete company ${SYMBOL}? This cannot be undone.`);
+      if (!ok) return;
+      const btn = el("deleteBtn");
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Deleting...";
+      try {
+        const res = await fetch(withAuthToken(`/api/company/${encodeURIComponent(SYMBOL)}`), {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(()=>({error:"Delete failed"}));
+          el("msg").textContent = err.error || "Delete failed.";
+          btn.disabled = false;
+          btn.textContent = old;
+          return;
+        }
+        window.location.href = withAuthToken("/");
+      } catch (_e) {
+        el("msg").textContent = "Delete failed.";
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    el("saveBtn").addEventListener("click", save);
+    el("deleteBtn").addEventListener("click", removeCompany);
+    el("viewToggle").addEventListener("click", () => {
+      showRecent = !showRecent;
+      refreshChart();
+    });
+    wireBackLink();
+    load({ fillInputs: true });
+    setInterval(() => { load({ fillInputs: false }); }, 2000);
+  </script>
+</body>
+</html>
