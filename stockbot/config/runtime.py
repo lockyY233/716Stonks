@@ -22,6 +22,7 @@ from stockbot.config.settings import (
     COMMODITIES_LIMIT,
     PAWN_SELL_RATE,
     SHOP_RARITY_WEIGHTS,
+    STONKERS_ROLE_INACTIVE,
     TRADING_LIMITS,
     TRADING_LIMITS_PERIOD,
     TREND_MULTIPLIER,
@@ -66,6 +67,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         default=str(STONKERS_ROLE_NAME),
         cast=str,
         description="Role granted on registration and pinged on close updates.",
+    ),
+    "STONKERS_ROLE_INACTIVE": AppConfigSpec(
+        default=str(STONKERS_ROLE_INACTIVE),
+        cast=str,
+        description="Role assigned to users marked inactive (no activity in the last 24 hours).",
     ),
     "ANNOUNCEMENT_CHANNEL_ID": AppConfigSpec(
         default=int(ANNOUNCEMENT_CHANNEL_ID),
@@ -163,6 +169,9 @@ def _normalize(name: str, value: Any) -> Any:
         return text or str(STONKERS_ROLE_NAME)
     if name == "ANNOUNCEMENT_CHANNEL_ID":
         return max(0, int(value))
+    if name == "STONKERS_ROLE_INACTIVE":
+        text = str(value).strip()
+        return text or str(STONKERS_ROLE_INACTIVE)
     if name == "ANNOUNCE_MENTION_ROLE":
         return 1 if int(value) > 0 else 0
     if name == "GM_ID":

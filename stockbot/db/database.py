@@ -99,6 +99,7 @@ def init_db() -> None:
                 guild_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 price REAL NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
                 rarity TEXT NOT NULL DEFAULT 'common',
                 spawn_weight_override REAL NOT NULL DEFAULT 0,
                 image_url TEXT NOT NULL DEFAULT '',
@@ -374,6 +375,7 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
             guild_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             price REAL NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
             rarity TEXT NOT NULL DEFAULT 'common',
             spawn_weight_override REAL NOT NULL DEFAULT 0,
             image_url TEXT NOT NULL DEFAULT '',
@@ -417,6 +419,10 @@ def _ensure_commodities_tables(conn: sqlite3.Connection) -> None:
     if "rarity" not in columns:
         conn.execute(
             "ALTER TABLE commodities ADD COLUMN rarity TEXT NOT NULL DEFAULT 'common';"
+        )
+    if "enabled" not in columns:
+        conn.execute(
+            "ALTER TABLE commodities ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;"
         )
     if "spawn_weight_override" not in columns:
         conn.execute(

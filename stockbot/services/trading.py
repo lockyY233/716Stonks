@@ -148,7 +148,17 @@ def _current_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, 
 
 
 def _commodity_limit_status(guild_id: int, user_id: int) -> tuple[bool, int, int, int]:
-    limit = int(get_app_config("COMMODITIES_LIMIT"))
+    base_limit = int(get_app_config("COMMODITIES_LIMIT"))
+    evaluated = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=0,
+        base_networth=0.0,
+        base_commodities_limit=base_limit,
+        base_job_slots=1,
+    )
+    limit = int(evaluated["final"]["commodities_limit"])
     holdings = get_user_commodities(guild_id, user_id)
     used = sum(max(0, int(row.get("quantity", 0))) for row in holdings)
     if limit <= 0:

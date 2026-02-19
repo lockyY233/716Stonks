@@ -12,14 +12,33 @@ def build_close_ranking_lines(
     top_rows: list[dict],
     *,
     mention_users: bool = True,
+    inactive_user_ids: set[int] | None = None,
 ) -> list[str]:
+    inactive_user_ids = inactive_user_ids or set()
     lines: list[str] = []
     for idx, row in enumerate(top_rows, start=1):
         user_id = int(row["user_id"])
         display_name = str(row.get("display_name", "")).strip() or f"User {user_id}"
-        networth = float(row.get("networth", 0.0))
-        user_label = f"<@{user_id}>" if mention_users else display_name
-        lines.append(f"**#{idx}** {user_label} — Networth `${networth:.2f}`")
+        final_networth = float(row.get("networth", 0.0))
+        top_bonus = float(row.get("top_networth_bonus", 0.0))
+        display_base = float(row.get("display_base_networth", final_networth - top_bonus))
+        can_mention = mention_users and (user_id not in inactive_user_ids)
+        user_label = f"<@{user_id}>" if can_mention else display_name
+        if idx == 1:
+            prefix = "🥇"
+        elif idx == 2:
+            prefix = "🥈"
+        elif idx == 3:
+            prefix = "🥉"
+        else:
+            prefix = f"#{idx}"
+        if abs(top_bonus) > 1e-9:
+            sign = "+" if top_bonus >= 0 else "-"
+            lines.append(
+                f"**{prefix}** {user_label} — Networth `${display_base:.2f}` {sign} **`${abs(top_bonus):.2f}`**"
+            )
+        else:
+            lines.append(f"**{prefix}** {user_label} — Networth `${final_networth:.2f}`")
     return lines
 
 

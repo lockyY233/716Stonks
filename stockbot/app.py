@@ -7,7 +7,13 @@ import discord
 
 from stockbot.commands import setup_commands
 from stockbot.config.runtime import ensure_app_config_defaults, get_app_config
-from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME, TOKEN
+from stockbot.config.settings import (
+    DAILY_CLOSE_TOP_INCOME_BONUS,
+    DAILY_CLOSE_TOP_NETWORTH_BONUS,
+    DEFAULT_RANK,
+    RANK_INCOME,
+    TOKEN,
+)
 from stockbot.db import (
     add_action_history,
     apply_approved_loan,
@@ -15,7 +21,7 @@ from stockbot.db import (
     create_database_backup,
     get_unprocessed_reviewed_bank_requests,
     get_close_news,
-    get_top_users_by_networth,
+    get_user,
     get_state_value,
     get_users,
     init_db,
@@ -24,6 +30,7 @@ from stockbot.db import (
     set_state_value,
     update_user_bank,
 )
+from stockbot.db.database import get_connection
 from stockbot.services.economy import process_ticks
 from stockbot.services.jobs import process_due_timed_jobs
 from stockbot.services.announcements import (
@@ -31,7 +38,7 @@ from stockbot.services.announcements import (
     build_close_ranking_lines,
     send_market_close_v2,
 )
-from stockbot.services.perks import apply_income_perks
+from stockbot.services.perks import apply_income_perks, evaluate_user_perks
 
 
 class StockBot(discord.Client):
@@ -46,6 +53,19 @@ class StockBot(discord.Client):
 
     async def setup_hook(self) -> None:
         setup_commands(self.tree)
+        self.tree.interaction_check(self._track_activity_interaction_check)
+
+    async def _track_activity_interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            return True
+        try:
+            set_state_value(
+                f"user_last_active:{interaction.guild.id}:{interaction.user.id}",
+                str(time.time()),
+            )
+        except Exception:
+            pass
+        return True
 
     async def on_ready(self) -> None:
         if self._synced:
@@ -212,6 +232,7 @@ class StockBot(discord.Client):
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
         mention_role_enabled = int(get_app_config("ANNOUNCE_MENTION_ROLE")) > 0
+        inactive_role_name = str(get_app_config("STONKERS_ROLE_INACTIVE")).strip()
         gm_id = int(get_app_config("GM_ID"))
         try:
             tz = ZoneInfo(display_timezone)
@@ -251,13 +272,16 @@ class StockBot(discord.Client):
 
             local_date = close_dt.strftime("%Y-%m-%d")
             await asyncio.to_thread(self._backup_database_if_needed, local_date)
-            await asyncio.to_thread(self._apply_rank_income_for_guild, guild.id, close_event_id)
-
             await asyncio.to_thread(recalc_all_networth, guild.id)
-            top = await asyncio.to_thread(get_top_users_by_networth, guild.id, 50)
+            try:
+                await self._sync_inactivity_roles_for_guild(guild)
+            except Exception as exc:
+                print(f"[roles] inactivity close-sync error guild={guild.id}: {exc}")
+            top = await asyncio.to_thread(self._get_top_users_with_effective_networth, guild.id, 50)
             if gm_id > 0:
                 top = [row for row in top if int(row.get("user_id", 0)) != gm_id]
             top = top[:5]
+            await asyncio.to_thread(self._apply_rank_income_for_guild, guild.id, close_event_id, top)
 
             channel = await self._pick_announcement_channel(guild, announcement_channel_id)
             if channel is None:
@@ -275,7 +299,16 @@ class StockBot(discord.Client):
             role_mention = ""
             if mention_role_enabled:
                 role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
-            lines = build_close_ranking_lines(top, mention_users=mention_role_enabled)
+            inactive_ids: set[int] = set()
+            if inactive_role_name:
+                inactive_role = discord.utils.get(guild.roles, name=inactive_role_name)
+                if inactive_role is not None:
+                    inactive_ids = {int(member.id) for member in inactive_role.members}
+            lines = build_close_ranking_lines(
+                top,
+                mention_users=mention_role_enabled,
+                inactive_user_ids=inactive_ids,
+            )
 
             announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
             announced_ok = False
@@ -318,7 +351,118 @@ class StockBot(discord.Client):
         except Exception as exc:
             print(f"[backup] failed to create market-close backup: {exc}")
 
-    def _apply_rank_income_for_guild(self, guild_id: int, close_event_id: str) -> None:
+    def _daily_networth_bonus_key(self, guild_id: int, user_id: int) -> str:
+        return f"daily_networth_bonus:{guild_id}:{user_id}"
+
+    def _active_user_ids_last_day(self, guild_id: int) -> set[int]:
+        threshold_epoch = time.time() - 86400.0
+        since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with get_connection() as conn:
+            state_rows = conn.execute(
+                """
+                SELECT key, value
+                FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"user_last_active:{guild_id}:%",),
+            ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT DISTINCT user_id
+                FROM action_history
+                WHERE guild_id = ? AND created_at >= ?
+                """,
+                (guild_id, since_iso),
+            ).fetchall()
+        active_ids = {int(row["user_id"]) for row in rows}
+        for row in state_rows:
+            key = str(row["key"])
+            try:
+                uid = int(key.rsplit(":", 1)[-1])
+                last_epoch = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+            if last_epoch >= threshold_epoch:
+                active_ids.add(uid)
+        return active_ids
+
+    async def _sync_inactivity_roles_for_guild(self, guild: discord.Guild) -> None:
+        active_role_name = str(get_app_config("STONKERS_ROLE_NAME")).strip()
+        inactive_role_name = str(get_app_config("STONKERS_ROLE_INACTIVE")).strip()
+        if not active_role_name or not inactive_role_name:
+            return
+        active_role = discord.utils.get(guild.roles, name=active_role_name)
+        inactive_role = discord.utils.get(guild.roles, name=inactive_role_name)
+        if active_role is None and inactive_role is None:
+            return
+        active_ids = await asyncio.to_thread(self._active_user_ids_last_day, guild.id)
+        users = await asyncio.to_thread(get_users, guild.id)
+        for row in users:
+            user_id = int(row.get("user_id", 0))
+            if user_id <= 0:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+            currently_active = user_id in active_ids
+            current_roles = list(member.roles)
+            new_roles = [r for r in current_roles if r != active_role and r != inactive_role]
+            if currently_active:
+                if active_role is not None:
+                    new_roles.append(active_role)
+            else:
+                if inactive_role is not None:
+                    new_roles.append(inactive_role)
+            if {r.id for r in new_roles} == {r.id for r in current_roles}:
+                continue
+            try:
+                await member.edit(roles=new_roles, reason="Auto inactivity role sync at close (24h)")
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+    def _get_top_users_with_effective_networth(self, guild_id: int, limit: int = 50) -> list[dict]:
+        rows = get_users(guild_id)
+        ranked: list[dict] = []
+        for row in rows:
+            user_id = int(row.get("user_id", 0))
+            base_networth = float(row.get("networth", 0.0))
+            eval_result = evaluate_user_perks(
+                guild_id=guild_id,
+                user_id=user_id,
+                base_income=0.0,
+                base_trade_limits=0,
+                base_networth=base_networth,
+            )
+            effective_networth = float(eval_result["final"]["networth"])
+            bonus_raw = get_state_value(self._daily_networth_bonus_key(guild_id, user_id))
+            try:
+                top_networth_bonus = float(bonus_raw) if bonus_raw is not None else 0.0
+            except (TypeError, ValueError):
+                top_networth_bonus = 0.0
+            next_row = dict(row)
+            next_row["display_base_networth"] = effective_networth - top_networth_bonus
+            next_row["top_networth_bonus"] = top_networth_bonus
+            next_row["networth"] = effective_networth
+            ranked.append(next_row)
+        ranked.sort(
+            key=lambda r: (
+                float(r.get("networth", 0.0)),
+                float(r.get("bank", 0.0)),
+                -int(r.get("user_id", 0)),
+            ),
+            reverse=True,
+        )
+        return ranked[: max(1, int(limit))]
+
+    def _apply_rank_income_for_guild(
+        self,
+        guild_id: int,
+        close_event_id: str,
+        top_rows: list[dict],
+    ) -> None:
         payout_state_key = f"rank_income_event:{guild_id}"
         if get_state_value(payout_state_key) == close_event_id:
             return
@@ -330,6 +474,7 @@ class StockBot(discord.Client):
 
         lookup = {key.lower(): float(value) for key, value in RANK_INCOME.items()}
         default_income = float(RANK_INCOME.get(DEFAULT_RANK, 0.0))
+        payout_ts = datetime.now(timezone.utc).isoformat()
         for row in users:
             user_id = int(row["user_id"])
             bank = float(row.get("bank", 0.0))
@@ -339,6 +484,51 @@ class StockBot(discord.Client):
             if income <= 0:
                 continue
             update_user_bank(guild_id, user_id, bank + income)
+            add_action_history(
+                guild_id=guild_id,
+                user_id=user_id,
+                action_type="daily_income",
+                target_type="system",
+                target_symbol="MARKET_CLOSE",
+                quantity=1.0,
+                unit_price=float(income),
+                total_amount=float(income),
+                details=f"rank={rank}; base_income={base_income:.2f}; close_event={close_event_id}",
+                created_at=payout_ts,
+            )
+
+        # Instant leaderboard cash bonus (top 5) at close.
+        for rank_index, row in enumerate(top_rows[:5], start=1):
+            bonus = float(DAILY_CLOSE_TOP_INCOME_BONUS.get(rank_index, 0.0))
+            if abs(bonus) <= 1e-9:
+                continue
+            user_id = int(row.get("user_id", 0))
+            user = get_user(guild_id, user_id)
+            if user is None:
+                continue
+            bank = float(user.get("bank", 0.0))
+            update_user_bank(guild_id, user_id, bank + bonus)
+            add_action_history(
+                guild_id=guild_id,
+                user_id=user_id,
+                action_type="daily_top_bonus",
+                target_type="system",
+                target_symbol="MARKET_CLOSE_TOP",
+                quantity=float(rank_index),
+                unit_price=float(bonus),
+                total_amount=float(bonus),
+                details=f"rank={rank_index}; close_event={close_event_id}",
+                created_at=payout_ts,
+            )
+
+        # Networth bonus perk-like state (top 3), active until next close.
+        for row in users:
+            user_id = int(row["user_id"])
+            set_state_value(self._daily_networth_bonus_key(guild_id, user_id), "0")
+        for rank_index, row in enumerate(top_rows[:3], start=1):
+            bonus = float(DAILY_CLOSE_TOP_NETWORTH_BONUS.get(rank_index, 0.0))
+            user_id = int(row.get("user_id", 0))
+            set_state_value(self._daily_networth_bonus_key(guild_id, user_id), str(bonus))
 
         set_state_value(payout_state_key, close_event_id)
         return

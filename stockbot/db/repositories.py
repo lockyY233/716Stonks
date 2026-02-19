@@ -421,6 +421,26 @@ def list_running_timed_jobs(guild_id: int | None = None, limit: int = 500) -> li
         return [dict(r) for r in rows]
 
 
+def count_user_running_timed_jobs(guild_id: int, user_id: int, now_tick: int) -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM user_jobs uj
+            JOIN jobs j
+              ON j.id = uj.job_id
+             AND j.guild_id = uj.guild_id
+            WHERE uj.guild_id = ?
+              AND uj.user_id = ?
+              AND j.job_type = 'timed'
+              AND j.enabled = 1
+              AND (uj.running_until_epoch > strftime('%s','now') OR uj.running_until_tick > ?)
+            """,
+            (guild_id, user_id, int(now_tick)),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row is not None else 0
+
+
 def add_commodity(
     guild_id: int,
     name: str,
@@ -428,6 +448,7 @@ def add_commodity(
     rarity: str,
     image_url: str,
     description: str,
+    enabled: int = 1,
     spawn_weight_override: float = 0.0,
     perk_name: str = "",
     perk_description: str = "",
@@ -444,15 +465,16 @@ def add_commodity(
         conn.execute(
             """
             INSERT INTO commodities (
-                guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                guild_id, name, price, enabled, rarity, spawn_weight_override, image_url, description,
                 perk_name, perk_description, perk_min_qty, perk_effects_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
                 name,
                 max(0.01, float(price)),
+                1 if int(enabled) else 0,
                 rarity,
                 max(0.0, float(spawn_weight_override)),
                 image_url,
@@ -470,7 +492,7 @@ def get_commodities(guild_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT name, price, rarity, spawn_weight_override, image_url, description,
+            SELECT name, price, enabled, rarity, spawn_weight_override, image_url, description,
                    perk_name, perk_description, perk_min_qty, perk_effects_json
             FROM commodities
             WHERE guild_id = ?
@@ -485,7 +507,7 @@ def get_commodity(guild_id: int, name: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT name, price, rarity, spawn_weight_override, image_url, description,
+            SELECT name, price, enabled, rarity, spawn_weight_override, image_url, description,
                    perk_name, perk_description, perk_min_qty, perk_effects_json
             FROM commodities
             WHERE guild_id = ? AND name = ? COLLATE NOCASE
@@ -848,6 +870,8 @@ def update_user_admin_fields(
         if caster is None:
             continue
         value = caster(raw) if caster is not str else str(raw)
+        if key == "enabled":
+            value = 1 if int(value) else 0
         sets.append(f"{key} = ?")
         values.append(value)
     if not sets:
@@ -943,6 +967,7 @@ def update_commodity_admin_fields(
     allowed = {
         "name": str,
         "price": float,
+        "enabled": int,
         "rarity": str,
         "spawn_weight_override": float,
         "image_url": str,

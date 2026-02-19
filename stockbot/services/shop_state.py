@@ -140,7 +140,7 @@ def _build_or_load_shop_names(guild_id: int, bucket: int, rows: list[dict]) -> l
 
 def get_shop_items(guild_id: int) -> tuple[int, list[dict], list[str]]:
     bucket = current_shop_bucket()
-    rows = get_commodities(guild_id)
+    rows = [r for r in get_commodities(guild_id) if int(r.get("enabled", 1) or 0) == 1]
     if not rows:
         return bucket, [], []
 
@@ -170,7 +170,7 @@ def set_item_availability(guild_id: int, commodity_name: str, in_stock: bool) ->
 
 def swap_item(guild_id: int, slot_index: int, new_commodity_name: str) -> bool:
     bucket = current_shop_bucket()
-    rows = get_commodities(guild_id)
+    rows = [r for r in get_commodities(guild_id) if int(r.get("enabled", 1) or 0) == 1]
     valid_names = {str(r.get("name", "")).strip().lower() for r in rows}
     new_name = str(new_commodity_name).strip()
     if not new_name or new_name.lower() not in valid_names:

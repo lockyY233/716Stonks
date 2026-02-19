@@ -1,7 +1,10 @@
+import time
+
 from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import Button, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
+from stockbot.config.runtime import get_app_config
 from stockbot.core.commodity_rarity import rarity_color
 from stockbot.db import get_state_value, set_state_value
 from stockbot.services.shop_state import get_shop_items
@@ -12,10 +15,23 @@ def _build_store(guild_id: int) -> list[dict]:
     return rows
 
 
+def _minutes_until_next_refresh() -> float:
+    tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
+    last_tick_epoch_raw = get_state_value("last_tick_epoch")
+    try:
+        last_tick_epoch = float(last_tick_epoch_raw) if last_tick_epoch_raw is not None else 0.0
+    except (TypeError, ValueError):
+        last_tick_epoch = 0.0
+    if last_tick_epoch <= 0:
+        return tick_interval / 60.0
+    elapsed = max(0.0, time.time() - last_tick_epoch)
+    remaining = max(0.0, float(tick_interval) - elapsed)
+    return remaining / 60.0
+
+
 class ShopPager(View):
-    def __init__(self, owner_id: int, guild_id: int, rows: list[dict]) -> None:
+    def __init__(self, guild_id: int, rows: list[dict]) -> None:
         super().__init__(timeout=300)
-        self._owner_id = owner_id
         self._guild_id = guild_id
         self._rows = rows
         self._index = 0
@@ -25,15 +41,6 @@ class ShopPager(View):
         self.prev.disabled = self._index <= 0
         self.next.disabled = self._index >= len(self._rows) - 1
         self.buy.disabled = not bool(self.current_row().get("in_stock", False))
-
-    async def interaction_check(self, interaction: Interaction) -> bool:
-        if interaction.user.id != self._owner_id:
-            await interaction.response.send_message(
-                "Only the command user can interact with this panel.",
-                ephemeral=True,
-            )
-            return False
-        return True
 
     def current_row(self) -> dict:
         return self._rows[self._index]
@@ -64,17 +71,20 @@ class ShopPager(View):
             embed.set_image(url=image_url)
         return embed
 
+    def build_content(self) -> str:
+        return f"Refresh in **{_minutes_until_next_refresh():.2f} minute(s)**."
+
     @button(label="Prev", style=ButtonStyle.secondary)
     async def prev(self, interaction: Interaction, _button: Button) -> None:
         self._index = max(0, self._index - 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await interaction.response.edit_message(content=self.build_content(), embed=self.build_embed(), view=self)
 
     @button(label="Next", style=ButtonStyle.secondary)
     async def next(self, interaction: Interaction, _button: Button) -> None:
         self._index = min(len(self._rows) - 1, self._index + 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await interaction.response.edit_message(content=self.build_content(), embed=self.build_embed(), view=self)
 
     @button(label="Buy", style=ButtonStyle.green)
     async def buy(self, interaction: Interaction, _button: Button) -> None:
@@ -93,7 +103,7 @@ class ShopPager(View):
             if sold >= 1:
                 commodity["in_stock"] = False
                 self._sync_buttons()
-                await interaction.response.edit_message(embed=self.build_embed(), view=self)
+                await interaction.response.edit_message(content=self.build_content(), embed=self.build_embed(), view=self)
                 return
 
         _ok, message = await perform_buy_commodity(
@@ -114,7 +124,7 @@ class ShopPager(View):
         self._sync_buttons()
 
         # Always refresh the shop card first so stock state/button stays in sync.
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await interaction.response.edit_message(content=self.build_content(), embed=self.build_embed(), view=self)
         await interaction.followup.send(message, ephemeral=True)
 
 
@@ -136,8 +146,9 @@ def setup_shop(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        view = ShopPager(interaction.user.id, interaction.guild.id, rows)
+        view = ShopPager(interaction.guild.id, rows)
         await interaction.response.send_message(
+            content=view.build_content(),
             embed=view.build_embed(),
             view=view,
         )

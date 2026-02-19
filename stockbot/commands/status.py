@@ -14,6 +14,7 @@ from stockbot.db import (
     get_users,
     recalc_user_networth,
 )
+from stockbot.services.perks import evaluate_user_perks
 
 
 def _supports_components_v2() -> bool:
@@ -165,7 +166,9 @@ class StatusQuickActionsHub(discord.ui.LayoutView):
 
         row_1 = ui.ActionRow()
         bank_btn = discord.ui.Button(label="Bank", style=ButtonStyle.primary)
+        pawn_btn = discord.ui.Button(label="Pawn", style=ButtonStyle.danger)
         shop_btn = discord.ui.Button(label="Shop", style=ButtonStyle.green)
+        jobs_btn = discord.ui.Button(label="Jobs", style=ButtonStyle.green)
         list_btn = discord.ui.Button(label="List", style=ButtonStyle.secondary)
 
         row_2 = ui.ActionRow()
@@ -195,8 +198,16 @@ class StatusQuickActionsHub(discord.ui.LayoutView):
             if not rows:
                 await interaction.response.send_message("No commodities available yet.", ephemeral=True)
                 return
-            view = ShopPager(interaction.user.id, self._guild_id, rows)
+            view = ShopPager(self._guild_id, rows)
             await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+
+        async def pawn_cb(interaction: Interaction) -> None:
+            if interaction.user.id != self._owner_id:
+                await interaction.response.send_message("Only the command user can use this panel.", ephemeral=True)
+                return
+            from stockbot.commands.bank import _send_pawn_selector
+
+            await _send_pawn_selector(interaction, self._guild_id, interaction.user.id)
 
         async def list_cb(interaction: Interaction) -> None:
             if interaction.user.id != self._owner_id:
@@ -244,6 +255,22 @@ class StatusQuickActionsHub(discord.ui.LayoutView):
                 ephemeral=True,
             )
 
+        async def jobs_cb(interaction: Interaction) -> None:
+            if interaction.user.id != self._owner_id:
+                await interaction.response.send_message("Only the command user can use this panel.", ephemeral=True)
+                return
+            from stockbot.commands.jobs import JobsV2View
+            from stockbot.services.jobs import get_active_jobs
+
+            rows = get_active_jobs(self._guild_id, limit=5)
+            if not rows:
+                await interaction.response.send_message("No jobs are available right now.", ephemeral=True)
+                return
+            await interaction.response.send_message(
+                view=JobsV2View(self._guild_id, interaction.user.id, rows),
+                ephemeral=False,
+            )
+
         async def desc_cb(interaction: Interaction) -> None:
             if interaction.user.id != self._owner_id:
                 await interaction.response.send_message("Only the command user can use this panel.", ephemeral=True)
@@ -276,15 +303,19 @@ class StatusQuickActionsHub(discord.ui.LayoutView):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         bank_btn.callback = bank_cb
+        pawn_btn.callback = pawn_cb
         shop_btn.callback = shop_cb
         list_btn.callback = list_cb
+        jobs_btn.callback = jobs_cb
         price_btn.callback = price_cb
         desc_btn.callback = desc_cb
         ranking_btn.callback = ranking_cb
 
         row_1.add_item(bank_btn)
+        row_1.add_item(pawn_btn)
         row_1.add_item(shop_btn)
-        row_1.add_item(list_btn)
+        row_1.add_item(jobs_btn)
+        row_2.add_item(list_btn)
         row_2.add_item(price_btn)
         row_2.add_item(desc_btn)
         row_2.add_item(ranking_btn)
@@ -357,7 +388,7 @@ def setup_status(tree: app_commands.CommandTree) -> None:
 
         embed = Embed(
             title=f"📊 Status of {target.display_name}",
-            description=f"{target.mention}"
+            description=f"{target.display_name} (`{target.id}`)"
         )
         balance = round(float(user["bank"]), 2)
         networth = round(float(user.get("networth", 0.0)), 2)
@@ -376,7 +407,17 @@ def setup_status(tree: app_commands.CommandTree) -> None:
 
         commodity_holdings = get_user_commodities(interaction.guild.id, target.id)
         used_commodities = sum(max(0, int(row.get("quantity", 0))) for row in commodity_holdings)
-        commodity_limit = int(get_app_config("COMMODITIES_LIMIT"))
+        base_commodity_limit = int(get_app_config("COMMODITIES_LIMIT"))
+        perk_eval = evaluate_user_perks(
+            guild_id=interaction.guild.id,
+            user_id=target.id,
+            base_income=0.0,
+            base_trade_limits=0,
+            base_networth=0.0,
+            base_commodities_limit=base_commodity_limit,
+            base_job_slots=1,
+        )
+        commodity_limit = int(perk_eval["final"]["commodities_limit"])
         if commodity_limit > 0:
             commodities_title = f"🪙 Commodities({used_commodities}/{commodity_limit})"
         else:

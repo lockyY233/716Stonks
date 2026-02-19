@@ -31,12 +31,15 @@ def setup_perks(tree: app_commands.CommandTree) -> None:
         lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
         base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
         base_trade_limits = int(get_app_config("TRADING_LIMITS"))
+        base_commodities_limit = int(get_app_config("COMMODITIES_LIMIT"))
         result = evaluate_user_perks(
             guild_id=interaction.guild.id,
             user_id=target.id,
             base_income=base_income,
             base_trade_limits=base_trade_limits,
             base_networth=None,
+            base_commodities_limit=base_commodities_limit,
+            base_job_slots=1,
         )
         matched = list(result.get("matched_perks", []))
         base_stats = result["base"]
@@ -60,6 +63,26 @@ def setup_perks(tree: app_commands.CommandTree) -> None:
         embed.add_field(
             name="Networth",
             value=f"${float(base_stats['networth']):.2f} -> **${float(final_stats['networth']):.2f}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Commodities Limit",
+            value=f"{int(base_stats['commodities_limit'])} -> **{int(final_stats['commodities_limit'])}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Job Slots",
+            value=f"{int(base_stats['job_slots'])} -> **{int(final_stats['job_slots'])}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Timed Duration",
+            value=f"{float(base_stats['timed_duration']):.2f} -> **{float(final_stats['timed_duration']):.2f}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Chance Roll Bonus",
+            value=f"{float(base_stats['chance_roll_bonus']):+.2f} -> **{float(final_stats['chance_roll_bonus']):+.2f}**",
             inline=True,
         )
 

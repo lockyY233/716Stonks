@@ -19,6 +19,7 @@
     .row.one { grid-template-columns: 1fr; }
     label { display:block; font-size:.82rem; color: var(--muted); margin-bottom: 4px; }
     input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    .input-error { border-color:#ef4444 !important; box-shadow: 0 0 0 1px #ef4444 inset; }
     textarea { min-height: 96px; resize: vertical; }
     button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
     button:hover { background: var(--btnH); }
@@ -109,6 +110,13 @@
     let showRecent = true;
     let historyAll = [];
     function el(id){ return document.getElementById(id); }
+    function clearValidation() {
+      document.querySelectorAll(".input-error").forEach((node) => node.classList.remove("input-error"));
+    }
+    function markInvalid(id) {
+      const node = el(id);
+      if (node) node.classList.add("input-error");
+    }
     function withAuthToken(url) {
       if (!URL_AUTH_TOKEN) return url;
       const sep = url.includes("?") ? "&" : "?";
@@ -240,6 +248,30 @@
     }
 
     async function save() {
+      clearValidation();
+      const msg = el("msg");
+      if (msg) msg.textContent = "";
+      const missing = [];
+      const textRequired = ["name"];
+      const numericRequired = ["current_price", "base_price", "slope", "drift", "liquidity", "impact_power", "founded_year"];
+      textRequired.forEach((id) => {
+        const raw = String(el(id)?.value || "").trim();
+        if (!raw) {
+          missing.push(id);
+          markInvalid(id);
+        }
+      });
+      numericRequired.forEach((id) => {
+        const raw = String(el(id)?.value || "").trim();
+        if (!raw || !Number.isFinite(Number(raw))) {
+          missing.push(id);
+          markInvalid(id);
+        }
+      });
+      if (missing.length) {
+        if (msg) msg.textContent = "Please fill all required fields before saving.";
+        return;
+      }
       const payload = {
         name: el("name").value,
         owner_user_ids: String(el("owner_user_ids").value || "0").trim(),

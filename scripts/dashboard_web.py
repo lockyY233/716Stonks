@@ -120,6 +120,38 @@ def create_app() -> Flask:
         with _connect() as conn:
             conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
 
+    def _active_user_ids_last_day(guild_id: int) -> set[int]:
+        threshold_epoch = time.time() - 86400.0
+        since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with _connect() as conn:
+            state_rows = conn.execute(
+                """
+                SELECT key, value
+                FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"user_last_active:{guild_id}:%",),
+            ).fetchall()
+            history_rows = conn.execute(
+                """
+                SELECT DISTINCT user_id
+                FROM action_history
+                WHERE guild_id = ? AND created_at >= ?
+                """,
+                (guild_id, since_iso),
+            ).fetchall()
+        active_ids = {int(row["user_id"]) for row in history_rows}
+        for row in state_rows:
+            key = str(row["key"])
+            try:
+                uid = int(key.rsplit(":", 1)[-1])
+                last_epoch = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+            if last_epoch >= threshold_epoch:
+                active_ids.add(uid)
+        return active_ids
+
     def _cleanup_expired_auth_entries() -> None:
         now_epoch = int(time.time())
         with _connect() as conn:
@@ -1230,7 +1262,7 @@ def create_app() -> Flask:
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT name, price, rarity, spawn_weight_override, image_url, description,
+                SELECT name, price, enabled, rarity, spawn_weight_override, image_url, description,
                        perk_name, perk_description, perk_min_qty, perk_effects_json
                 FROM commodities
                 ORDER BY name
@@ -1311,7 +1343,7 @@ def create_app() -> Flask:
         with _connect() as conn:
             row = conn.execute(
                 """
-                SELECT guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                SELECT guild_id, name, price, enabled, rarity, spawn_weight_override, image_url, description,
                        perk_name, perk_description, perk_min_qty, perk_effects_json
                 FROM commodities
                 WHERE name = ? COLLATE NOCASE
@@ -1375,12 +1407,17 @@ def create_app() -> Flask:
                 ORDER BY networth DESC, bank DESC, user_id ASC
                 """
             ).fetchall()
+        active_by_guild: dict[int, set[int]] = {}
         players: list[dict] = []
         for r in rows:
             row = dict(r)
             row["user_id"] = str(row["user_id"])
             guild_id = int(row.get("guild_id", 0))
+            if guild_id not in active_by_guild:
+                active_by_guild[guild_id] = _active_user_ids_last_day(guild_id)
             user_id = row["user_id"]
+            user_id_int = int(user_id)
+            row["is_active"] = user_id_int in active_by_guild[guild_id]
             if limit > 0:
                 used_raw = _state_get(f"trade_used:{guild_id}:{user_id}:{bucket}")
                 try:
@@ -2016,12 +2053,17 @@ def create_app() -> Flask:
         lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
         base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
         base_trade_limits = int(_get_config("TRADING_LIMITS"))
+        base_commodities_limit = int(_get_config("COMMODITIES_LIMIT"))
         result = evaluate_user_perks(
             guild_id=guild_id,
             user_id=user_id,
             base_income=base_income,
             base_trade_limits=base_trade_limits,
             base_networth=None,
+            base_commodities_limit=base_commodities_limit,
+            base_job_slots=1,
+            base_timed_duration=0.0,
+            base_chance_roll_bonus=0.0,
         )
         matched = list(result.get("matched_perks", []))
         return jsonify(
@@ -2035,6 +2077,14 @@ def create_app() -> Flask:
                 "final_trade_limits": float(result["final"]["trade_limits"]),
                 "base_networth": float(result["base"]["networth"]),
                 "final_networth": float(result["final"]["networth"]),
+                "base_commodities_limit": float(result["base"]["commodities_limit"]),
+                "final_commodities_limit": float(result["final"]["commodities_limit"]),
+                "base_job_slots": float(result["base"]["job_slots"]),
+                "final_job_slots": float(result["final"]["job_slots"]),
+                "base_timed_duration": float(result["base"]["timed_duration"]),
+                "final_timed_duration": float(result["final"]["timed_duration"]),
+                "base_chance_roll_bonus": float(result["base"]["chance_roll_bonus"]),
+                "final_chance_roll_bonus": float(result["final"]["chance_roll_bonus"]),
                 "matched_perks": matched,
             }
         )
@@ -2422,6 +2472,7 @@ def create_app() -> Flask:
         allowed = {
             "name": str,
             "price": float,
+            "enabled": int,
             "rarity": str,
             "spawn_weight_override": float,
             "image_url": str,
@@ -2446,6 +2497,8 @@ def create_app() -> Flask:
             return jsonify({"error": "No valid fields provided"}), 400
         if "price" in updates:
             updates["price"] = max(0.01, float(updates["price"]))
+        if "enabled" in updates:
+            updates["enabled"] = 1 if int(updates["enabled"]) else 0
         if "spawn_weight_override" in updates:
             updates["spawn_weight_override"] = max(0.0, float(updates["spawn_weight_override"]))
         if "perk_min_qty" in updates:
@@ -2524,6 +2577,10 @@ def create_app() -> Flask:
             return jsonify({"error": "Invalid price"}), 400
         rarity = str(data.get("rarity", "common")).strip().lower() or "common"
         try:
+            enabled = 1 if int(data.get("enabled", 1) or 0) else 0
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid enabled value"}), 400
+        try:
             spawn_weight_override = max(0.0, float(data.get("spawn_weight_override", 0.0)))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid spawn_weight_override"}), 400
@@ -2564,13 +2621,13 @@ def create_app() -> Flask:
             conn.execute(
                 """
                 INSERT INTO commodities (
-                    guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                    guild_id, name, price, enabled, rarity, spawn_weight_override, image_url, description,
                     perk_name, perk_description, perk_min_qty, perk_effects_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    guild_id, name, price, rarity, spawn_weight_override, image_url, description,
+                    guild_id, name, price, enabled, rarity, spawn_weight_override, image_url, description,
                     perk_name, perk_description, perk_min_qty, perk_effects_json,
                 ),
             )
@@ -2584,6 +2641,31 @@ def create_app() -> Flask:
                 )
             _gc_uploaded_images(conn)
         return jsonify({"ok": True, "name": name})
+
+    @app.post("/api/commodity/<name>/delete")
+    def api_commodity_delete(name: str):
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id, name
+                FROM commodities
+                WHERE name = ? COLLATE NOCASE
+                """,
+                (name,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Commodity not found"}), 404
+            guild_id = int(row["guild_id"])
+            real_name = str(row["name"])
+            conn.execute(
+                """
+                DELETE FROM commodities
+                WHERE guild_id = ? AND name = ? COLLATE NOCASE
+                """,
+                (guild_id, real_name),
+            )
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True, "deleted": real_name})
 
     @app.post("/api/player/<int:user_id>/update")
     def api_player_update(user_id: int):

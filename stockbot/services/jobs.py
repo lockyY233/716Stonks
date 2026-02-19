@@ -15,12 +15,14 @@ from stockbot.db import (
     get_state_value,
     get_user,
     get_user_job_state,
+    count_user_running_timed_jobs,
     list_running_timed_jobs,
     get_user_running_timed_job,
     set_state_value,
     set_user_job_state,
     update_user_bank,
 )
+from stockbot.services.perks import evaluate_user_perks
 
 
 @dataclass(frozen=True)
@@ -381,9 +383,22 @@ def try_run_chance_job(guild_id: int, user_id: int, job_id: int) -> JobResult:
     if lock_row is not None:
         return JobResult(False, _timed_lock_message(lock_row))
     roll_pct = random.uniform(0.0, 100.0)
+    chance_eval = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=0,
+        base_networth=0.0,
+        base_commodities_limit=0,
+        base_job_slots=1,
+        base_timed_duration=0.0,
+        base_chance_roll_bonus=0.0,
+    )
+    roll_bonus = float(chance_eval["final"]["chance_roll_bonus"])
+    effective_roll = max(0.0, min(99.9999, roll_pct + roll_bonus))
     custom = None
     for outcome in _parse_chance_outcomes(job):
-        if float(outcome["min_roll"]) <= roll_pct < float(outcome["max_roll"]):
+        if float(outcome["min_roll"]) <= effective_roll < float(outcome["max_roll"]):
             custom = outcome
             break
     set_user_job_state(
@@ -401,16 +416,16 @@ def try_run_chance_job(guild_id: int, user_id: int, job_id: int) -> JobResult:
             user_id,
             job,
             reward,
-            f"type=chance;roll={roll_pct:.2f};custom=1",
+            f"type=chance;roll={roll_pct:.2f};roll_bonus={roll_bonus:.2f};effective_roll={effective_roll:.2f};custom=1",
         )
         mark_job_unavailable_this_tick(guild_id, job_id)
         msg = str(custom["message"] or "").strip()
         if not msg:
             if applied >= 0:
-                msg = f"Outcome triggered ({roll_pct:.2f}). You earned **${applied:.2f}**."
+                msg = f"Outcome triggered ({effective_roll:.2f}). You earned **${applied:.2f}**."
             else:
-                msg = f"Outcome triggered ({roll_pct:.2f}). You lost **${abs(applied):.2f}**."
-        msg = _fmt_template(msg, roll=f"{roll_pct:.2f}", reward=f"{applied:.2f}")
+                msg = f"Outcome triggered ({effective_roll:.2f}). You lost **${abs(applied):.2f}**."
+        msg = _fmt_template(msg, roll=f"{effective_roll:.2f}", reward=f"{applied:.2f}")
         return JobResult(applied >= 0, _with_payout_line(msg, applied), reward=applied)
 
     # Chance jobs are fully outcome-driven; without a matching custom outcome,
@@ -461,7 +476,36 @@ def try_start_or_claim_timed_job(guild_id: int, user_id: int, job_id: int) -> Jo
         return JobResult(True, _with_payout_line(claim_msg, applied), reward=applied)
     if not is_job_available_this_tick(guild_id, job_id):
         return JobResult(False, "This job is unavailable until next tick.")
-    duration_minutes = _timed_duration_minutes(job)
+    slots_eval = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=0,
+        base_networth=0.0,
+        base_commodities_limit=0,
+        base_job_slots=1,
+    )
+    max_slots = max(0, int(slots_eval["final"]["job_slots"]))
+    now_tick = current_tick()
+    running_count = count_user_running_timed_jobs(guild_id, user_id, now_tick)
+    if max_slots <= 0 or running_count >= max_slots:
+        return JobResult(
+            False,
+            f"Job slot limit reached ({running_count}/{max_slots}).",
+        )
+    base_duration_minutes = _timed_duration_minutes(job)
+    duration_eval = evaluate_user_perks(
+        guild_id=guild_id,
+        user_id=user_id,
+        base_income=0.0,
+        base_trade_limits=0,
+        base_networth=0.0,
+        base_commodities_limit=0,
+        base_job_slots=1,
+        base_timed_duration=base_duration_minutes,
+        base_chance_roll_bonus=0.0,
+    )
+    duration_minutes = max(0.1, float(duration_eval["final"]["timed_duration"]))
     end_epoch = time.time() + (duration_minutes * 60.0)
     set_user_job_state(
         guild_id,

@@ -8,7 +8,8 @@ from discord import ButtonStyle, Interaction, app_commands
 from discord.ui import Select
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
-from stockbot.db import get_user, get_user_running_timed_job
+from stockbot.config.runtime import get_app_config
+from stockbot.db import count_user_running_timed_jobs, get_state_value, get_user, get_user_running_timed_job
 from stockbot.services.jobs import (
     abandon_running_timed_job,
     current_tick,
@@ -18,6 +19,7 @@ from stockbot.services.jobs import (
     try_run_chance_job,
     try_start_or_claim_timed_job,
 )
+from stockbot.services.perks import evaluate_user_perks
 
 
 def _supports_components_v2() -> bool:
@@ -28,38 +30,109 @@ def _supports_components_v2() -> bool:
     )
 
 
+def _minutes_until_next_refresh() -> float:
+    tick_interval = max(1, int(get_app_config("TICK_INTERVAL")))
+    last_tick_epoch_raw = get_state_value("last_tick_epoch")
+    try:
+        last_tick_epoch = float(last_tick_epoch_raw) if last_tick_epoch_raw is not None else 0.0
+    except (TypeError, ValueError):
+        last_tick_epoch = 0.0
+    if last_tick_epoch <= 0:
+        return tick_interval / 60.0
+    elapsed = max(0.0, time.time() - last_tick_epoch)
+    remaining = max(0.0, float(tick_interval) - elapsed)
+    return remaining / 60.0
+
+
 def _job_summary(row: dict) -> str:
     name = str(row.get("name", "Job"))
     kind = str(row.get("job_type", "chance")).lower()
     desc = str(row.get("description", "") or "No description.")
     reward_min = float(row.get("reward_min", 0.0))
     reward_max = float(row.get("reward_max", reward_min))
+    cfg: dict = {}
+    raw_cfg = str(row.get("config_json", "") or "").strip()
+    if raw_cfg:
+        try:
+            parsed = json.loads(raw_cfg)
+            if isinstance(parsed, dict):
+                cfg = parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
+            cfg = {}
     lines = [
         f"### {name}",
         f"Type: **{kind}**",
         desc,
     ]
+    def _estimate_range() -> tuple[float, float]:
+        display_min_raw = cfg.get("display_reward_min", None)
+        display_max_raw = cfg.get("display_reward_max", None)
+        if display_min_raw is not None and display_max_raw is not None:
+            try:
+                d_min = float(display_min_raw)
+                d_max = float(display_max_raw)
+                if d_max < d_min:
+                    d_min, d_max = d_max, d_min
+                return d_min, d_max
+            except (TypeError, ValueError):
+                pass
+        if kind == "timed":
+            low = float(cfg.get("timed_reward_min", reward_min) or reward_min)
+            high = float(cfg.get("timed_reward_max", reward_max) or reward_max)
+            if high < low:
+                low, high = high, low
+            return low, high
+        if kind == "chance":
+            outcomes = cfg.get("chance_outcomes", [])
+            if isinstance(outcomes, list) and outcomes:
+                lows: list[float] = []
+                highs: list[float] = []
+                for item in outcomes:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        lo = float(item.get("reward_min", item.get("reward", 0.0)) or 0.0)
+                        hi = float(item.get("reward_max", item.get("reward", lo)) or lo)
+                    except (TypeError, ValueError):
+                        continue
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    lows.append(lo)
+                    highs.append(hi)
+                if lows and highs:
+                    return min(lows), max(highs)
+        if kind == "quiz":
+            choices = cfg.get("quiz_choices", [])
+            if isinstance(choices, list) and choices:
+                lows: list[float] = []
+                highs: list[float] = []
+                for item in choices:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        lo = float(item.get("reward_min", item.get("reward", 0.0)) or 0.0)
+                        hi = float(item.get("reward_max", item.get("reward", lo)) or lo)
+                    except (TypeError, ValueError):
+                        continue
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    lows.append(lo)
+                    highs.append(hi)
+                if lows and highs:
+                    return min(lows), max(highs)
+        if reward_max < reward_min:
+            return reward_max, reward_min
+        return reward_min, reward_max
+
+    est_min, est_max = _estimate_range()
     if kind == "timed":
         duration_minutes = float(row.get("duration_minutes", 0.0) or 0.0)
         if duration_minutes <= 0.0:
             duration_minutes = float(max(1, int(row.get("duration_ticks", 1))))
-        est_min = float(row.get("reward_min", 0.0) or 0.0)
-        est_max = float(row.get("reward_max", est_min) or est_min)
-        raw_cfg = str(row.get("config_json", "") or "").strip()
-        if raw_cfg:
-            try:
-                cfg = json.loads(raw_cfg)
-                if isinstance(cfg, dict):
-                    est_min = float(cfg.get("timed_reward_min", est_min) or est_min)
-                    est_max = float(cfg.get("timed_reward_max", est_max) or est_max)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        if est_max < est_min:
-            est_min, est_max = est_max, est_min
         lines.append(f"Time to complete: **{duration_minutes:.2f} minute(s)**")
-        lines.append(f"Estimated payout: **${est_min:.2f} - ${est_max:.2f}**")
+        lines.append(f"Estimated reward range: **${est_min:.2f} - ${est_max:.2f}**")
     else:
-        lines.append(f"Reward: **${reward_min:.2f} - ${reward_max:.2f}**")
+        lines.append(f"Estimated reward range: **${est_min:.2f} - ${est_max:.2f}**")
     if kind == "quiz":
         question = str(row.get("quiz_question", "")).strip() or "No question configured."
         lines.append(f"Question: **{question}**")
@@ -79,7 +152,19 @@ class JobsV2View(discord.ui.LayoutView):
         ui = discord.ui
         container = ui.Container()
         container.add_item(ui.TextDisplay(content="## Job Board (Current Rotation)"))
+        container.add_item(ui.TextDisplay(content=f"Refresh in **{_minutes_until_next_refresh():.2f} minute(s)**."))
         lock_row = get_user_running_timed_job(self._guild_id, self._user_id, current_tick())
+        slot_eval = evaluate_user_perks(
+            guild_id=self._guild_id,
+            user_id=self._user_id,
+            base_income=0.0,
+            base_trade_limits=0,
+            base_networth=0.0,
+            base_commodities_limit=int(get_app_config("COMMODITIES_LIMIT")),
+            base_job_slots=1,
+        )
+        max_slots = max(0, int(slot_eval["final"]["job_slots"]))
+        running_count = count_user_running_timed_jobs(self._guild_id, self._user_id, current_tick())
         if lock_row is not None:
             remaining_seconds = max(
                 0.0,
@@ -92,31 +177,35 @@ class JobsV2View(discord.ui.LayoutView):
                     content=(
                         f"### Active Timed Job\n"
                         f"**{job_name}**\n"
-                        f"Time remaining: **{remaining_minutes:.2f} minute(s)**."
+                        f"Time remaining: **{remaining_minutes:.2f} minute(s)**.\n"
+                        f"Timed job slots: **{running_count}/{max_slots}**."
                     )
                 )
             )
-            action_row = ui.ActionRow()
-            abandon_btn = discord.ui.Button(
-                label="Abandon",
-                style=ButtonStyle.danger,
-            )
+            if running_count >= max_slots:
+                action_row = ui.ActionRow()
+                abandon_btn = discord.ui.Button(
+                    label="Abandon",
+                    style=ButtonStyle.danger,
+                )
 
-            async def abandon_cb(interaction: Interaction) -> None:
-                result = abandon_running_timed_job(self._guild_id, self._user_id)
-                await interaction.response.send_message(result.message)
-                self._rows = get_active_jobs(self._guild_id, limit=5)
-                self._build()
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
+                async def abandon_cb(interaction: Interaction) -> None:
+                    result = abandon_running_timed_job(self._guild_id, self._user_id)
+                    await interaction.response.send_message(result.message)
+                    self._rows = get_active_jobs(self._guild_id, limit=5)
+                    self._build()
+                    try:
+                        await interaction.message.edit(view=self)
+                    except Exception:
+                        pass
 
-            abandon_btn.callback = abandon_cb
-            action_row.add_item(abandon_btn)
-            container.add_item(action_row)
-            self.add_item(container)
-            return
+                abandon_btn.callback = abandon_cb
+                action_row.add_item(abandon_btn)
+                container.add_item(action_row)
+                self.add_item(container)
+                return
+            if hasattr(ui, "Separator"):
+                container.add_item(ui.Separator())
         if hasattr(ui, "Separator"):
             container.add_item(ui.Separator())
         if not self._rows:
@@ -145,14 +234,10 @@ class JobsV2View(discord.ui.LayoutView):
         self.add_item(container)
 
     async def interaction_check(self, interaction: Interaction) -> bool:
-        if interaction.user.id != self._user_id:
-            await interaction.response.send_message(
-                "Only the command user can use this panel.",
-            )
-            return False
         return True
 
     async def _handle_take(self, interaction: Interaction, row: dict) -> None:
+        actor_user_id = interaction.user.id
         job_id = int(row.get("id", 0))
         active_ids = {int(j.get("id", 0)) for j in get_active_jobs(self._guild_id, limit=5)}
         if job_id not in active_ids:
@@ -170,7 +255,7 @@ class JobsV2View(discord.ui.LayoutView):
                 return
             view = QuizChoiceView(
                 guild_id=self._guild_id,
-                user_id=self._user_id,
+                user_id=actor_user_id,
                 job_id=job_id,
                 job_name=str(row.get("name", "Quiz Job")),
                 choices=choices,
@@ -181,7 +266,7 @@ class JobsV2View(discord.ui.LayoutView):
             await interaction.response.send_message(prompt, view=view)
             return
         if kind == "timed":
-            result = try_start_or_claim_timed_job(self._guild_id, self._user_id, job_id)
+            result = try_start_or_claim_timed_job(self._guild_id, actor_user_id, job_id)
             await interaction.response.send_message(result.message)
             self._rows = get_active_jobs(self._guild_id, limit=5)
             self._build()
@@ -190,7 +275,7 @@ class JobsV2View(discord.ui.LayoutView):
             except Exception:
                 pass
             return
-        result = try_run_chance_job(self._guild_id, self._user_id, job_id)
+        result = try_run_chance_job(self._guild_id, actor_user_id, job_id)
         await interaction.response.send_message(result.message)
         self._rows = get_active_jobs(self._guild_id, limit=5)
         self._build()
@@ -238,18 +323,13 @@ class QuizChoiceView(discord.ui.View):
         self.add_item(self._select)
 
     async def interaction_check(self, interaction: Interaction) -> bool:
-        if interaction.user.id != self._user_id:
-            await interaction.response.send_message(
-                "Only the command user can use this panel.",
-            )
-            return False
         return True
 
     async def _on_select(self, interaction: Interaction) -> None:
         value = str(self._select.values[0]) if self._select.values else ""
         result = submit_quiz_choice(
             guild_id=self._guild_id,
-            user_id=self._user_id,
+            user_id=interaction.user.id,
             job_id=self._job_id,
             choice_value=value,
         )

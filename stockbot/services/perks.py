@@ -133,15 +133,31 @@ def evaluate_user_perks(
     base_income: float = 0.0,
     base_trade_limits: int | None = None,
     base_networth: float | None = None,
+    base_commodities_limit: int | None = None,
+    base_job_slots: int | None = None,
+    base_timed_duration: float | None = None,
+    base_chance_roll_bonus: float | None = None,
 ) -> dict:
     """
     Evaluate perk requirements and aggregate effect modifiers for supported stats:
     - income
     - trade_limits
     - networth
+    - commodities_limit
+    - job_slots
+    - timed_duration
+    - chance_roll_bonus
     """
     if base_trade_limits is None:
         base_trade_limits = int(get_app_config("TRADING_LIMITS"))
+    if base_commodities_limit is None:
+        base_commodities_limit = int(get_app_config("COMMODITIES_LIMIT"))
+    if base_job_slots is None:
+        base_job_slots = 1
+    if base_timed_duration is None:
+        base_timed_duration = 0.0
+    if base_chance_roll_bonus is None:
+        base_chance_roll_bonus = 0.0
 
     with get_connection() as conn:
         holdings_rows = conn.execute(
@@ -242,7 +258,15 @@ def evaluate_user_perks(
     for row in effect_rows:
         effects_by_perk.setdefault(int(row["perk_id"]), []).append(dict(row))
 
-    tracked_stats = ("income", "trade_limits", "networth")
+    tracked_stats = (
+        "income",
+        "trade_limits",
+        "networth",
+        "commodities_limit",
+        "job_slots",
+        "timed_duration",
+        "chance_roll_bonus",
+    )
     stat_add = {k: 0.0 for k in tracked_stats}
     stat_mul = {k: 1.0 for k in tracked_stats}
     matched: list[dict] = []
@@ -404,19 +428,64 @@ def evaluate_user_perks(
             }
         )
 
+    # Daily close rank bonus (top 3) stored in app_state and active until next close.
+    daily_bonus_raw = get_state_value(f"daily_networth_bonus:{guild_id}:{user_id}")
+    try:
+        daily_networth_bonus = float(daily_bonus_raw) if daily_bonus_raw is not None else 0.0
+    except (TypeError, ValueError):
+        daily_networth_bonus = 0.0
+    if abs(daily_networth_bonus) > 1e-9:
+        stat_add["networth"] += daily_networth_bonus
+        matched.append(
+            {
+                "perk_id": 3_000_000_001,
+                "name": "Daily Close Rank Bonus",
+                "description": "Top close ranking bonus active until next close.",
+                "stacks": 1,
+                "add": 0.0,
+                "mul": 1.0,
+                "adds": {
+                    **{k: 0.0 for k in tracked_stats},
+                    "networth": daily_networth_bonus,
+                },
+                "muls": {k: 1.0 for k in tracked_stats},
+                "display": f"networth +{daily_networth_bonus:.2f}",
+            }
+        )
+
     final_income = max(0.0, (float(base_income) + stat_add["income"]) * stat_mul["income"])
     final_trade_limits = max(0.0, (float(base_trade_limits) + stat_add["trade_limits"]) * stat_mul["trade_limits"])
     final_networth = max(0.0, (float(base_networth) + stat_add["networth"]) * stat_mul["networth"])
+    final_commodities_limit = max(
+        0.0,
+        (float(base_commodities_limit) + stat_add["commodities_limit"]) * stat_mul["commodities_limit"],
+    )
+    final_job_slots = max(0.0, (float(base_job_slots) + stat_add["job_slots"]) * stat_mul["job_slots"])
+    final_timed_duration = max(
+        0.1,
+        (float(base_timed_duration) + stat_add["timed_duration"]) * stat_mul["timed_duration"],
+    )
+    final_chance_roll_bonus = (
+        float(base_chance_roll_bonus) + stat_add["chance_roll_bonus"]
+    ) * stat_mul["chance_roll_bonus"]
     return {
         "base": {
             "income": float(base_income),
             "trade_limits": float(base_trade_limits),
             "networth": float(base_networth),
+            "commodities_limit": float(base_commodities_limit),
+            "job_slots": float(base_job_slots),
+            "timed_duration": float(base_timed_duration),
+            "chance_roll_bonus": float(base_chance_roll_bonus),
         },
         "final": {
             "income": float(final_income),
             "trade_limits": float(int(round(final_trade_limits))),
             "networth": float(final_networth),
+            "commodities_limit": float(int(round(final_commodities_limit))),
+            "job_slots": float(int(round(final_job_slots))),
+            "timed_duration": float(final_timed_duration),
+            "chance_roll_bonus": float(final_chance_roll_bonus),
         },
         "matched_perks": matched,
     }
@@ -509,10 +578,10 @@ async def check_and_announce_perk_activations(
     if not newly_activated_ids:
         return []
 
+    perk_names = [current_names.get(perk_id, f"perk#{perk_id}") for perk_id in newly_activated_ids]
     channel = await _pick_announcement_channel(interaction.guild, interaction.client)
     if channel is None:
         return perk_names
-    perk_names = [current_names.get(perk_id, f"perk#{perk_id}") for perk_id in newly_activated_ids]
     blocks: list[str] = []
     for perk_id, perk_name in zip(newly_activated_ids, perk_names):
         desc = current_descriptions.get(perk_id) or "No description."
@@ -525,9 +594,7 @@ async def check_and_announce_perk_activations(
             f"{modifier}"
         )
     try:
-        await channel.send(
-            f"<@{user_id}>\n" + "\n\n".join(blocks)
-        )
+        await channel.send(f"<@{user_id}>\n" + "\n\n".join(blocks))
     except Exception as exc:
         print(f"[perks] failed to send activation announcement for guild={guild_id} user={user_id}: {exc}")
     return perk_names

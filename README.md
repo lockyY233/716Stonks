@@ -77,3 +77,33 @@ Features:
 - Click `Open` on a company to view `/company/<SYMBOL>`:
   - live-updating chart
   - editable parameters (`name`, `current_price`, `base_price`, `slope`, `drift`, `liquidity`, `impact_power`)
+
+## SQLWeb (On-Demand)
+
+To save memory, run SQLWeb only when needed instead of keeping a permanent service.
+
+Manual run (no auto-stop):
+
+```bash
+python scripts/admin_sqlite_web.py
+```
+
+Run for a limited time (example: 20 minutes):
+
+```bash
+python scripts/admin_sqlite_web.py --max-seconds 1200
+```
+
+Optional overrides:
+- `--host` (default `0.0.0.0`)
+- `--port` (default `8081`)
+- `--db-path` (default `data/stockbot.db`)
+
+### Disable always-on SQLWeb service (systemd)
+
+If you currently run SQLWeb as a service, disable it so RAM is only used on demand:
+
+```bash
+sudo systemctl stop 716Stonks-web.service
+sudo systemctl disable 716Stonks-web.service
+```

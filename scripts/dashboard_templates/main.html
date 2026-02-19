@@ -19,9 +19,28 @@
     .side { padding: 10px; max-height: calc(100vh - 40px); overflow: auto; }
     .btnrow { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
     button, a.btn { background: var(--btn); border: 1px solid #334155; color: var(--text); padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: .86rem; text-decoration: none; text-align: center; }
+    .btnrow button, .btnrow a.btn { text-align: left; }
     button:hover, a.btn:hover { background: var(--btnH); }
     button.active { border-color: #22c55e; }
     button.alert { background: #7f1d1d; border-color: #ef4444; color: #fee2e2; }
+    .mobileMenuBtn {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      width: 40px;
+      min-width: 40px;
+      height: 36px;
+      padding: 0;
+      border-radius: 8px;
+    }
+    .mobileMenuBtn .line {
+      width: 18px;
+      height: 2px;
+      background: #e5e7eb;
+      border-radius: 2px;
+      display: block;
+    }
     table { width: 100%; border-collapse: collapse; }
     thead th { text-align: left; font-size: .84rem; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); padding: 10px 8px; background: #0b1323; position: sticky; top: 0; }
     tbody td { padding: 9px 8px; border-bottom: 1px solid #111827; font-size: .92rem; }
@@ -63,9 +82,12 @@
     @media (max-width: 980px) {
       .wrap { grid-template-columns: 1fr; }
       .side { max-height: none; }
-      .head { flex-direction: column; align-items: flex-start; }
+      .head { flex-direction: row; align-items: center; justify-content: space-between; }
       thead th, tbody td { white-space: nowrap; }
       .statsBar { grid-template-columns: 1fr; }
+      .mobileMenuBtn { display: inline-flex; flex-direction: column; }
+      .side .btnrow { display: none; }
+      .side.open .btnrow { display: grid; margin-top: 8px; }
     }
   </style>
 </head>
@@ -73,22 +95,29 @@
   <div class="wrap">
     <div class="card">
       <div class="head">
-        <div class="title">Views</div>
-        <div class="muted">Tabs</div>
+        <div>
+          <div class="title">Views</div>
+          <div class="muted">Tabs</div>
+        </div>
+        <button id="mobileMenuBtn" class="mobileMenuBtn" aria-label="Toggle views menu" title="Toggle views menu">
+          <span class="line"></span>
+          <span class="line"></span>
+          <span class="line"></span>
+        </button>
       </div>
-      <div class="side">
+      <div class="side" id="sidebarViews">
         <div class="btnrow">
-          <button id="showCompanies" class="active">Show Companies</button>
-          <button id="showCommodities">Show Commodities</button>
+          <button id="showCompanies" class="active">Companies</button>
+          <button id="showCommodities">Commodities</button>
           <button id="showShop">Shop</button>
-          <button id="showPlayers">Show Players</button>
-          <button id="showPerks">Show Perks</button>
+          <button id="showPlayers">Players</button>
+          <button id="showPerks">Perks</button>
           <button id="showJobs">Jobs</button>
           <button id="showAnnouncements">Announcements</button>
           <button id="showFeedback">Feedback</button>
           <button id="showBankActions">Bank Actions</button>
           <button id="showActionHistory">Action History</button>
-          <button id="showConfigs">Show App Configs</button>
+          <button id="showConfigs">App Configs</button>
           <button id="showServerSettings">Server Settings</button>
           <a id="dbAccessBtn" class="btn" href="{{ db_access_url }}" target="_blank" rel="noopener">Open Database Access</a>
         </div>
@@ -168,6 +197,10 @@
     }
     function esc(text) {
       return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function makeDraftKey(prefix, len = 6) {
+      const rand = Math.random().toString(36).slice(2, 2 + len).toUpperCase();
+      return `${prefix}${rand}`;
     }
     function rarityClass(r) {
       const t = String(r || "common").toLowerCase().trim();
@@ -340,35 +373,29 @@
       const addBtn = document.getElementById("addCompanyBtn");
       if (addBtn) {
         addBtn.addEventListener("click", async () => {
-          const symbol = (window.prompt("Symbol (e.g. ATEST):", "") || "").trim().toUpperCase();
-          if (!symbol) return;
-          const name = (window.prompt("Company name:", symbol) || "").trim();
-          if (!name) return;
-          const baseRaw = window.prompt("Base price:", "1.00");
-          if (baseRaw === null) return;
-          const slopeRaw = window.prompt("Slope (% per tick):", "0.0010");
-          if (slopeRaw === null) return;
-          const base = Number(baseRaw);
-          const slope = Number(slopeRaw);
-          if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(slope)) {
-            alert("Invalid base/slope.");
-            return;
-          }
           addBtn.disabled = true;
           const old = addBtn.textContent;
           addBtn.textContent = "Adding...";
           try {
-            const res = await fetch(withAuthToken("/api/company"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ symbol, name, base_price: base, slope }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              await loadCompanies();
+            let createdSymbol = "";
+            for (let i = 0; i < 3; i++) {
+              const symbol = makeDraftKey("NEW", 5 + i);
+              const name = `New Company ${symbol}`;
+              const res = await fetch(withAuthToken("/api/company"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ symbol, name, base_price: 1.0, slope: 0.0 }),
+              });
+              if (res.ok) {
+                createdSymbol = symbol;
+                break;
+              }
             }
+            if (!createdSymbol) {
+              alert("Failed to create draft company. Please try again.");
+              return;
+            }
+            gotoWithAuth(`/company/${encodeURIComponent(createdSymbol)}`);
           } finally {
             addBtn.disabled = false;
             addBtn.textContent = old;
@@ -420,16 +447,16 @@
     function renderCommodities(rows) {
       document.getElementById("tableTitle").textContent = "Commodities";
       document.getElementById("thead").innerHTML = `<tr>
-        <th>Image</th><th>Name</th><th>Price</th><th>Rarity</th><th>Spawn Weight</th><th>Tags</th><th>Description</th>
+        <th>Image</th><th>Name</th><th>Price</th><th>Shop</th><th>Rarity</th><th>Spawn Weight</th><th>Tags</th><th>Description</th>
       </tr>`;
       const tbody = document.getElementById("rows");
       const controlRow = `<tr>
-        <td colspan="7" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+        <td colspan="8" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
           <button id="addCommodityBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Commodity</button>
         </td>
       </tr>`;
       if (!rows.length) {
-        tbody.innerHTML = controlRow + '<tr><td colspan="7" class="empty">No commodities found.</td></tr>';
+        tbody.innerHTML = controlRow + '<tr><td colspan="8" class="empty">No commodities found.</td></tr>';
       } else {
         const fallbackSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52"><rect width="100%" height="100%" fill="#0b1323"/><text x="50%" y="50%" fill="#94a3b8" font-size="9" text-anchor="middle" dominant-baseline="middle">No Img</text></svg>';
         const fallback = `data:image/svg+xml;utf8,${encodeURIComponent(fallbackSvg)}`;
@@ -437,6 +464,7 @@
           <td><img class="thumb" src="${esc(r.image_url || fallback)}" alt="${esc(r.name)}" onerror="this.onerror=null;this.src='${fallback}'" /></td>
           <td><strong>${esc(r.name)}</strong></td>
           <td class="mono">${fmtMoney(r.price)}</td>
+          <td>${Number(r.enabled ?? 1) === 0 ? '<span style="color:#fca5a5;">Disabled</span>' : '<span style="color:#86efac;">Enabled</span>'}</td>
           <td><span class="${rarityClass(r.rarity)}">${esc((r.rarity || "common").toUpperCase())}</span></td>
           <td class="mono">${esc(String(Number(r.spawn_weight_override || 0).toFixed(4)))}</td>
           <td>${esc(String((r.tags || []).join(", ")))}</td>
@@ -446,41 +474,37 @@
       const addBtn = document.getElementById("addCommodityBtn");
       if (addBtn) {
         addBtn.addEventListener("click", async () => {
-          const name = (window.prompt("Commodity name:", "") || "").trim();
-          if (!name) return;
-          const priceRaw = window.prompt("Price:", "1.00");
-          if (priceRaw === null) return;
-          const rarity = (window.prompt("Rarity (common/uncommon/rare/legendary/exotic):", "common") || "common").trim().toLowerCase();
-          const spawnWeightRaw = window.prompt("Spawn weight override (0 = rarity default):", "0");
-          if (spawnWeightRaw === null) return;
-          const image_url = (window.prompt("Image URL (optional):", "") || "").trim();
-          const tags = (window.prompt("Tags (comma-separated, optional):", "") || "").trim();
-          const description = (window.prompt("Description (optional):", "") || "").trim();
-          const price = Number(priceRaw);
-          const spawn_weight_override = Number(spawnWeightRaw);
-          if (!Number.isFinite(price) || price <= 0) {
-            alert("Invalid price.");
-            return;
-          }
-          if (!Number.isFinite(spawn_weight_override) || spawn_weight_override < 0) {
-            alert("Invalid spawn weight override.");
-            return;
-          }
           addBtn.disabled = true;
           const old = addBtn.textContent;
           addBtn.textContent = "Adding...";
           try {
-            const res = await fetch(withAuthToken("/api/commodity"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, price, rarity, spawn_weight_override, image_url, tags, description }),
-            });
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              await loadCommodities();
+            let createdName = "";
+            for (let i = 0; i < 3; i++) {
+              const name = `New Commodity ${makeDraftKey("", 6 + i)}`.trim();
+              const res = await fetch(withAuthToken("/api/commodity"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name,
+                  price: 1.0,
+                  enabled: 1,
+                  rarity: "common",
+                  spawn_weight_override: 0.0,
+                  image_url: "",
+                  tags: "",
+                  description: "",
+                }),
+              });
+              if (res.ok) {
+                createdName = name;
+                break;
+              }
             }
+            if (!createdName) {
+              alert("Failed to create draft commodity. Please try again.");
+              return;
+            }
+            gotoWithAuth(`/commodity/${encodeURIComponent(createdName)}`);
           } finally {
             addBtn.disabled = false;
             addBtn.textContent = old;
@@ -497,15 +521,16 @@
     function renderPlayers(rows) {
       document.getElementById("tableTitle").textContent = "Players";
       document.getElementById("thead").innerHTML = `<tr>
-        <th>User</th><th>Rank</th><th>Bank</th><th>Networth</th><th>Owe</th><th>Trading Limit</th>
+        <th>User</th><th>Status</th><th>Rank</th><th>Bank</th><th>Networth</th><th>Owe</th><th>Trading Limit</th>
       </tr>`;
       const tbody = document.getElementById("rows");
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No players found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No players found.</td></tr>';
         return;
       }
       tbody.innerHTML = rows.map((r) => `<tr class="clickable" data-user="${esc(r.user_id)}">
         <td>${esc(r.display_name || ("User " + r.user_id))}<div class="muted mono">${esc(r.user_id)}</div></td>
+        <td class="${r.is_active ? "up" : "down"}">${r.is_active ? "Active" : "Inactive"}</td>
         <td>${esc(r.rank || "-")}</td>
         <td class="mono">${fmtMoney(r.bank)}</td>
         <td class="mono">${fmtMoney(r.networth)}</td>
@@ -668,30 +693,27 @@
       const addBtn = document.getElementById("addPerkBtn");
       if (addBtn) {
         addBtn.addEventListener("click", async () => {
-          const name = (window.prompt("Perk name:", "") || "").trim();
-          if (!name) return;
-          const description = (window.prompt("Description (optional):", "") || "").trim();
           addBtn.disabled = true;
           const old = addBtn.textContent;
           addBtn.textContent = "Adding...";
           try {
+            const name = `New Perk ${makeDraftKey("", 6)}`.trim();
             const res = await fetch(withAuthToken("/api/perk"), {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, description }),
+              body: JSON.stringify({ name, description: "" }),
             });
             if (!res.ok) {
-              const err = await res.json().catch(() => ({ error: "Create failed" }));
-              alert(err.error || "Create failed");
-            } else {
-              const data = await res.json();
-              const id = Number(data.id || 0);
-              if (id > 0) {
-                gotoWithAuth(`/perk/${id}`);
-                return;
-              }
-              await loadPerks();
+              alert("Failed to create draft perk. Please try again.");
+              return;
             }
+            const data = await res.json().catch(() => ({}));
+            const id = Number(data.id || 0);
+            if (id > 0) {
+              gotoWithAuth(`/perk/${id}`);
+              return;
+            }
+            await loadPerks();
           } finally {
             addBtn.disabled = false;
             addBtn.textContent = old;
@@ -776,23 +798,23 @@
       const addBtn = document.getElementById("addJobBtn");
       if (addBtn) {
         addBtn.addEventListener("click", async () => {
-          const name = (window.prompt("Job name:", "") || "").trim();
-          if (!name) return;
-          const job_type = (window.prompt("Job type (chance/quiz/timed):", "chance") || "chance").trim().toLowerCase();
-          const description = (window.prompt("Description:", "") || "").trim();
-          const duration_minutes = Number(window.prompt("Duration minutes (timed type):", "20") || "20");
-          const quiz_question = (window.prompt("Quiz question (quiz type):", "") || "").trim();
+          const name = `New Job ${makeDraftKey("", 6)}`.trim();
           const res = await fetch(withAuthToken("/api/job"), {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-              name, job_type, description,
-              duration_minutes, quiz_question, quiz_answer: "", config_json: {}, enabled: 1,
+              name,
+              job_type: "chance",
+              description: "",
+              duration_minutes: 20,
+              quiz_question: "",
+              quiz_answer: "",
+              config_json: {},
+              enabled: 1,
             }),
           });
           if (!res.ok) {
-            const err = await res.json().catch(()=>({error:"Failed"}));
-            alert(err.error || "Add failed.");
+            alert("Failed to create draft job. Please try again.");
             return;
           }
           const created = await res.json().catch(() => ({}));
@@ -1804,6 +1826,22 @@
     document.getElementById("showActionHistory").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("actionHistory"); setButtons(); tick(); });
     document.getElementById("showConfigs").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("configs"); setButtons(); tick(); });
     document.getElementById("showServerSettings").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("serverSettings"); setButtons(); renderServerSettings(); });
+    const sidebarViews = document.getElementById("sidebarViews");
+    const mobileMenuBtn = document.getElementById("mobileMenuBtn");
+    function closeSidebarIfMobile() {
+      if (!sidebarViews) return;
+      if (window.matchMedia("(max-width: 980px)").matches) {
+        sidebarViews.classList.remove("open");
+      }
+    }
+    if (mobileMenuBtn && sidebarViews) {
+      mobileMenuBtn.addEventListener("click", () => {
+        sidebarViews.classList.toggle("open");
+      });
+    }
+    document.querySelectorAll(".btnrow > button[id^='show'], .btnrow > a#dbAccessBtn").forEach((node) => {
+      node.addEventListener("click", closeSidebarIfMobile);
+    });
     applyReadOnlyLayout();
     setCurrentTab(currentTab);
     setButtons();

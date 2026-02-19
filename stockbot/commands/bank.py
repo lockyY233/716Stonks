@@ -582,3 +582,23 @@ def setup_bank(tree: app_commands.CommandTree) -> None:
             view=BankMenuView(interaction.guild.id, interaction.user.id),
             ephemeral=True,
         )
+
+    @tree.command(name="pawn", description="Pawn an owned commodity at the bank pawn rate.")
+    async def pawn(interaction: Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Please use this command in a server.",
+                ephemeral=True,
+            )
+            return
+
+        user = get_user(interaction.guild.id, interaction.user.id)
+        if user is None:
+            await interaction.response.send_message(
+                REGISTER_REQUIRED_MESSAGE,
+                view=RegisterNowView(),
+                ephemeral=True,
+            )
+            return
+
+        await _send_pawn_selector(interaction, interaction.guild.id, interaction.user.id)

@@ -12,7 +12,7 @@ from stockbot.db import (
     recalc_user_networth,
     upsert_user_commodity,
 )
-from stockbot.services.perks import check_and_announce_perk_activations
+from stockbot.services.perks import check_and_announce_perk_activations, evaluate_user_perks
 
 
 def setup_admingive(tree: app_commands.CommandTree) -> None:
@@ -53,7 +53,17 @@ def setup_admingive(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        limit = int(get_app_config("COMMODITIES_LIMIT"))
+        base_limit = int(get_app_config("COMMODITIES_LIMIT"))
+        evaluated = evaluate_user_perks(
+            guild_id=interaction.guild.id,
+            user_id=target.id,
+            base_income=0.0,
+            base_trade_limits=0,
+            base_networth=0.0,
+            base_commodities_limit=base_limit,
+            base_job_slots=1,
+        )
+        limit = int(evaluated["final"]["commodities_limit"])
         holdings = get_user_commodities(interaction.guild.id, target.id)
         owned_total = sum(max(0, int(item.get("quantity", 0))) for item in holdings)
         if limit > 0:

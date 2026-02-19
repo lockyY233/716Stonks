@@ -15,6 +15,7 @@
     .row.one { grid-template-columns:1fr; }
     label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
     input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    .input-error { border-color:#ef4444 !important; box-shadow: 0 0 0 1px #ef4444 inset; }
     textarea { min-height: 100px; resize: vertical; }
     button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
     button:hover { background: var(--btnH); }
@@ -55,6 +56,10 @@
         <div><label>Duration Minutes (timed jobs)</label><input id="duration_minutes" type="number" step="0.01" min="0" /></div>
       </div>
       <div class="row">
+        <div><label>Estimated Reward Min (display only)</label><input id="display_reward_min" type="number" step="0.01" value="0" /></div>
+        <div><label>Estimated Reward Max (display only)</label><input id="display_reward_max" type="number" step="0.01" value="0" /></div>
+      </div>
+      <div class="row">
         <div><label>Updated At (read-only)</label><input id="updated_at" readonly /></div>
         <div></div>
       </div>
@@ -77,7 +82,7 @@
         <div>
           <label>Quiz Dropdown Choices</label>
           <table>
-            <thead><tr><th>Label</th><th>Value</th><th>Min Reward</th><th>Max Reward</th><th>Message</th><th>Action</th></tr></thead>
+            <thead><tr><th>Label</th><th>Min Reward</th><th>Max Reward</th><th>Message</th><th>Action</th></tr></thead>
             <tbody id="quizChoiceRows"></tbody>
           </table>
           <button id="addQuizChoiceBtn" type="button" style="margin-top:8px;">+ Add Quiz Choice</button>
@@ -103,6 +108,13 @@
     let chanceOutcomes = [];
     let quizChoices = [];
     function el(id){ return document.getElementById(id); }
+    function clearValidation() {
+      document.querySelectorAll(".input-error").forEach((node) => node.classList.remove("input-error"));
+    }
+    function markInvalid(id) {
+      const node = el(id);
+      if (node) node.classList.add("input-error");
+    }
     function withAuthToken(url) {
       if (!URL_AUTH_TOKEN) return url;
       const sep = url.includes("?") ? "&" : "?";
@@ -116,6 +128,24 @@
     }
     function esc(text) {
       return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+    }
+    function makeQuizChoiceId() {
+      const a = Math.random().toString(36).slice(2, 8);
+      const b = Date.now().toString(36).slice(-4);
+      return `qc_${a}${b}`;
+    }
+    function normalizeQuizChoices() {
+      const used = new Set();
+      quizChoices = (Array.isArray(quizChoices) ? quizChoices : []).map((choice) => {
+        const out = { ...(choice || {}) };
+        let v = String(out.value || "").trim();
+        if (!v || used.has(v)) {
+          do { v = makeQuizChoiceId(); } while (used.has(v));
+        }
+        used.add(v);
+        out.value = v;
+        return out;
+      });
     }
     function renderChanceRows() {
       const body = el("chanceRows");
@@ -168,7 +198,6 @@
       body.innerHTML = quizChoices.map((o, i) => `
         <tr>
           <td><input data-q-label="${i}" value="${esc(String(o.label || ""))}" /></td>
-          <td><input data-q-value="${i}" value="${esc(String(o.value || ""))}" /></td>
           <td><input data-q-rmin="${i}" type="number" step="0.01" value="${Number(o.reward_min ?? o.reward ?? 0)}" /></td>
           <td><input data-q-rmax="${i}" type="number" step="0.01" value="${Number(o.reward_max ?? o.reward ?? 0)}" /></td>
           <td><input data-q-message="${i}" value="${esc(String(o.message || ""))}" /></td>
@@ -188,7 +217,7 @@
       quizChoices = Array.from(document.querySelectorAll("[data-q-label]")).map((node) => {
         const i = Number(node.getAttribute("data-q-label"));
         const label = String(document.querySelector(`[data-q-label="${i}"]`)?.value || "").trim();
-        const value = String(document.querySelector(`[data-q-value="${i}"]`)?.value || "").trim();
+        const value = String((quizChoices[i] && quizChoices[i].value) || "").trim();
         const rewardMin = Number(document.querySelector(`[data-q-rmin="${i}"]`)?.value || 0);
         const rewardMax = Number(document.querySelector(`[data-q-rmax="${i}"]`)?.value || 0);
         const message = String(document.querySelector(`[data-q-message="${i}"]`)?.value || "");
@@ -200,6 +229,7 @@
           message,
         };
       }).filter((x) => x.label);
+      normalizeQuizChoices();
     }
     async function load() {
       const res = await fetch(withAuthToken(`/api/job/${encodeURIComponent(JOB_ID)}`), { cache: "no-store" });
@@ -220,6 +250,9 @@
       try { cfg = JSON.parse(String(job.config_json || "{}")); } catch (_e) { cfg = {}; }
       chanceOutcomes = Array.isArray(cfg.chance_outcomes) ? cfg.chance_outcomes : [];
       quizChoices = Array.isArray(cfg.quiz_choices) ? cfg.quiz_choices : [];
+      normalizeQuizChoices();
+      el("display_reward_min").value = Number(cfg.display_reward_min || 0).toFixed(2);
+      el("display_reward_max").value = Number(cfg.display_reward_max || 0).toFixed(2);
       el("timed_reward_min").value = Number(cfg.timed_reward_min || 0).toFixed(2);
       el("timed_reward_max").value = Number(cfg.timed_reward_max || 0).toFixed(2);
       el("timed_start_message").value = String(cfg.timed_start_message || "");
@@ -228,23 +261,46 @@
       renderQuizChoiceRows();
     }
     async function save() {
+      clearValidation();
+      el("msg").textContent = "";
+      const nameRaw = String(el("name").value || "").trim();
+      const typeRaw = String(el("job_type").value || "").trim();
+      const durationRaw = String(el("duration_minutes").value || "").trim();
+      const quizQuestionRaw = String(el("quiz_question").value || "").trim();
+      let invalid = false;
+      if (!nameRaw) { markInvalid("name"); invalid = true; }
+      if (!typeRaw) { markInvalid("job_type"); invalid = true; }
+      if (typeRaw === "timed" && (!durationRaw || !Number.isFinite(Number(durationRaw)))) {
+        markInvalid("duration_minutes");
+        invalid = true;
+      }
+      if (typeRaw === "quiz" && !quizQuestionRaw) {
+        markInvalid("quiz_question");
+        invalid = true;
+      }
+      if (invalid) {
+        el("msg").textContent = "Please fill all required fields before saving.";
+        return;
+      }
       collectChanceRows();
       collectQuizChoiceRows();
       const cfg = {
         chance_outcomes: chanceOutcomes,
         quiz_choices: quizChoices,
+        display_reward_min: Number(el("display_reward_min").value || "0"),
+        display_reward_max: Number(el("display_reward_max").value || "0"),
         timed_reward_min: Number(el("timed_reward_min").value || "0"),
         timed_reward_max: Number(el("timed_reward_max").value || "0"),
         timed_start_message: String(el("timed_start_message").value || ""),
         timed_claim_message: String(el("timed_claim_message").value || ""),
       };
       const payload = {
-        name: String(el("name").value || "").trim(),
+        name: nameRaw,
         description: String(el("description").value || ""),
-        job_type: String(el("job_type").value || "chance"),
+        job_type: typeRaw,
         enabled: Number(el("enabled").value || "0"),
         duration_minutes: Number(el("duration_minutes").value || "0"),
-        quiz_question: String(el("quiz_question").value || ""),
+        quiz_question: quizQuestionRaw,
         quiz_answer: "",
         config_json: cfg,
       };
@@ -277,7 +333,8 @@
     });
     el("addQuizChoiceBtn").addEventListener("click", () => {
       const idx = quizChoices.length + 1;
-      quizChoices.push({ label: `Choice ${idx}`, value: `choice_${idx}`, reward_min: 0, reward_max: 0, message: "" });
+      quizChoices.push({ label: `Choice ${idx}`, value: makeQuizChoiceId(), reward_min: 0, reward_max: 0, message: "" });
+      normalizeQuizChoices();
       renderQuizChoiceRows();
     });
     el("saveBtn").addEventListener("click", save);
