@@ -1,0 +1,256 @@
+:root {
+  --bg: #0f172a;
+  --bg-panel: #0b1220;
+  --line: #263246;
+  --text: #e5e7eb;
+  --muted: #94a3b8;
+  --accent: #22c55e;
+  --up: #22c55e;
+  --down: #ef4444;
+  font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  background: radial-gradient(1200px 600px at 80% -10%, #1d4ed822, transparent), var(--bg);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 14px;
+  padding: 14px;
+  min-height: 100vh;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #0b1220, #0a101c);
+  overflow: hidden;
+}
+
+.sidebar {
+  padding: 12px;
+}
+
+.panelHead h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.panelHead p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.avatar {
+  width: 54px;
+  height: 54px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+
+.menu {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.menuBtn {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #111b2f;
+  color: var(--text);
+  text-align: left;
+  padding: 9px 10px;
+}
+
+.menuBtn.active {
+  border-color: var(--accent);
+}
+
+.contentHead {
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.contentHead h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.contentHead p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.stamp {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.stats {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.statusCard {
+  margin: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0c1629;
+  padding: 10px;
+}
+.statusCard h3 {
+  margin: 0 0 8px 0;
+  font-size: 0.96rem;
+}
+.statusGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.statusGrid span {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+.statusGrid strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.88rem;
+}
+.statusLine {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid #18243a;
+}
+.statusLine span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.statusLine strong {
+  font-size: 0.86rem;
+}
+.statusLists {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.statusLists h4 {
+  margin: 0 0 6px 0;
+  font-size: 0.82rem;
+}
+.rowItem {
+  font-size: 0.82rem;
+  padding: 4px 0;
+  border-top: 1px solid #18243a;
+}
+
+.stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c1629;
+  padding: 8px 10px;
+}
+
+.stat span {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.stat strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.95rem;
+}
+
+.tableWrap {
+  overflow: auto;
+  width: 100%;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  text-align: left;
+  font-size: 0.82rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding: 10px 8px;
+  background: #0b1323;
+}
+
+tbody td {
+  padding: 9px 8px;
+  border-bottom: 1px solid #111827;
+  font-size: 0.92rem;
+}
+
+tbody tr:hover {
+  background: #13203a;
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.up { color: var(--up); font-weight: 600; }
+.down { color: var(--down); font-weight: 600; }
+
+.empty {
+  padding: 16px;
+  color: var(--muted);
+}
+
+.error {
+  margin: 12px 14px;
+  border: 1px solid #7f1d1d;
+  background: #2a1111;
+  color: #fecaca;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .stats {
+    grid-template-columns: 1fr 1fr;
+  }
+  .statusGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .statusLists {
+    grid-template-columns: 1fr;
+  }
+}

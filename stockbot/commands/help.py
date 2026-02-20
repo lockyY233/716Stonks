@@ -32,7 +32,8 @@ HELP_SECTIONS: dict[str, str] = {
         "- `/price symbol:... [last:...]`\n"
         "- `/buy`\n"
         "- `/sell`\n"
-        "- `/transactionhistory`"
+        "- `/transactionhistory`\n"
+        "- `/activity` (launch embedded activity in your voice channel)"
     ),
     "economy": (
         "## Economy Commands\n"
@@ -144,4 +145,3 @@ def setup_help(tree: app_commands.CommandTree) -> None:
 
         view = HelpV2View(section="get_started")
         await interaction.response.send_message(view=view, ephemeral=False)
-

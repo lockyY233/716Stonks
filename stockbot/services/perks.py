@@ -11,6 +11,8 @@ from stockbot.config.runtime import get_app_config
 from stockbot.db.database import get_connection
 from stockbot.db.repositories import get_state_value, set_state_value
 
+DAILY_CLOSE_RANK_BONUS_PERK_ID = 3_000_000_001
+
 
 def _cmp(actual: float, operator: str, expected: float) -> bool:
     if operator == ">":
@@ -438,7 +440,7 @@ def evaluate_user_perks(
         stat_add["networth"] += daily_networth_bonus
         matched.append(
             {
-                "perk_id": 3_000_000_001,
+                "perk_id": DAILY_CLOSE_RANK_BONUS_PERK_ID,
                 "name": "Daily Close Rank Bonus",
                 "description": "Top close ranking bonus active until next close.",
                 "stacks": 1,

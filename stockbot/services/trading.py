@@ -418,6 +418,8 @@ async def perform_buy_commodity(
     commodity = get_commodity(interaction.guild.id, commodity_name)
     if commodity is None:
         return False, f"Commodity `{commodity_name}` not found."
+    if int(commodity.get("enabled", 1) or 0) != 1:
+        return False, f"Commodity `{commodity_name}` is currently disabled."
 
     enabled, limit, _used, remaining = _commodity_limit_status(
         interaction.guild.id,

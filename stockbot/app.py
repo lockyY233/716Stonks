@@ -30,7 +30,6 @@ from stockbot.db import (
     set_state_value,
     update_user_bank,
 )
-from stockbot.db.database import get_connection
 from stockbot.services.economy import process_ticks
 from stockbot.services.jobs import process_due_timed_jobs
 from stockbot.services.announcements import (
@@ -38,7 +37,12 @@ from stockbot.services.announcements import (
     build_close_ranking_lines,
     send_market_close_v2,
 )
-from stockbot.services.perks import apply_income_perks, evaluate_user_perks
+from stockbot.services.activity import active_user_ids_last_day
+from stockbot.services.perks import (
+    DAILY_CLOSE_RANK_BONUS_PERK_ID,
+    apply_income_perks,
+    evaluate_user_perks,
+)
 
 
 class StockBot(discord.Client):
@@ -281,7 +285,12 @@ class StockBot(discord.Client):
             if gm_id > 0:
                 top = [row for row in top if int(row.get("user_id", 0)) != gm_id]
             top = top[:5]
-            await asyncio.to_thread(self._apply_rank_income_for_guild, guild.id, close_event_id, top)
+            awarded_daily_bonus = await asyncio.to_thread(
+                self._apply_rank_income_for_guild,
+                guild.id,
+                close_event_id,
+                top,
+            )
 
             channel = await self._pick_announcement_channel(guild, announcement_channel_id)
             if channel is None:
@@ -332,6 +341,15 @@ class StockBot(discord.Client):
                 for row in news_rows:
                     news_embed = build_close_news_embed(row, preview=False)
                     await channel.send(embed=news_embed)
+                if awarded_daily_bonus:
+                    bonus_lines = [
+                        (
+                            f"<@{user_id}> Daily Close Rank Bonus activated "
+                            f"(Rank #{rank_index}) — networth +`${bonus:.2f}` until next close."
+                        )
+                        for (user_id, rank_index, bonus) in awarded_daily_bonus
+                    ]
+                    await channel.send("\n".join(bonus_lines))
             except Exception as exc:
                 print(
                     f"[announce] failed to send market-close update "
@@ -354,38 +372,6 @@ class StockBot(discord.Client):
     def _daily_networth_bonus_key(self, guild_id: int, user_id: int) -> str:
         return f"daily_networth_bonus:{guild_id}:{user_id}"
 
-    def _active_user_ids_last_day(self, guild_id: int) -> set[int]:
-        threshold_epoch = time.time() - 86400.0
-        since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        with get_connection() as conn:
-            state_rows = conn.execute(
-                """
-                SELECT key, value
-                FROM app_state
-                WHERE key LIKE ?
-                """,
-                (f"user_last_active:{guild_id}:%",),
-            ).fetchall()
-            rows = conn.execute(
-                """
-                SELECT DISTINCT user_id
-                FROM action_history
-                WHERE guild_id = ? AND created_at >= ?
-                """,
-                (guild_id, since_iso),
-            ).fetchall()
-        active_ids = {int(row["user_id"]) for row in rows}
-        for row in state_rows:
-            key = str(row["key"])
-            try:
-                uid = int(key.rsplit(":", 1)[-1])
-                last_epoch = float(row["value"])
-            except (TypeError, ValueError):
-                continue
-            if last_epoch >= threshold_epoch:
-                active_ids.add(uid)
-        return active_ids
-
     async def _sync_inactivity_roles_for_guild(self, guild: discord.Guild) -> None:
         active_role_name = str(get_app_config("STONKERS_ROLE_NAME")).strip()
         inactive_role_name = str(get_app_config("STONKERS_ROLE_INACTIVE")).strip()
@@ -395,7 +381,7 @@ class StockBot(discord.Client):
         inactive_role = discord.utils.get(guild.roles, name=inactive_role_name)
         if active_role is None and inactive_role is None:
             return
-        active_ids = await asyncio.to_thread(self._active_user_ids_last_day, guild.id)
+        active_ids = await asyncio.to_thread(active_user_ids_last_day, guild.id)
         users = await asyncio.to_thread(get_users, guild.id)
         for row in users:
             user_id = int(row.get("user_id", 0))
@@ -462,15 +448,15 @@ class StockBot(discord.Client):
         guild_id: int,
         close_event_id: str,
         top_rows: list[dict],
-    ) -> None:
+    ) -> list[tuple[int, int, float]]:
         payout_state_key = f"rank_income_event:{guild_id}"
         if get_state_value(payout_state_key) == close_event_id:
-            return
+            return []
 
         users = get_users(guild_id)
         if not users:
             set_state_value(payout_state_key, close_event_id)
-            return
+            return []
 
         lookup = {key.lower(): float(value) for key, value in RANK_INCOME.items()}
         default_income = float(RANK_INCOME.get(DEFAULT_RANK, 0.0))
@@ -525,13 +511,18 @@ class StockBot(discord.Client):
         for row in users:
             user_id = int(row["user_id"])
             set_state_value(self._daily_networth_bonus_key(guild_id, user_id), "0")
+            set_state_value(f"perk_active:{guild_id}:{user_id}:{DAILY_CLOSE_RANK_BONUS_PERK_ID}", "0")
+        awarded_daily_bonus: list[tuple[int, int, float]] = []
         for rank_index, row in enumerate(top_rows[:3], start=1):
             bonus = float(DAILY_CLOSE_TOP_NETWORTH_BONUS.get(rank_index, 0.0))
             user_id = int(row.get("user_id", 0))
             set_state_value(self._daily_networth_bonus_key(guild_id, user_id), str(bonus))
+            if abs(bonus) > 1e-9:
+                set_state_value(f"perk_active:{guild_id}:{user_id}:{DAILY_CLOSE_RANK_BONUS_PERK_ID}", "1")
+                awarded_daily_bonus.append((user_id, rank_index, bonus))
 
         set_state_value(payout_state_key, close_event_id)
-        return
+        return awarded_daily_bonus
 
     async def _pick_announcement_channel(
         self,

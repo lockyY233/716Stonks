@@ -5,18 +5,21 @@ import secrets
 import sqlite3
 import sys
 import time
+import socket
 import json
 import io
 import hashlib
+import shlex
+import subprocess
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from flask import Flask, g, jsonify, render_template_string, request, send_file
+from flask import Flask, g, jsonify, redirect, render_template_string, request, send_file
 from PIL import Image, UnidentifiedImageError
 
 # Ensure project root is importable when running as a standalone script via systemd.
@@ -30,6 +33,8 @@ def _load_template(name: str) -> str:
     return (TEMPLATE_DIR / name).read_text(encoding="utf-8")
 
 from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME
+from stockbot.config.runtime import APP_CONFIG_SPECS as CORE_APP_CONFIG_SPECS
+from stockbot.services.activity import active_user_ids_last_day
 from stockbot.services.jobs import get_active_jobs, refresh_jobs_rotation, swap_active_job
 from stockbot.services.perks import evaluate_user_perks
 from stockbot.services.shop_state import get_shop_items, refresh_shop, set_item_availability, swap_item
@@ -42,31 +47,19 @@ class _CfgSpec:
 
 
 APP_CONFIG_SPECS: dict[str, _CfgSpec] = {
-    "START_BALANCE": _CfgSpec(5.0, float, "Starting cash for new users."),
-    "TICK_INTERVAL": _CfgSpec(5, int, "Seconds between market ticks."),
-    "TREND_MULTIPLIER": _CfgSpec(1e-2, float, "Multiplier used by trend-related math."),
-    "DISPLAY_TIMEZONE": _CfgSpec("America/New_York", str, "Timezone used for display and market-close checks."),
-    "MARKET_CLOSE_HOUR": _CfgSpec(21.0, float, "Local close time as decimal hour [0,24). Example: 21.5 means 21:30."),
-    "STONKERS_ROLE_NAME": _CfgSpec("📈💰📊Stonkers", str, "Role granted on registration and pinged on close updates."),
-    "ANNOUNCEMENT_CHANNEL_ID": _CfgSpec(0, int, "Discord channel ID used for announcements; 0 means auto-pick."),
-    "ANNOUNCE_MENTION_ROLE": _CfgSpec(1, int, "1 to mention role at close; 0 to disable mention."),
-    "GM_ID": _CfgSpec(0, int, "Discord user ID designated as game master; excluded from rankings when >0."),
-    "DRIFT_NOISE_FREQUENCY": _CfgSpec(0.7, float, "Normalized fast noise frequency [0,1]."),
-    "DRIFT_NOISE_GAIN": _CfgSpec(0.8, float, "Fast noise gain multiplier."),
-    "DRIFT_NOISE_LOW_FREQ_RATIO": _CfgSpec(0.08, float, "Low-band frequency ratio relative to fast frequency."),
-    "DRIFT_NOISE_LOW_GAIN": _CfgSpec(3.0, float, "Low-band noise gain multiplier."),
-    "TRADING_LIMITS": _CfgSpec(40, int, "Max shares traded per period; <=0 disables limits."),
-    "TRADING_LIMITS_PERIOD": _CfgSpec(60, int, "Tick window length for trading-limit reset."),
-    "TRADING_FEES": _CfgSpec(1.0, float, "Sell fee percentage applied to realized profit."),
-    "OWNER_BUY_FEE_RATE": _CfgSpec(5.0, float, "Owner payout percentage from non-owner buy transaction value."),
-    "COMMODITIES_LIMIT": _CfgSpec(5, int, "Max total commodity units a player can hold; <=0 disables."),
-    "PAWN_SELL_RATE": _CfgSpec(75.0, float, "Pawn payout percentage when selling commodities to bank."),
-    "SHOP_RARITY_WEIGHTS": _CfgSpec('{"common":1.0,"uncommon":0.6,"rare":0.3,"legendary":0.1,"exotic":0.03}', str, "JSON mapping of rarity->weight used for shop rotation."),
+    name: _CfgSpec(
+        spec.default,
+        spec.cast if spec.cast in {int, float, str} else str,
+        spec.description,
+    )
+    for name, spec in CORE_APP_CONFIG_SPECS.items()
+}
+APP_CONFIG_SPECS.update({
     "IMAGE_UPLOAD_MAX_SOURCE_MB": _CfgSpec(8, int, "Max download size (MB) allowed when ingesting image URLs."),
     "IMAGE_UPLOAD_MAX_DIM": _CfgSpec(1024, int, "Max width/height in pixels for ingested images."),
     "IMAGE_UPLOAD_MAX_STORED_KB": _CfgSpec(300, int, "Max stored file size in KB per ingested image."),
     "IMAGE_UPLOAD_TOTAL_GB": _CfgSpec(2.0, float, "Total local uploads quota in GB for dashboard-hosted images."),
-}
+})
 
 AUTH_REQUIRED_HTML = _load_template("auth_required.html")
 
@@ -96,8 +89,12 @@ def create_app() -> Flask:
     godtoken_env = (os.getenv("WEBADMIN_GODTOKEN") or os.getenv("GODTOKEN") or "GODTOKEN").strip()
 
     def _connect() -> sqlite3.Connection:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 10000;")
+        conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
     def _state_get(key: str) -> str | None:
@@ -119,38 +116,6 @@ def create_app() -> Flask:
     def _state_delete(key: str) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
-
-    def _active_user_ids_last_day(guild_id: int) -> set[int]:
-        threshold_epoch = time.time() - 86400.0
-        since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        with _connect() as conn:
-            state_rows = conn.execute(
-                """
-                SELECT key, value
-                FROM app_state
-                WHERE key LIKE ?
-                """,
-                (f"user_last_active:{guild_id}:%",),
-            ).fetchall()
-            history_rows = conn.execute(
-                """
-                SELECT DISTINCT user_id
-                FROM action_history
-                WHERE guild_id = ? AND created_at >= ?
-                """,
-                (guild_id, since_iso),
-            ).fetchall()
-        active_ids = {int(row["user_id"]) for row in history_rows}
-        for row in state_rows:
-            key = str(row["key"])
-            try:
-                uid = int(key.rsplit(":", 1)[-1])
-                last_epoch = float(row["value"])
-            except (TypeError, ValueError):
-                continue
-            if last_epoch >= threshold_epoch:
-                active_ids.add(uid)
-        return active_ids
 
     def _cleanup_expired_auth_entries() -> None:
         now_epoch = int(time.time())
@@ -276,12 +241,13 @@ def create_app() -> Flask:
             "ANNOUNCEMENT_CHANNEL_ID",
             "ANNOUNCE_MENTION_ROLE",
             "GM_ID",
+            "ACTIVITY_APPLICATION_ID",
             "COMMODITIES_LIMIT",
             "IMAGE_UPLOAD_MAX_SOURCE_MB",
             "IMAGE_UPLOAD_MAX_DIM",
             "IMAGE_UPLOAD_MAX_STORED_KB",
         }:
-            if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID"}:
+            if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "ACTIVITY_APPLICATION_ID"}:
                 text = str(value).strip()
                 if text == "":
                     return 0
@@ -336,6 +302,63 @@ def create_app() -> Flask:
         if explicit:
             return explicit
         return request.host_url.rstrip("/")
+
+    def _db_access_url() -> str:
+        configured = str(os.getenv("DASHBOARD_DB_ACCESS_URL", "")).strip()
+        if configured:
+            return configured
+        host = request.host.split(":", 1)[0]
+        return f"http://{host}:8081"
+
+    def _is_port_open(host: str, port: int, timeout_seconds: float = 0.4) -> bool:
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout_seconds):
+                return True
+        except OSError:
+            return False
+
+    def _maybe_start_sqlweb_on_demand(target_url: str) -> None:
+        enabled_raw = str(os.getenv("SQLWEB_ONDEMAND_ENABLED", "1")).strip().lower()
+        if enabled_raw not in {"1", "true", "yes", "on"}:
+            return
+
+        parsed = urlparse(target_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = int(parsed.port or 8081)
+        if _is_port_open(host, port):
+            return
+
+        explicit_cmd = str(os.getenv("SQLWEB_ONDEMAND_CMD", "")).strip()
+        if explicit_cmd:
+            cmd = shlex.split(explicit_cmd)
+        else:
+            max_seconds = int(os.getenv("SQLWEB_MAX_SECONDS", "1800"))
+            cmd = [
+                sys.executable,
+                str(repo_root / "scripts" / "admin_sqlite_web.py"),
+                "--host",
+                host,
+                "--port",
+                str(port),
+                "--max-seconds",
+                str(max(0, max_seconds)),
+            ]
+        try:
+            subprocess.Popen(
+                cmd,
+                cwd=str(repo_root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            return
+
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if _is_port_open(host, port):
+                return
+            time.sleep(0.2)
 
     def _media_url_for(filename: str) -> str:
         return f"{_public_base_url()}/media/uploads/{filename}"
@@ -842,7 +865,7 @@ def create_app() -> Flask:
 
     def _config_value_for_json(name: str, value):
         # Discord snowflakes exceed JS safe integer range; keep them as strings in JSON.
-        if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID"}:
+        if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "ACTIVITY_APPLICATION_ID"}:
             return str(value)
         return value
 
@@ -943,6 +966,24 @@ def create_app() -> Flask:
         g._new_webadmin_sid = None
         g.webadmin_authenticated = False
         g.webadmin_read_only = True
+        public_paths = {
+            "/",
+            "/api/stocks",
+            "/api/dashboard-stats",
+            "/api/app-config/TICK_INTERVAL",
+        }
+        public_post_paths = {
+            "/api/activity/oauth/token",
+        }
+        is_activity_auth_post = request.method == "POST" and request.path.startswith("/api/activity/")
+        is_api_or_media = request.path.startswith("/api/") or request.path.startswith("/media/uploads/")
+        if request.method == "OPTIONS" and (
+            request.path in public_paths
+            or request.path in public_post_paths
+            or request.path.startswith("/api/activity/")
+            or is_api_or_media
+        ):
+            return ("", 204)
         if request.path == "/favicon.ico":
             return ("", 204)
 
@@ -960,15 +1001,9 @@ def create_app() -> Flask:
                 return None
 
         # Public read-only mode for dashboard + market data endpoints.
-        public_paths = {
-            "/",
-            "/api/stocks",
-            "/api/dashboard-stats",
-            "/api/app-config/TICK_INTERVAL",
-        }
-        if request.method == "GET" and (
-            request.path in public_paths or request.path.startswith("/media/uploads/")
-        ):
+        if request.method == "GET" and (request.path in public_paths or is_api_or_media):
+            return None
+        if is_activity_auth_post or (request.method == "POST" and request.path in public_post_paths):
             return None
         return render_template_string(AUTH_REQUIRED_HTML), 401
 
@@ -984,6 +1019,16 @@ def create_app() -> Flask:
                 samesite="Lax",
                 secure=(request.scheme == "https"),
             )
+
+        # CORS for Activity/UI cross-origin reads.
+        if request.path.startswith("/api/") or request.path.startswith("/media/uploads/"):
+            origin = (request.headers.get("Origin") or "").strip()
+            # Some reverse-proxy setups may drop Origin before Flask sees it.
+            # Always emit CORS for API/media reads so Activity can consume data.
+            resp.headers["Access-Control-Allow-Origin"] = origin or "*"
+            resp.headers["Vary"] = "Origin"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         return resp
 
     def _history_for(
@@ -1016,15 +1061,27 @@ def create_app() -> Flask:
 
     @app.get("/")
     def dashboard():
-        db_access_url = os.getenv("DASHBOARD_DB_ACCESS_URL")
-        if not db_access_url:
-            host = request.host.split(":", 1)[0]
-            db_access_url = f"http://{host}:8081"
+        db_access_url = _db_access_url()
+        token = (request.args.get("token") or "").strip()
+        db_access_entry_url = "/open-db-access"
+        if token:
+            db_access_entry_url = f"{db_access_entry_url}?token={quote(token)}"
         return render_template_string(
             MAIN_HTML,
             db_access_url=db_access_url,
+            db_access_entry_url=db_access_entry_url,
             read_only_mode=bool(getattr(g, "webadmin_read_only", True)),
         )
+
+    @app.get("/open-db-access")
+    def open_db_access():
+        db_access_url = _db_access_url()
+        token = (request.args.get("token") or "").strip()
+        if token:
+            sep = "&" if "?" in db_access_url else "?"
+            db_access_url = f"{db_access_url}{sep}token={quote(token)}"
+        _maybe_start_sqlweb_on_demand(db_access_url)
+        return redirect(db_access_url, code=302)
 
     @app.get("/media/uploads/<path:filename>")
     def media_uploads(filename: str):
@@ -1191,6 +1248,239 @@ def create_app() -> Flask:
                 "close_gate_armed_raw": close_gate_armed_raw or "-",
             }
         )
+
+    @app.route("/api/activity/oauth/token", methods=["GET", "POST"])
+    def api_activity_oauth_token():
+        if request.method == "GET":
+            code = str(request.args.get("code", "") or "").strip()
+            redirect_uri = str(request.args.get("redirect_uri", "") or "").strip()
+        else:
+            data = request.get_json(silent=True) or {}
+            code = str(data.get("code", "") or "").strip()
+            redirect_uri = str(data.get("redirect_uri", "") or "").strip()
+        if not code:
+            return jsonify({"error": "Missing code"}), 400
+
+        client_id = int(_get_config("ACTIVITY_APPLICATION_ID") or 0)
+        if client_id <= 0:
+            return jsonify({"error": "ACTIVITY_APPLICATION_ID is not configured"}), 400
+
+        client_secret = str(os.getenv("ACTIVITY_DISCORD_CLIENT_SECRET", "") or "").strip()
+        if not client_secret:
+            return jsonify({"error": "ACTIVITY_DISCORD_CLIENT_SECRET is not configured"}), 500
+
+        form = {
+            "client_id": str(client_id),
+            "client_secret": client_secret,
+            "grant_type": "authorization_code",
+            "code": code,
+        }
+        if redirect_uri:
+            form["redirect_uri"] = redirect_uri
+
+        payload = urlencode(form)
+        try:
+            proc = subprocess.run(
+                [
+                    "curl",
+                    "-sS",
+                    "-X",
+                    "POST",
+                    "https://discord.com/api/oauth2/token",
+                    "-H",
+                    "Content-Type: application/x-www-form-urlencoded",
+                    "-H",
+                    "Accept: application/json",
+                    "-H",
+                    "User-Agent: 716Stonks-Dashboard/1.0 (+https://716stonks-activity.cfm1.uk)",
+                    "--data",
+                    payload,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or "").strip() or f"curl exited {proc.returncode}")
+            raw = (proc.stdout or "").strip()
+            payload = json.loads(raw) if raw else {}
+            if not isinstance(payload, dict):
+                raise RuntimeError("Invalid OAuth response payload")
+            if "error" in payload:
+                return jsonify({"error": f"OAuth token exchange failed: {json.dumps(payload)}"}), 502
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                detail = ""
+            msg = f"OAuth token exchange failed: HTTP {exc.code}"
+            if detail:
+                msg = f"{msg}: {detail}"
+            return jsonify({"error": msg}), 502
+        except URLError as exc:
+            return jsonify({"error": f"OAuth token exchange failed: {exc}"}), 502
+        except Exception as exc:
+            return jsonify({"error": f"OAuth token exchange failed: {exc}"}), 502
+
+        access_token = str(payload.get("access_token", "") or "").strip()
+        if not access_token:
+            return jsonify({"error": "OAuth token response missing access_token"}), 502
+        return jsonify(
+            {
+                "access_token": access_token,
+                "token_type": str(payload.get("token_type", "") or ""),
+                "scope": str(payload.get("scope", "") or ""),
+                "expires_in": int(payload.get("expires_in", 0) or 0),
+            }
+        )
+
+    @app.get("/api/activity/status")
+    def api_activity_status():
+        user_id_raw = str(request.args.get("user_id", "") or "").strip()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        user_id = int(user_id_raw)
+        if user_id <= 0:
+            return jsonify({"error": "Invalid user_id"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            if guild_id <= 0:
+                return jsonify({"error": "No guild data"}), 404
+
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id, joined_at, bank, networth, owe, display_name, rank
+                FROM users
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "User not registered"}), 404
+
+            holdings_rows = conn.execute(
+                """
+                SELECT symbol, shares
+                FROM holdings
+                WHERE guild_id = ? AND user_id = ? AND shares > 0
+                ORDER BY symbol
+                """,
+                (guild_id, user_id),
+            ).fetchall()
+            commodity_rows = conn.execute(
+                """
+                SELECT uc.commodity_name AS name, uc.quantity, c.price
+                FROM user_commodities uc
+                JOIN commodities c
+                  ON c.guild_id = uc.guild_id
+                 AND c.name = uc.commodity_name
+                WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
+                ORDER BY uc.commodity_name
+                """,
+                (guild_id, user_id),
+            ).fetchall()
+
+        user = dict(user_row)
+        rank = str(user.get("rank", DEFAULT_RANK) or DEFAULT_RANK)
+        lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
+        base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
+        base_trade_limits = int(_get_config("TRADING_LIMITS"))
+        base_commodities_limit = int(_get_config("COMMODITIES_LIMIT"))
+        perk_eval = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=base_income,
+            base_trade_limits=base_trade_limits,
+            base_networth=float(user.get("networth", 0.0) or 0.0),
+            base_commodities_limit=base_commodities_limit,
+            base_job_slots=1,
+            base_timed_duration=0.0,
+            base_chance_roll_bonus=0.0,
+        )
+
+        period = max(1, int(_get_config("TRADING_LIMITS_PERIOD")))
+        tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
+        current_tick_raw = _state_get("last_tick")
+        try:
+            current_tick = max(0, int(current_tick_raw)) if current_tick_raw is not None else 0
+        except ValueError:
+            current_tick = 0
+        bucket = current_tick // period
+        used_raw = _state_get(f"trade_used:{guild_id}:{user_id}:{bucket}")
+        try:
+            used = max(0, int(float(used_raw))) if used_raw is not None else 0
+        except ValueError:
+            used = 0
+        limit = int(perk_eval["final"]["trade_limits"])
+        limits_enabled = bool(base_trade_limits > 0 and period > 0)
+        remaining = max(0, limit - used) if limits_enabled else 0
+        period_minutes = (period * tick_interval) / 60.0
+
+        commodities = []
+        commodities_used = 0
+        for row in commodity_rows:
+            qty = max(0, int(row["quantity"] or 0))
+            price = float(row["price"] or 0.0)
+            commodities_used += qty
+            commodities.append(
+                {
+                    "name": str(row["name"]),
+                    "quantity": qty,
+                    "price": price,
+                    "value": round(qty * price, 2),
+                }
+            )
+
+        stocks = [{"symbol": str(r["symbol"]), "shares": int(r["shares"])} for r in holdings_rows]
+
+        matched_perks = []
+        for row in list(perk_eval.get("matched_perks", [])):
+            matched_perks.append(
+                {
+                    "name": str(row.get("name", "Unknown")),
+                    "display": str(row.get("display", "")).strip(),
+                    "stacks": int(row.get("stacks", 1) or 1),
+                }
+            )
+
+        payload = {
+            "user": {
+                "user_id": int(user.get("user_id", 0)),
+                "display_name": str(user.get("display_name", "") or f"User {user_id}"),
+                "rank": rank,
+                "joined_at": str(user.get("joined_at", "")),
+                "bank": float(user.get("bank", 0.0) or 0.0),
+                "networth": float(user.get("networth", 0.0) or 0.0),
+                "owe": float(user.get("owe", 0.0) or 0.0),
+            },
+            "stocks": stocks,
+            "commodities": commodities,
+            "commodities_used": commodities_used,
+            "commodities_limit": int(perk_eval["final"]["commodities_limit"]),
+            "trade_limit": {
+                "enabled": limits_enabled,
+                "limit": limit,
+                "used": used,
+                "remaining": remaining,
+                "period_minutes": period_minutes,
+            },
+            "perks": matched_perks,
+            "perk_summary": {
+                "income": float(perk_eval["final"]["income"]),
+                "trade_limits": int(perk_eval["final"]["trade_limits"]),
+                "networth": float(perk_eval["final"]["networth"]),
+                "commodities_limit": int(perk_eval["final"]["commodities_limit"]),
+                "job_slots": int(perk_eval["final"]["job_slots"]),
+                "timed_duration": float(perk_eval["final"]["timed_duration"]),
+                "chance_roll_bonus": float(perk_eval["final"]["chance_roll_bonus"]),
+            },
+        }
+        return jsonify(payload)
 
     @app.get("/api/company/<symbol>")
     def api_company(symbol: str):
@@ -1414,7 +1704,10 @@ def create_app() -> Flask:
             row["user_id"] = str(row["user_id"])
             guild_id = int(row.get("guild_id", 0))
             if guild_id not in active_by_guild:
-                active_by_guild[guild_id] = _active_user_ids_last_day(guild_id)
+                active_by_guild[guild_id] = active_user_ids_last_day(
+                    guild_id,
+                    connection_factory=_connect,
+                )
             user_id = row["user_id"]
             user_id_int = int(user_id)
             row["is_active"] = user_id_int in active_by_guild[guild_id]

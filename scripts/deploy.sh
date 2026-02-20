@@ -15,15 +15,25 @@ VPS_HOST="${VPS_HOST:-your.vps.ip}"
 VPS_PORT="${VPS_PORT:-22}"
 VPS_DIR="${VPS_DIR:-/home/${VPS_USER}/apps/716Stonks}"
 APP_NAME="${APP_NAME:-716Stonks}"
-DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-716Stonks-dashboard.service}"
+DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}"
 PYTHON="${PYTHON:-python3}"
+ACTIVITY_BUILD="${ACTIVITY_BUILD:-1}"
+ACTIVITY_DIR="${ACTIVITY_DIR:-DCActivity}"
+ACTIVITY_PM2_NAME="${ACTIVITY_PM2_NAME:-716Stonks-activity}"
+ACTIVITY_PORT="${ACTIVITY_PORT:-8083}"
+ACTIVITY_API_BASE="${ACTIVITY_API_BASE:-${DASHBOARD_PUBLIC_BASE_URL:-}}"
+ACTIVITY_DISCORD_CLIENT_ID="${ACTIVITY_DISCORD_CLIENT_ID:-}"
+ACTIVITY_DISCORD_REDIRECT_URI="${ACTIVITY_DISCORD_REDIRECT_URI:-}"
 
 RSYNC_EXCLUDES=(
   ".git"
   "__pycache__"
   ".venv"
+  "node_modules"
   "data"
   ".vscode"
+  "DCActivity/dist"
+  "DCActivity/.vite"
   "*.code-workspace"
 )
 
@@ -93,6 +103,41 @@ ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "bash -se" <<SSH
 
   .venv/bin/python -m pip install --upgrade pip
   .venv/bin/python -m pip install -r requirements.txt
+
+  if [ "${ACTIVITY_BUILD}" = "1" ]; then
+    if [ -d "${VPS_DIR}/${ACTIVITY_DIR}" ] && [ -f "${VPS_DIR}/${ACTIVITY_DIR}/package.json" ]; then
+      if command -v npm >/dev/null 2>&1; then
+        cd "${VPS_DIR}/${ACTIVITY_DIR}"
+        npm install
+        if [ -n "${ACTIVITY_API_BASE}" ]; then
+          VITE_API_BASE="${ACTIVITY_API_BASE}" \
+          VITE_DISCORD_CLIENT_ID="${ACTIVITY_DISCORD_CLIENT_ID}" \
+          VITE_DISCORD_REDIRECT_URI="${ACTIVITY_DISCORD_REDIRECT_URI}" \
+          npm run build
+        else
+          echo "Warning: ACTIVITY_API_BASE is empty; Activity /api calls will hit static host."
+          VITE_DISCORD_CLIENT_ID="${ACTIVITY_DISCORD_CLIENT_ID}" \
+          VITE_DISCORD_REDIRECT_URI="${ACTIVITY_DISCORD_REDIRECT_URI}" \
+          npm run build
+        fi
+        cd "${VPS_DIR}"
+        if command -v pm2 >/dev/null 2>&1; then
+          if pm2 describe "${ACTIVITY_PM2_NAME}" >/dev/null 2>&1; then
+            pm2 restart "${ACTIVITY_PM2_NAME}" --update-env
+          else
+            pm2 serve "${VPS_DIR}/${ACTIVITY_DIR}/dist" "${ACTIVITY_PORT}" --name "${ACTIVITY_PM2_NAME}"
+          fi
+          pm2 save || true
+        else
+          echo "Skipping activity PM2 step: pm2 not found."
+        fi
+      else
+        echo "Skipping activity build: npm not found."
+      fi
+    else
+      echo "Skipping activity build: ${ACTIVITY_DIR} not found or missing package.json."
+    fi
+  fi
 
   UNIT_FILE="/etc/systemd/system/${APP_NAME}.service"
   if [ "${SETUP_SYSTEMD}" = "1" ]; then

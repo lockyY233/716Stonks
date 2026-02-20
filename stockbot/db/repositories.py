@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from stockbot.config import DB_PATH
 from stockbot.db.database import get_connection, init_db
+from stockbot.services.money import money
 
 
 def _parse_owner_user_ids(raw: str | int | list[int] | tuple[int, ...] | None) -> list[int]:
@@ -571,7 +574,7 @@ def update_user_networth(
             SET networth = ?
             WHERE guild_id = ? AND user_id = ?
             """,
-            (max(0.0, float(new_networth)), guild_id, user_id),
+            (max(0.0, money(new_networth)), guild_id, user_id),
         )
 
 
@@ -595,9 +598,9 @@ def recalc_user_networth(guild_id: int, user_id: int) -> float:
             SET networth = ?
             WHERE guild_id = ? AND user_id = ?
             """,
-            (total, guild_id, user_id),
+            (money(total), guild_id, user_id),
         )
-        return total
+        return money(total)
 
 
 def recalc_all_networth(guild_id: int) -> None:
@@ -605,7 +608,7 @@ def recalc_all_networth(guild_id: int) -> None:
         conn.execute(
             """
             UPDATE users
-            SET networth = COALESCE((
+            SET networth = ROUND(COALESCE((
                 SELECT SUM(uc.quantity * c.price)
                 FROM user_commodities uc
                 JOIN commodities c
@@ -613,7 +616,7 @@ def recalc_all_networth(guild_id: int) -> None:
                  AND c.name = uc.commodity_name
                 WHERE uc.guild_id = users.guild_id
                   AND uc.user_id = users.user_id
-            ), 0.0)
+            ), 0.0), 2)
             WHERE guild_id = ?
             """,
             (guild_id,),
@@ -849,7 +852,7 @@ def update_user_bank(
             SET bank = ?
             WHERE guild_id = ? AND user_id = ?
             """,
-            (new_bank, guild_id, user_id),
+            (money(new_bank), guild_id, user_id),
         )
 
 
@@ -872,6 +875,8 @@ def update_user_admin_fields(
         value = caster(raw) if caster is not str else str(raw)
         if key == "enabled":
             value = 1 if int(value) else 0
+        if key in {"bank", "owe"}:
+            value = money(float(value))
         sets.append(f"{key} = ?")
         values.append(value)
     if not sets:
@@ -1542,7 +1547,7 @@ def apply_approved_loan(
                 owe = ?
             WHERE guild_id = ? AND user_id = ?
             """,
-            (bank + delta, owe + delta, guild_id, user_id),
+            (money(bank + delta), money(owe + delta), guild_id, user_id),
         )
         return True
 
@@ -1575,12 +1580,12 @@ def repay_user_loan(
         if paid <= 0:
             return {
                 "paid": 0.0,
-                "bank_after": bank,
-                "owe_after": owe,
+                "bank_after": money(bank),
+                "owe_after": money(owe),
             }
 
-        bank_after = bank - paid
-        owe_after = owe - paid
+        bank_after = money(bank - paid)
+        owe_after = money(owe - paid)
         conn.execute(
             """
             UPDATE users
@@ -1591,7 +1596,7 @@ def repay_user_loan(
             (bank_after, owe_after, guild_id, user_id),
         )
         return {
-            "paid": paid,
+            "paid": money(paid),
             "bank_after": bank_after,
             "owe_after": owe_after,
         }

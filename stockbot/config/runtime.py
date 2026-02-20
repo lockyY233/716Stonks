@@ -12,6 +12,7 @@ from stockbot.config.settings import (
     DRIFT_NOISE_LOW_GAIN,
     OWNER_BUY_FEE_RATE,
     GM_ID,
+    ACTIVITY_APPLICATION_ID,
     MARKET_CLOSE_HOUR,
     ANNOUNCEMENT_CHANNEL_ID,
     ANNOUNCE_MENTION_ROLE,
@@ -87,6 +88,11 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         default=int(GM_ID),
         cast=int,
         description="Discord user ID designated as game master; excluded from ranking leaderboards when >0.",
+    ),
+    "ACTIVITY_APPLICATION_ID": AppConfigSpec(
+        default=int(ACTIVITY_APPLICATION_ID),
+        cast=int,
+        description="Discord embedded app application ID used by /activity to create launch invites.",
     ),
     "DRIFT_NOISE_FREQUENCY": AppConfigSpec(
         default=float(DRIFT_NOISE_FREQUENCY),
@@ -175,6 +181,8 @@ def _normalize(name: str, value: Any) -> Any:
     if name == "ANNOUNCE_MENTION_ROLE":
         return 1 if int(value) > 0 else 0
     if name == "GM_ID":
+        return max(0, int(value))
+    if name == "ACTIVITY_APPLICATION_ID":
         return max(0, int(value))
     if name == "DRIFT_NOISE_FREQUENCY":
         return max(0.0, min(1.0, float(value)))
