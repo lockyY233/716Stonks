@@ -524,13 +524,22 @@ def get_user_commodities(guild_id: int, user_id: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT uc.commodity_name AS name, uc.quantity, c.price, c.rarity, c.spawn_weight_override, c.image_url, c.description
+            SELECT
+                c.name AS name,
+                CAST(SUM(uc.quantity) AS INTEGER) AS quantity,
+                c.price,
+                c.rarity,
+                c.spawn_weight_override,
+                c.image_url,
+                c.description
             FROM user_commodities uc
             JOIN commodities c
               ON c.guild_id = uc.guild_id
-             AND c.name = uc.commodity_name
+             AND c.name = uc.commodity_name COLLATE NOCASE
             WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
-            ORDER BY uc.commodity_name
+            GROUP BY
+                c.name, c.price, c.rarity, c.spawn_weight_override, c.image_url, c.description
+            ORDER BY c.name
             """,
             (guild_id, user_id),
         ).fetchall()
@@ -544,6 +553,16 @@ def upsert_user_commodity(
     quantity_delta: int,
 ) -> None:
     with get_connection() as conn:
+        canonical_row = conn.execute(
+            """
+            SELECT name
+            FROM commodities
+            WHERE guild_id = ? AND name = ? COLLATE NOCASE
+            LIMIT 1
+            """,
+            (guild_id, commodity_name),
+        ).fetchone()
+        canonical_name = str(canonical_row["name"]) if canonical_row is not None else str(commodity_name)
         conn.execute(
             """
             INSERT INTO user_commodities (guild_id, user_id, commodity_name, quantity)
@@ -551,14 +570,14 @@ def upsert_user_commodity(
             ON CONFLICT(guild_id, user_id, commodity_name)
             DO UPDATE SET quantity = quantity + excluded.quantity
             """,
-            (guild_id, user_id, commodity_name, quantity_delta),
+            (guild_id, user_id, canonical_name, quantity_delta),
         )
         conn.execute(
             """
             DELETE FROM user_commodities
-            WHERE guild_id = ? AND user_id = ? AND commodity_name = ? AND quantity <= 0
+            WHERE guild_id = ? AND user_id = ? AND commodity_name = ? COLLATE NOCASE AND quantity <= 0
             """,
-            (guild_id, user_id, commodity_name),
+            (guild_id, user_id, canonical_name),
         )
 
 
@@ -586,7 +605,7 @@ def recalc_user_networth(guild_id: int, user_id: int) -> float:
             FROM user_commodities uc
             JOIN commodities c
               ON c.guild_id = uc.guild_id
-             AND c.name = uc.commodity_name
+             AND c.name = uc.commodity_name COLLATE NOCASE
             WHERE uc.guild_id = ? AND uc.user_id = ?
             """,
             (guild_id, user_id),
@@ -613,7 +632,7 @@ def recalc_all_networth(guild_id: int) -> None:
                 FROM user_commodities uc
                 JOIN commodities c
                   ON c.guild_id = uc.guild_id
-                 AND c.name = uc.commodity_name
+                 AND c.name = uc.commodity_name COLLATE NOCASE
                 WHERE uc.guild_id = users.guild_id
                   AND uc.user_id = users.user_id
             ), 0.0), 2)
@@ -759,6 +778,171 @@ def get_company(guild_id: int, symbol: str) -> dict | None:
         return company
 
 
+def create_stock_alert(
+    guild_id: int,
+    user_id: int,
+    symbol: str,
+    condition: str,
+    target_price: float,
+    repeat_enabled: bool = False,
+) -> int:
+    cond = str(condition).strip().lower()
+    if cond not in {"above", "below"}:
+        raise ValueError("condition must be 'above' or 'below'")
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO stock_alerts (
+                guild_id, user_id, symbol, condition, target_price,
+                repeat_enabled, enabled, last_met, last_triggered_tick,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?)
+            """,
+            (
+                int(guild_id),
+                int(user_id),
+                str(symbol).upper().strip(),
+                cond,
+                max(0.01, float(target_price)),
+                1 if repeat_enabled else 0,
+                now,
+                now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_stock_alerts_for_user(guild_id: int, user_id: int, include_disabled: bool = False) -> list[dict]:
+    with get_connection() as conn:
+        if include_disabled:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, user_id, symbol, condition, target_price,
+                       repeat_enabled, enabled, last_met, last_triggered_tick, created_at, updated_at
+                FROM stock_alerts
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY id DESC
+                """,
+                (int(guild_id), int(user_id)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, user_id, symbol, condition, target_price,
+                       repeat_enabled, enabled, last_met, last_triggered_tick, created_at, updated_at
+                FROM stock_alerts
+                WHERE guild_id = ? AND user_id = ? AND enabled = 1
+                ORDER BY id DESC
+                """,
+                (int(guild_id), int(user_id)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_stock_alert(guild_id: int, user_id: int, alert_id: int) -> bool:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM stock_alerts
+            WHERE guild_id = ? AND user_id = ? AND id = ?
+            """,
+            (int(guild_id), int(user_id), int(alert_id)),
+        )
+        return cur.rowcount > 0
+
+
+def clear_stock_alerts_for_user(guild_id: int, user_id: int) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM stock_alerts
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (int(guild_id), int(user_id)),
+        )
+        return int(cur.rowcount)
+
+
+def process_stock_alerts(guild_id: int, tick_index: int) -> list[dict]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fired: list[dict] = []
+    with get_connection() as conn:
+        alerts = conn.execute(
+            """
+            SELECT id, guild_id, user_id, symbol, condition, target_price,
+                   repeat_enabled, enabled, last_met, last_triggered_tick
+            FROM stock_alerts
+            WHERE guild_id = ? AND enabled = 1
+            """,
+            (int(guild_id),),
+        ).fetchall()
+        if not alerts:
+            return fired
+        company_rows = conn.execute(
+            """
+            SELECT symbol, current_price
+            FROM companies
+            WHERE guild_id = ?
+            """,
+            (int(guild_id),),
+        ).fetchall()
+        price_by_symbol = {
+            str(r["symbol"]).upper(): float(r["current_price"])
+            for r in company_rows
+        }
+        for alert in alerts:
+            symbol = str(alert["symbol"]).upper()
+            price = price_by_symbol.get(symbol)
+            if price is None:
+                continue
+            cond = str(alert["condition"]).lower()
+            target = float(alert["target_price"])
+            met = price >= target if cond == "above" else price <= target
+            last_met = int(alert["last_met"] or 0) > 0
+            repeat_enabled = int(alert["repeat_enabled"] or 0) > 0
+            should_fire = False
+            if met:
+                if repeat_enabled:
+                    should_fire = not last_met
+                else:
+                    should_fire = True
+            if should_fire:
+                fired.append(
+                    {
+                        "id": int(alert["id"]),
+                        "user_id": int(alert["user_id"]),
+                        "symbol": symbol,
+                        "condition": cond,
+                        "target_price": target,
+                        "current_price": float(price),
+                    }
+                )
+            enabled_next = 1
+            if should_fire and not repeat_enabled:
+                enabled_next = 0
+            conn.execute(
+                """
+                UPDATE stock_alerts
+                SET enabled = ?,
+                    last_met = ?,
+                    last_triggered_tick = ?,
+                    updated_at = ?
+                WHERE id = ? AND guild_id = ?
+                """,
+                (
+                    enabled_next,
+                    1 if met else 0,
+                    int(tick_index) if should_fire else int(alert["last_triggered_tick"] or 0),
+                    now_iso,
+                    int(alert["id"]),
+                    int(guild_id),
+                ),
+            )
+    return fired
+
+
 def update_company_slope(
     guild_id: int,
     symbol: str,
@@ -854,6 +1038,66 @@ def update_user_bank(
             """,
             (money(new_bank), guild_id, user_id),
         )
+
+
+def apply_user_bank_delta_with_loan_floor(
+    guild_id: int,
+    user_id: int,
+    delta: float,
+) -> dict:
+    """
+    Apply a bank delta while ensuring bank never drops below 0.
+    Any negative overflow is moved into `owe`.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT bank, owe
+            FROM users
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        if row is None:
+            return {
+                "ok": False,
+                "bank_before": 0.0,
+                "owe_before": 0.0,
+                "bank_after": 0.0,
+                "owe_after": 0.0,
+                "delta": float(delta),
+                "to_owe": 0.0,
+            }
+
+        bank_before = float(row["bank"])
+        owe_before = float(row["owe"])
+        target_bank = bank_before + float(delta)
+        to_owe = 0.0
+        if target_bank < 0:
+            to_owe = -target_bank
+            bank_after = 0.0
+            owe_after = owe_before + to_owe
+        else:
+            bank_after = target_bank
+            owe_after = owe_before
+
+        conn.execute(
+            """
+            UPDATE users
+            SET bank = ?, owe = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (money(bank_after), money(owe_after), guild_id, user_id),
+        )
+        return {
+            "ok": True,
+            "bank_before": money(bank_before),
+            "owe_before": money(owe_before),
+            "bank_after": money(bank_after),
+            "owe_after": money(owe_after),
+            "delta": float(delta),
+            "to_owe": money(to_owe),
+        }
 
 
 def update_user_admin_fields(

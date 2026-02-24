@@ -9,12 +9,13 @@ from discord.ui import Select
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
 from stockbot.config.runtime import get_app_config
-from stockbot.db import count_user_running_timed_jobs, get_state_value, get_user, get_user_running_timed_job
+from stockbot.db import count_user_running_timed_jobs, get_state_value, get_user
 from stockbot.services.jobs import (
-    abandon_running_timed_job,
+    abandon_running_timed_job_by_id,
     current_tick,
     get_active_jobs,
     get_quiz_choices,
+    list_user_running_timed_jobs,
     submit_quiz_choice,
     try_run_chance_job,
     try_start_or_claim_timed_job,
@@ -153,7 +154,6 @@ class JobsV2View(discord.ui.LayoutView):
         container = ui.Container()
         container.add_item(ui.TextDisplay(content="## Job Board (Current Rotation)"))
         container.add_item(ui.TextDisplay(content=f"Refresh in **{_minutes_until_next_refresh():.2f} minute(s)**."))
-        lock_row = get_user_running_timed_job(self._guild_id, self._user_id, current_tick())
         slot_eval = evaluate_user_perks(
             guild_id=self._guild_id,
             user_id=self._user_id,
@@ -165,32 +165,44 @@ class JobsV2View(discord.ui.LayoutView):
         )
         max_slots = max(0, int(slot_eval["final"]["job_slots"]))
         running_count = count_user_running_timed_jobs(self._guild_id, self._user_id, current_tick())
-        if lock_row is not None:
-            remaining_seconds = max(
-                0.0,
-                float(lock_row.get("running_until_epoch", 0.0) or 0.0) - time.time(),
-            )
-            remaining_minutes = remaining_seconds / 60.0
-            job_name = str(lock_row.get("job_name", f"Job #{lock_row.get('job_id', '?')}"))
+        active_timed_jobs = list_user_running_timed_jobs(
+            self._guild_id,
+            self._user_id,
+            limit=50,
+        )
+        if active_timed_jobs:
             container.add_item(
                 ui.TextDisplay(
                     content=(
-                        f"### Active Timed Job\n"
-                        f"**{job_name}**\n"
-                        f"Time remaining: **{remaining_minutes:.2f} minute(s)**.\n"
+                        f"### Active Timed Jobs\n"
                         f"Timed job slots: **{running_count}/{max_slots}**."
                     )
                 )
             )
-            if running_count >= max_slots:
+            for idx, active in enumerate(active_timed_jobs):
+                job_id = int(active.get("job_id", 0))
+                job_name = str(active.get("job_name", f"Job #{job_id}"))
+                remaining_minutes = max(0.0, float(active.get("remaining_seconds", 0))) / 60.0
+                container.add_item(
+                    ui.TextDisplay(
+                        content=(
+                            f"**{job_name}**\n"
+                            f"Time remaining: **{remaining_minutes:.2f} minute(s)**."
+                        )
+                    )
+                )
                 action_row = ui.ActionRow()
                 abandon_btn = discord.ui.Button(
                     label="Abandon",
                     style=ButtonStyle.danger,
                 )
 
-                async def abandon_cb(interaction: Interaction) -> None:
-                    result = abandon_running_timed_job(self._guild_id, self._user_id)
+                async def abandon_job_cb(interaction: Interaction, selected_job_id: int = job_id) -> None:
+                    result = abandon_running_timed_job_by_id(
+                        self._guild_id,
+                        self._user_id,
+                        selected_job_id,
+                    )
                     await interaction.response.send_message(result.message)
                     self._rows = get_active_jobs(self._guild_id, limit=5)
                     self._build()
@@ -199,9 +211,13 @@ class JobsV2View(discord.ui.LayoutView):
                     except Exception:
                         pass
 
-                abandon_btn.callback = abandon_cb
+                abandon_btn.callback = abandon_job_cb
                 action_row.add_item(abandon_btn)
                 container.add_item(action_row)
+                if hasattr(ui, "Separator") and idx < len(active_timed_jobs) - 1:
+                    container.add_item(ui.Separator())
+
+            if running_count >= max_slots:
                 self.add_item(container)
                 return
             if hasattr(ui, "Separator"):

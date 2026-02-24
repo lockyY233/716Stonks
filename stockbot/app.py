@@ -26,10 +26,12 @@ from stockbot.db import (
     get_users,
     init_db,
     mark_bank_request_processed,
+    process_stock_alerts,
     recalc_all_networth,
     set_state_value,
     update_user_bank,
 )
+from stockbot.db.database import get_connection
 from stockbot.services.economy import process_ticks
 from stockbot.services.jobs import process_due_timed_jobs
 from stockbot.services.announcements import (
@@ -41,6 +43,7 @@ from stockbot.services.activity import active_user_ids_last_day
 from stockbot.services.perks import (
     DAILY_CLOSE_RANK_BONUS_PERK_ID,
     apply_income_perks,
+    check_and_announce_perk_activations_for_user,
     evaluate_user_perks,
 )
 
@@ -57,7 +60,8 @@ class StockBot(discord.Client):
 
     async def setup_hook(self) -> None:
         setup_commands(self.tree)
-        self.tree.interaction_check(self._track_activity_interaction_check)
+        # Register a global app-command interaction check callback.
+        self.tree.interaction_check = self._track_activity_interaction_check
 
     async def _track_activity_interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
@@ -94,8 +98,63 @@ class StockBot(discord.Client):
             try:
                 await self._process_bank_requests()
             except Exception as exc:
-                print(f"[bank] process loop error: {exc}")
+                print(f"[bank] bank-request loop error: {exc}")
+            try:
+                await self._process_perk_check_queue()
+            except Exception as exc:
+                print(f"[bank] perk-queue loop error: {exc}")
             await asyncio.sleep(1.0)
+
+    async def _process_perk_check_queue(self) -> None:
+        entries: list[tuple[str, int, int]] = []
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT key
+                    FROM app_state
+                    WHERE key LIKE 'perk_check_queue:%'
+                    ORDER BY key ASC
+                    LIMIT 200
+                    """
+                ).fetchall()
+                for row in rows:
+                    key = str(row["key"])
+                    parts = key.split(":")
+                    if len(parts) != 5:
+                        conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+                        continue
+                    try:
+                        guild_id = int(parts[2])
+                        user_id = int(parts[3])
+                    except ValueError:
+                        conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+                        continue
+                    conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+                    entries.append((key, guild_id, user_id))
+        except Exception as exc:
+            print(f"[perks] failed to read perk queue: {exc}")
+            return
+
+        if not entries:
+            return
+        print(f"[perks] processing queued activation checks: {len(entries)} entries")
+
+        seen: set[tuple[int, int]] = set()
+        for _key, guild_id, user_id in entries:
+            marker = (guild_id, user_id)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                await check_and_announce_perk_activations_for_user(
+                    client=self,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                )
+                print(f"[perks] activation check complete guild={guild_id} user={user_id}")
+            except Exception as exc:
+                print(f"[perks] queued activation check failed guild={guild_id} user={user_id}: {exc}")
 
     async def _tick_loop(self) -> None:
         while not self.is_closed():
@@ -115,6 +174,7 @@ class StockBot(discord.Client):
                 await asyncio.to_thread(process_ticks, tick_indices, guild_ids)
                 set_state_value("last_tick", str(next_tick))
                 set_state_value("last_tick_epoch", str(time.time()))
+                await self._process_stock_alert_notifications(next_tick)
                 await self._maybe_send_market_close_announcement()
             except Exception as exc:
                 print(f"[tick] loop error: {exc}")
@@ -229,6 +289,60 @@ class StockBot(discord.Client):
                     f"[jobs] failed to send timed completion notification "
                     f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')} user={user_id}: {exc}"
                 )
+
+    async def _process_stock_alert_notifications(self, tick_index: int) -> None:
+        announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
+        for guild in self.guilds:
+            try:
+                fired = await asyncio.to_thread(process_stock_alerts, guild.id, int(tick_index))
+            except Exception as exc:
+                print(f"[notify] process alerts failed guild={guild.id}: {exc}")
+                continue
+            if not fired:
+                continue
+            channel = await self._pick_announcement_channel(guild, announcement_channel_id)
+            if channel is None:
+                continue
+            for alert in fired:
+                user_id = int(alert.get("user_id", 0))
+                symbol = str(alert.get("symbol", "")).upper()
+                cond = str(alert.get("condition", "above")).lower()
+                target = float(alert.get("target_price", 0.0))
+                current = float(alert.get("current_price", 0.0))
+                alert_id = int(alert.get("id", 0))
+                dm_text = (
+                    f"Stock alert `#{alert_id}` triggered in **{guild.name}**:\n"
+                    f"**{symbol}** is now **${current:.2f}**, {cond} `${target:.2f}`."
+                )
+                channel_text = (
+                    f"<@{user_id}> alert `#{alert_id}` triggered: "
+                    f"**{symbol}** is now **${current:.2f}**, {cond} `${target:.2f}`."
+                )
+                dm_sent = False
+                try:
+                    member = guild.get_member(user_id)
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(user_id)
+                        except Exception:
+                            member = None
+                    target_user = member or self.get_user(user_id)
+                    if target_user is None:
+                        target_user = await self.fetch_user(user_id)
+                    if target_user is not None:
+                        await target_user.send(dm_text)
+                        dm_sent = True
+                except Exception:
+                    dm_sent = False
+                if dm_sent:
+                    continue
+                try:
+                    await channel.send(channel_text)
+                except Exception as exc:
+                    print(
+                        f"[notify] failed to send alert guild={guild.id} "
+                        f"channel={getattr(channel, 'id', 'unknown')} alert_id={alert_id}: {exc}"
+                    )
 
     async def _maybe_send_market_close_announcement(self) -> None:
         display_timezone = str(get_app_config("DISPLAY_TIMEZONE"))

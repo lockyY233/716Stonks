@@ -38,7 +38,10 @@ HELP_SECTIONS: dict[str, str] = {
     "economy": (
         "## Economy Commands\n"
         "- `/shop`\n"
+        "- `/slot`\n"
+        "- `/steal member:...`\n"
         "- `/bank`\n"
+        "- `/property`\n"
         "- `/donate target:... amount:...`\n"
         "- `/feedback`\n"
         "- `/nextreset`"

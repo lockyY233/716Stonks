@@ -230,8 +230,15 @@ class ChooseSellSymbolModal(Modal):
         if preview is None:
             fee_line = "Transaction fee: calculated at execution time."
             total_line = f"Total (1 share): **${price:.2f}** (gross)."
+            avg_buy_line = "Avg buy price: unavailable."
+            profit_line = "Estimated P/L: unavailable."
         else:
             fee_line = f"Transaction fee: {preview['fee_percent']:.2f}% => ${preview['fee']:.2f}."
+            avg_buy_line = f"Avg buy price: ${preview['avg_buy_price']:.2f}/share."
+            profit_line = (
+                f"Estimated P/L: **${preview['estimated_pl_after_fee']:+.2f}** "
+                f"(before fee ${preview['estimated_pl_before_fee']:+.2f})."
+            )
             total_line = (
                 f"Total (1 share): **${preview['net_gain']:.2f}** "
                 f"(gross ${preview['gross_gain']:.2f})."
@@ -239,7 +246,9 @@ class ChooseSellSymbolModal(Modal):
         await interaction.response.send_message(
             (
                 f"Confirm sell action for {symbol} @ 💰**${price:.2f}**:\n"
+                f"{avg_buy_line}\n"
                 f"{fee_line}\n"
+                f"{profit_line}\n"
                 f"{total_line}"
             ),
             view=SellConfirmView(symbol),

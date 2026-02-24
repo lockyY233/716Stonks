@@ -11,6 +11,18 @@ from stockbot.config.settings import (
     DRIFT_NOISE_LOW_FREQ_RATIO,
     DRIFT_NOISE_LOW_GAIN,
     OWNER_BUY_FEE_RATE,
+    SLOT_BET_MIN,
+    SLOT_BET_MAX,
+    SLOT_MAX_SPINS,
+    SLOT_HOURLY_SPIN_LIMIT,
+    SLOT_PAIR_PAYOUT_BASE,
+    SLOT_TRIPLE_MULT_CHERRY,
+    SLOT_TRIPLE_MULT_LEMON,
+    SLOT_TRIPLE_MULT_WATERMELON,
+    SLOT_TRIPLE_MULT_BELL,
+    SLOT_TRIPLE_MULT_STAR,
+    SLOT_TRIPLE_MULT_SEVEN,
+    SLOT_TRIPLE_MULT_DIAMOND,
     GM_ID,
     ACTIVITY_APPLICATION_ID,
     MARKET_CLOSE_HOUR,
@@ -149,6 +161,66 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         cast=float,
         description="Owner payout percentage from non-owner buy transaction value.",
     ),
+    "SLOT_BET_MIN": AppConfigSpec(
+        default=float(SLOT_BET_MIN),
+        cast=float,
+        description="Minimum base bet per spin for /slot.",
+    ),
+    "SLOT_BET_MAX": AppConfigSpec(
+        default=float(SLOT_BET_MAX),
+        cast=float,
+        description="Maximum base bet per spin for /slot before perk modifiers.",
+    ),
+    "SLOT_MAX_SPINS": AppConfigSpec(
+        default=int(SLOT_MAX_SPINS),
+        cast=int,
+        description="Maximum spins per /slot command before perk modifiers.",
+    ),
+    "SLOT_HOURLY_SPIN_LIMIT": AppConfigSpec(
+        default=int(SLOT_HOURLY_SPIN_LIMIT),
+        cast=int,
+        description="Base hourly /slot spin limit per player before perk modifiers.",
+    ),
+    "SLOT_PAIR_PAYOUT_BASE": AppConfigSpec(
+        default=float(SLOT_PAIR_PAYOUT_BASE),
+        cast=float,
+        description="Base payout multiplier (of effective bet) for 2-of-a-kind slot results.",
+    ),
+    "SLOT_TRIPLE_MULT_CHERRY": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_CHERRY),
+        cast=float,
+        description="3x 🍒 payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_LEMON": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_LEMON),
+        cast=float,
+        description="3x 🍋 payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_WATERMELON": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_WATERMELON),
+        cast=float,
+        description="3x 🍉 payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_BELL": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_BELL),
+        cast=float,
+        description="3x 🔔 payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_STAR": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_STAR),
+        cast=float,
+        description="3x ⭐ payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_SEVEN": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_SEVEN),
+        cast=float,
+        description="3x 7️⃣ payout multiplier.",
+    ),
+    "SLOT_TRIPLE_MULT_DIAMOND": AppConfigSpec(
+        default=float(SLOT_TRIPLE_MULT_DIAMOND),
+        cast=float,
+        description="3x 💎 payout multiplier.",
+    ),
 }
 
 
@@ -226,6 +298,26 @@ def _normalize(name: str, value: Any) -> Any:
         return json.dumps(normalized, separators=(",", ":"))
     if name == "OWNER_BUY_FEE_RATE":
         return max(0.0, min(100.0, float(value)))
+    if name == "SLOT_BET_MIN":
+        return max(0.01, float(value))
+    if name == "SLOT_BET_MAX":
+        return max(0.01, float(value))
+    if name == "SLOT_MAX_SPINS":
+        return max(1, int(value))
+    if name == "SLOT_HOURLY_SPIN_LIMIT":
+        return max(0, int(value))
+    if name == "SLOT_PAIR_PAYOUT_BASE":
+        return max(0.0, float(value))
+    if name in {
+        "SLOT_TRIPLE_MULT_CHERRY",
+        "SLOT_TRIPLE_MULT_LEMON",
+        "SLOT_TRIPLE_MULT_WATERMELON",
+        "SLOT_TRIPLE_MULT_BELL",
+        "SLOT_TRIPLE_MULT_STAR",
+        "SLOT_TRIPLE_MULT_SEVEN",
+        "SLOT_TRIPLE_MULT_DIAMOND",
+    }:
+        return max(0.0, float(value))
     return value
 
 

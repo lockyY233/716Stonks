@@ -31,6 +31,10 @@ from stockbot.commands.income import setup_income
 from stockbot.commands.jobs import setup_jobs
 from stockbot.commands.trade import setup_trade
 from stockbot.commands.activity import setup_activity
+from stockbot.commands.property import setup_property
+from stockbot.commands.notify import setup_notify
+from stockbot.commands.slot import setup_slot
+from stockbot.commands.steal import setup_steal
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -65,3 +69,7 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_jobs(tree)
     setup_trade(tree)
     setup_activity(tree)
+    setup_property(tree)
+    setup_notify(tree)
+    setup_slot(tree)
+    setup_steal(tree)

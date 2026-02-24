@@ -257,6 +257,55 @@ def init_db() -> None:
                     REFERENCES jobs (id)
                     ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS properties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                image_url TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                max_level INTEGER NOT NULL DEFAULT 5,
+                buy_price REAL NOT NULL DEFAULT 0,
+                level_costs_json TEXT NOT NULL DEFAULT '[0,0,0,0,0]',
+                level_effects_json TEXT NOT NULL DEFAULT '[[],[],[],[],[]]',
+                ascension_cost REAL NOT NULL DEFAULT 0,
+                ascension_effects_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_properties (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                property_id INTEGER NOT NULL,
+                level INTEGER NOT NULL DEFAULT 0,
+                ascended INTEGER NOT NULL DEFAULT 0,
+                ascended_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, property_id),
+                FOREIGN KEY (guild_id, user_id)
+                    REFERENCES users (guild_id, user_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (property_id)
+                    REFERENCES properties (id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                condition TEXT NOT NULL CHECK(condition IN ('above','below')),
+                target_price REAL NOT NULL,
+                repeat_enabled INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_met INTEGER NOT NULL DEFAULT 0,
+                last_triggered_tick INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         _ensure_users_bank_type(conn)
@@ -274,6 +323,8 @@ def init_db() -> None:
         _ensure_close_news_table(conn)
         _ensure_perks_tables(conn)
         _ensure_jobs_tables(conn)
+        _ensure_properties_tables(conn)
+        _ensure_stock_alerts_table(conn)
 
 
 def _ensure_rank_column(conn: sqlite3.Connection) -> None:
@@ -671,6 +722,100 @@ def _ensure_jobs_tables(conn: sqlite3.Connection) -> None:
     user_jobs_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_jobs);").fetchall()}
     if user_jobs_cols and "running_until_epoch" not in user_jobs_cols:
         conn.execute("ALTER TABLE user_jobs ADD COLUMN running_until_epoch REAL NOT NULL DEFAULT 0;")
+
+
+def _ensure_properties_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            image_url TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            max_level INTEGER NOT NULL DEFAULT 5,
+            buy_price REAL NOT NULL DEFAULT 0,
+            level_costs_json TEXT NOT NULL DEFAULT '[0,0,0,0,0]',
+            level_effects_json TEXT NOT NULL DEFAULT '[[],[],[],[],[]]',
+            ascension_cost REAL NOT NULL DEFAULT 0,
+            ascension_effects_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL,
+            UNIQUE(guild_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_properties (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            property_id INTEGER NOT NULL,
+            level INTEGER NOT NULL DEFAULT 0,
+            ascended INTEGER NOT NULL DEFAULT 0,
+            ascended_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id, property_id),
+            FOREIGN KEY (guild_id, user_id)
+                REFERENCES users (guild_id, user_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (property_id)
+                REFERENCES properties (id)
+                ON DELETE CASCADE
+        );
+        """
+    )
+    p_cols = {row["name"] for row in conn.execute("PRAGMA table_info(properties);").fetchall()}
+    if p_cols and "level_costs_json" not in p_cols:
+        conn.execute("ALTER TABLE properties ADD COLUMN level_costs_json TEXT NOT NULL DEFAULT '[0,0,0,0,0]';")
+    if p_cols and "level_effects_json" not in p_cols:
+        conn.execute("ALTER TABLE properties ADD COLUMN level_effects_json TEXT NOT NULL DEFAULT '[[],[],[],[],[]]';")
+    if p_cols and "ascension_cost" not in p_cols:
+        conn.execute("ALTER TABLE properties ADD COLUMN ascension_cost REAL NOT NULL DEFAULT 0;")
+    if p_cols and "ascension_effects_json" not in p_cols:
+        conn.execute("ALTER TABLE properties ADD COLUMN ascension_effects_json TEXT NOT NULL DEFAULT '[]';")
+    if p_cols and "max_level" not in p_cols:
+        conn.execute("ALTER TABLE properties ADD COLUMN max_level INTEGER NOT NULL DEFAULT 5;")
+
+    up_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_properties);").fetchall()}
+    if up_cols and "ascended" not in up_cols:
+        conn.execute("ALTER TABLE user_properties ADD COLUMN ascended INTEGER NOT NULL DEFAULT 0;")
+    if up_cols and "ascended_count" not in up_cols:
+        conn.execute("ALTER TABLE user_properties ADD COLUMN ascended_count INTEGER NOT NULL DEFAULT 0;")
+
+
+def _ensure_stock_alerts_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS stock_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            condition TEXT NOT NULL CHECK(condition IN ('above','below')),
+            target_price REAL NOT NULL,
+            repeat_enabled INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_met INTEGER NOT NULL DEFAULT 0,
+            last_triggered_tick INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(stock_alerts);").fetchall()
+    }
+    if cols and "repeat_enabled" not in cols:
+        conn.execute("ALTER TABLE stock_alerts ADD COLUMN repeat_enabled INTEGER NOT NULL DEFAULT 0;")
+    if cols and "enabled" not in cols:
+        conn.execute("ALTER TABLE stock_alerts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;")
+    if cols and "last_met" not in cols:
+        conn.execute("ALTER TABLE stock_alerts ADD COLUMN last_met INTEGER NOT NULL DEFAULT 0;")
+    if cols and "last_triggered_tick" not in cols:
+        conn.execute("ALTER TABLE stock_alerts ADD COLUMN last_triggered_tick INTEGER NOT NULL DEFAULT 0;")
+    if cols and "updated_at" not in cols:
+        conn.execute(
+            "ALTER TABLE stock_alerts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';"
+        )
 
 
 def _ensure_company_columns(conn: sqlite3.Connection) -> None:

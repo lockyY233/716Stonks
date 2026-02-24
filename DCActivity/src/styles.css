@@ -109,7 +109,7 @@ body {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 .statusCard {
@@ -192,6 +192,164 @@ body {
   overflow: auto;
   width: 100%;
 }
+.shopWrap {
+  padding: 12px 14px;
+}
+.shopGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.shopCard {
+  border: 5px solid var(--line);
+  border-radius: 10px;
+  background: #0c1629;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.inventoryCard {
+  border-color: var(--line);
+  box-shadow: none;
+  background: #0c1629;
+}
+.shopCard.rarity-common {
+  border-color: #475569;
+  background: linear-gradient(180deg, #213247 0%, #0c1629 68%);
+  box-shadow: inset 0 20px 0 0 #cbd5e1;
+}
+.shopCard.rarity-uncommon {
+  border-color: #166534;
+  background: linear-gradient(180deg, #143b28 0%, #0c1629 68%);
+  box-shadow: inset 0 20px 0 0 #22c55e;
+}
+.shopCard.rarity-rare {
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #183260 0%, #0c1629 68%);
+  box-shadow: inset 0 20px 0 0 #60a5fa;
+}
+.shopCard.rarity-legendary {
+  border-color: #92400e;
+  background: linear-gradient(180deg, #4a3019 0%, #0c1629 68%);
+  box-shadow: inset 0 20px 0 0 #f59e0b;
+}
+.shopCard.rarity-exotic {
+  border-color: #7f1d1d;
+  background: linear-gradient(180deg, #4a1b1b 0%, #0c1629 68%);
+  box-shadow: inset 0 20px 0 0 #ef4444;
+}
+.shopImage {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-bottom: 1px solid #18243a;
+  background: #111827;
+}
+.shopImage.placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.shopBody {
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+.shopTitle {
+  margin: 0;
+  font-size: 1rem;
+}
+.shopMeta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.shopDesc {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.86rem;
+  line-height: 1.35;
+  min-height: 3.2em;
+}
+.shopFooter {
+  margin-top: auto;
+  padding: 10px;
+  border-top: 1px solid #18243a;
+}
+.shopFooter button {
+  width: 100%;
+}
+.dualWrap {
+  display: grid;
+  gap: 12px;
+}
+.dualCard {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0c1629;
+  padding: 10px;
+}
+.dualCard h3 {
+  margin: 0 0 8px 0;
+  font-size: 0.96rem;
+}
+.dualCard p {
+  margin: 0 0 8px 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+.dualControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.dualControls input {
+  min-width: 120px;
+}
+.readyBtn {
+  background: #166534;
+  border-color: #22c55e;
+  color: #dcfce7;
+  font-weight: 700;
+  min-height: 40px;
+  min-width: 120px;
+  font-size: 0.95rem;
+}
+.dualPlayers {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  margin: 8px 0;
+  padding-bottom: 4px;
+}
+.dualPlayer {
+  border: 1px solid #1f2b42;
+  border-radius: 8px;
+  background: #0a1222;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+  flex: 0 0 auto;
+  text-align: center;
+}
+.dualPlayer.isViewer {
+  border-color: #1d4ed8;
+}
+.dualAvatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 1px solid #334155;
+  object-fit: cover;
+}
 
 table {
   width: 100%;
@@ -224,6 +382,9 @@ tbody tr:hover {
 
 .up { color: var(--up); font-weight: 600; }
 .down { color: var(--down); font-weight: 600; }
+.delta-pos { color: var(--up); font-weight: 700; }
+.delta-neg { color: var(--down); font-weight: 700; }
+.delta-zero { color: var(--muted); font-weight: 700; }
 
 .empty {
   padding: 16px;

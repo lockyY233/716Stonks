@@ -109,10 +109,12 @@
         <div class="btnrow">
           <button id="showCompanies" class="active">Companies</button>
           <button id="showCommodities">Commodities</button>
+          <button id="showProperties">Properties</button>
           <button id="showShop">Shop</button>
           <button id="showPlayers">Players</button>
           <button id="showPerks">Perks</button>
           <button id="showJobs">Jobs</button>
+          <button id="showSlots">Slots</button>
           <button id="showAnnouncements">Announcements</button>
           <button id="showFeedback">Feedback</button>
           <button id="showBankActions">Bank Actions</button>
@@ -169,7 +171,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     const READ_ONLY_MODE = {{ "true" if read_only_mode else "false" }};
-    const VALID_TABS = new Set(["companies", "commodities", "shop", "players", "perks", "jobs", "announcements", "feedback", "bankActions", "actionHistory", "configs", "serverSettings"]);
+    const VALID_TABS = new Set(["companies", "commodities", "properties", "shop", "players", "perks", "jobs", "slots", "announcements", "feedback", "bankActions", "actionHistory", "configs", "serverSettings"]);
     function normalizeTab(tab) {
       const t = String(tab || "").trim();
       return VALID_TABS.has(t) ? t : "companies";
@@ -244,10 +246,12 @@
       if (!READ_ONLY_MODE) return;
       const ids = [
         "showCommodities",
+        "showProperties",
         "showShop",
         "showPlayers",
         "showPerks",
         "showJobs",
+        "showSlots",
         "showAnnouncements",
         "showFeedback",
         "showBankActions",
@@ -278,10 +282,12 @@
       document.querySelectorAll("button[id^='show']").forEach((btn) => btn.classList.remove("active"));
       if (currentTab === "companies") document.getElementById("showCompanies").classList.add("active");
       if (currentTab === "commodities") document.getElementById("showCommodities").classList.add("active");
+      if (currentTab === "properties") document.getElementById("showProperties").classList.add("active");
       if (currentTab === "shop") document.getElementById("showShop").classList.add("active");
       if (currentTab === "players") document.getElementById("showPlayers").classList.add("active");
       if (currentTab === "perks") document.getElementById("showPerks").classList.add("active");
       if (currentTab === "jobs") document.getElementById("showJobs").classList.add("active");
+      if (currentTab === "slots") document.getElementById("showSlots").classList.add("active");
       if (currentTab === "announcements") document.getElementById("showAnnouncements").classList.add("active");
       if (currentTab === "feedback") document.getElementById("showFeedback").classList.add("active");
       if (currentTab === "bankActions") document.getElementById("showBankActions").classList.add("active");
@@ -515,6 +521,73 @@
         tr.addEventListener("click", () => {
           const name = tr.getAttribute("data-commodity");
           gotoWithAuth(`/commodity/${encodeURIComponent(name)}`);
+        });
+      });
+    }
+    function renderProperties(rows) {
+      document.getElementById("tableTitle").textContent = "Properties";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Name</th><th>Status</th><th>Buy</th><th>Ascend</th><th>Max Lvl</th><th>Description</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const controlRow = `<tr>
+        <td colspan="6" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="addPropertyBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">+ Add Property</button>
+        </td>
+      </tr>`;
+      if (!rows.length) {
+        tbody.innerHTML = controlRow + '<tr><td colspan="6" class="empty">No properties found.</td></tr>';
+      } else {
+        tbody.innerHTML = controlRow + rows.map((r) => `<tr class="clickable" data-property-id="${esc(String(r.id || ""))}">
+          <td><strong>${esc(String(r.name || ""))}</strong></td>
+          <td>${Number(r.enabled || 0) === 1 ? '<span style="color:#86efac;">Enabled</span>' : '<span style="color:#fca5a5;">Disabled</span>'}</td>
+          <td class="mono">${fmtMoney(r.buy_price || 0)}</td>
+          <td class="mono">${fmtMoney(r.ascension_cost || 0)}</td>
+          <td class="mono">${esc(String(Number(r.max_level || 5)))}</td>
+          <td>${esc(String(r.description || ""))}</td>
+        </tr>`).join("");
+      }
+      const addBtn = document.getElementById("addPropertyBtn");
+      if (addBtn) {
+        addBtn.addEventListener("click", async () => {
+          addBtn.disabled = true;
+          const old = addBtn.textContent;
+          addBtn.textContent = "Adding...";
+          try {
+            const name = `New Property ${makeDraftKey("", 6)}`.trim();
+            const res = await fetch(withAuthToken("/api/property"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name,
+                description: "",
+                buy_price: 5000,
+                max_level: 5,
+                level_costs: [0, 5000, 10000, 15000, 25000],
+                level_effects: [[], [], [], [], []],
+                ascension_cost: 50000,
+                ascension_effects: [],
+              }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: "Failed to create property." }));
+              alert(err.error || "Failed to create property.");
+              return;
+            }
+            const data = await res.json().catch(() => ({}));
+            const id = Number(data.id || 0);
+            if (id > 0) gotoWithAuth(`/property/${encodeURIComponent(id)}`);
+          } finally {
+            addBtn.disabled = false;
+            addBtn.textContent = old;
+          }
+        });
+      }
+      document.querySelectorAll("tr[data-property-id]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const id = tr.getAttribute("data-property-id");
+          if (!id) return;
+          gotoWithAuth(`/property/${encodeURIComponent(id)}`);
         });
       });
     }
@@ -1495,6 +1568,79 @@
         });
       });
     }
+    function renderSlots(settings) {
+      const s = settings || {};
+      document.getElementById("tableTitle").textContent = "Slot Machine";
+      document.getElementById("thead").innerHTML = `<tr>
+        <th>Setting</th><th>Value</th><th>Description</th>
+      </tr>`;
+      const tbody = document.getElementById("rows");
+      const rows = [
+        { key: "SLOT_BET_MIN", label: "Min Bet", desc: "Minimum base bet per spin." },
+        { key: "SLOT_BET_MAX", label: "Max Bet", desc: "Maximum base bet per spin before perks." },
+        { key: "SLOT_MAX_SPINS", label: "Max Spins", desc: "Maximum spins per command before perks." },
+        { key: "SLOT_HOURLY_SPIN_LIMIT", label: "Hourly Spin Limit", desc: "Base per-player hourly spin cap before perk modifiers." },
+        { key: "SLOT_PAIR_PAYOUT_BASE", label: "Pair Payout Base", desc: "Base payout multiplier for a 2-of-a-kind result (before perk win multiplier)." },
+        { key: "SLOT_TRIPLE_MULT_CHERRY", label: "🍒 Triple Mult", desc: "Payout multiplier for 🍒🍒🍒." },
+        { key: "SLOT_TRIPLE_MULT_LEMON", label: "🍋 Triple Mult", desc: "Payout multiplier for 🍋🍋🍋." },
+        { key: "SLOT_TRIPLE_MULT_WATERMELON", label: "🍉 Triple Mult", desc: "Payout multiplier for 🍉🍉🍉." },
+        { key: "SLOT_TRIPLE_MULT_BELL", label: "🔔 Triple Mult", desc: "Payout multiplier for 🔔🔔🔔." },
+        { key: "SLOT_TRIPLE_MULT_STAR", label: "⭐ Triple Mult", desc: "Payout multiplier for ⭐⭐⭐." },
+        { key: "SLOT_TRIPLE_MULT_SEVEN", label: "7️⃣ Triple Mult", desc: "Payout multiplier for 7️⃣7️⃣7️⃣." },
+        { key: "SLOT_TRIPLE_MULT_DIAMOND", label: "💎 Triple Mult", desc: "Payout multiplier for 💎💎💎." },
+      ];
+      tbody.innerHTML = `<tr>
+        <td colspan="3" style="padding:10px 8px;border-bottom:1px solid #1f2937;">
+          <button id="saveSlotsBtn" style="padding:6px 10px;background:#14532d;border-color:#22c55e;color:#dcfce7;">Save Slot Settings</button>
+          <span class="muted" style="margin-left:8px;">Dedicated editor for slot machine behavior.</span>
+        </td>
+      </tr>` + rows.map((row) => `
+        <tr>
+          <td><strong>${esc(row.label)}</strong><div class="muted mono">${esc(row.key)}</div></td>
+          <td>
+            <input data-slot-input="${esc(row.key)}" class="mono" type="number" step="0.01"
+              value="${esc(String(s[row.key] ?? ""))}"
+              style="width:180px;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0b1323;color:#e5e7eb;" />
+          </td>
+          <td>${esc(row.desc)}</td>
+        </tr>
+      `).join("");
+      const saveBtn = document.getElementById("saveSlotsBtn");
+      if (!saveBtn) return;
+      saveBtn.addEventListener("click", async () => {
+        const payload = {};
+        rows.forEach((row) => {
+          const input = document.querySelector(`input[data-slot-input="${CSS.escape(row.key)}"]`);
+          payload[row.key] = Number(String(input?.value ?? "0"));
+        });
+        saveBtn.disabled = true;
+        const old = saveBtn.textContent;
+        saveBtn.textContent = "Saving...";
+        try {
+          const res = await fetch(withAuthToken("/api/slots/update"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            saveBtn.textContent = data.error || "Failed";
+            return;
+          }
+          saveBtn.textContent = "Saved";
+          const updated = data.slot_settings || {};
+          rows.forEach((row) => {
+            const input = document.querySelector(`input[data-slot-input="${CSS.escape(row.key)}"]`);
+            if (input) input.value = String(updated[row.key] ?? input.value);
+          });
+          setTimeout(() => { saveBtn.textContent = old; }, 900);
+        } catch (_e) {
+          saveBtn.textContent = "Failed";
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    }
     function renderServerSettings() {
       document.getElementById("tableTitle").textContent = "Server Settings";
       document.getElementById("thead").innerHTML = `<tr>
@@ -1644,6 +1790,12 @@
       renderCommodities(data.commodities || []);
       document.getElementById("last").textContent = fmtEtDate();
     }
+    async function loadProperties() {
+      const res = await fetch(withAuthToken("/api/properties"), { cache: "no-store" });
+      const data = await res.json();
+      renderProperties(data.properties || []);
+      document.getElementById("last").textContent = fmtEtDate();
+    }
     async function loadShop() {
       const res = await fetch(withAuthToken("/api/shop"), { cache: "no-store" });
       const data = await res.json();
@@ -1666,6 +1818,12 @@
       const res = await fetch(withAuthToken("/api/jobs"), { cache: "no-store" });
       const data = await res.json();
       renderJobs(data || {});
+      document.getElementById("last").textContent = fmtEtDate();
+    }
+    async function loadSlots() {
+      const res = await fetch(withAuthToken("/api/slots"), { cache: "no-store" });
+      const data = await res.json();
+      renderSlots(data.slot_settings || {});
       document.getElementById("last").textContent = fmtEtDate();
     }
     async function loadAnnouncements() {
@@ -1785,10 +1943,12 @@
         await loadHeaderStats();
         if (currentTab === "companies") await loadCompanies();
         else if (currentTab === "commodities") await loadCommodities();
+        else if (currentTab === "properties") await loadProperties();
         else if (currentTab === "shop") await loadShop();
         else if (currentTab === "players") await loadPlayers();
         else if (currentTab === "perks") await loadPerks();
         else if (currentTab === "jobs") await loadJobs();
+        else if (currentTab === "slots") await loadSlots();
         else if (currentTab === "announcements") await loadAnnouncements();
         else if (currentTab === "feedback") await loadFeedback();
         else if (currentTab === "bankActions") await loadBankActions();
@@ -1816,10 +1976,12 @@
     }
     document.getElementById("showCompanies").addEventListener("click", () => { setCurrentTab("companies"); setButtons(); tick(); });
     document.getElementById("showCommodities").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("commodities"); setButtons(); tick(); });
+    document.getElementById("showProperties").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("properties"); setButtons(); tick(); });
     document.getElementById("showShop").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("shop"); setButtons(); tick(); });
     document.getElementById("showPlayers").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("players"); setButtons(); tick(); });
     document.getElementById("showPerks").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("perks"); setButtons(); tick(); });
     document.getElementById("showJobs").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("jobs"); setButtons(); tick(); });
+    document.getElementById("showSlots").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("slots"); setButtons(); tick(); });
     document.getElementById("showAnnouncements").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("announcements"); setButtons(); tick(); });
     document.getElementById("showFeedback").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("feedback"); setButtons(); tick(); });
     document.getElementById("showBankActions").addEventListener("click", () => { if (READ_ONLY_MODE) return; setCurrentTab("bankActions"); setButtons(); tick(); });

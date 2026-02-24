@@ -373,15 +373,46 @@ def abandon_running_timed_job(guild_id: int, user_id: int) -> JobResult:
     return JobResult(True, f"Abandoned timed job **{name}**.")
 
 
+def list_user_running_timed_jobs(guild_id: int, user_id: int, limit: int = 50) -> list[dict]:
+    rows = list_running_timed_jobs(guild_id=guild_id, limit=max(1, int(limit)))
+    out: list[dict] = []
+    for row in rows:
+        if int(row.get("user_id", 0)) != int(user_id):
+            continue
+        remaining_seconds = _timed_remaining_seconds(
+            float(row.get("running_until_epoch", 0.0) or 0.0),
+            int(row.get("running_until_tick", 0) or 0),
+        )
+        item = dict(row)
+        item["remaining_seconds"] = int(remaining_seconds)
+        out.append(item)
+    out.sort(key=lambda r: int(r.get("remaining_seconds", 0)), reverse=True)
+    return out
+
+
+def abandon_running_timed_job_by_id(guild_id: int, user_id: int, job_id: int) -> JobResult:
+    running = list_user_running_timed_jobs(guild_id, user_id, limit=200)
+    target = next((r for r in running if int(r.get("job_id", 0)) == int(job_id)), None)
+    if target is None:
+        return JobResult(False, "That timed job is not currently active.")
+    name = str(target.get("job_name", f"Job #{job_id}"))
+    set_user_job_state(
+        guild_id,
+        user_id,
+        int(job_id),
+        next_available_tick=0,
+        running_until_tick=0,
+        running_until_epoch=0.0,
+    )
+    return JobResult(True, f"Abandoned timed job **{name}**.")
+
+
 def try_run_chance_job(guild_id: int, user_id: int, job_id: int) -> JobResult:
     job = get_job(guild_id, job_id)
     if job is None or int(job.get("enabled", 0)) != 1:
         return JobResult(False, "Job unavailable.")
     if not is_job_available_this_tick(guild_id, job_id):
         return JobResult(False, "This job is unavailable until next tick.")
-    lock_row = get_user_running_timed_job(guild_id, user_id, current_tick())
-    if lock_row is not None:
-        return JobResult(False, _timed_lock_message(lock_row))
     roll_pct = random.uniform(0.0, 100.0)
     chance_eval = evaluate_user_perks(
         guild_id=guild_id,
@@ -443,9 +474,6 @@ def try_start_or_claim_timed_job(guild_id: int, user_id: int, job_id: int) -> Jo
     job = get_job(guild_id, job_id)
     if job is None or int(job.get("enabled", 0)) != 1:
         return JobResult(False, "Job unavailable.")
-    lock_row = get_user_running_timed_job(guild_id, user_id, current_tick())
-    if lock_row is not None and int(lock_row.get("job_id", 0)) != int(job_id):
-        return JobResult(False, _timed_lock_message(lock_row))
     state = get_user_job_state(guild_id, user_id, job_id)
     running_until_epoch = float(state.get("running_until_epoch", 0.0) or 0.0)
     running_until_tick = int(state.get("running_until_tick", 0) or 0)
@@ -539,9 +567,6 @@ def submit_quiz_choice(guild_id: int, user_id: int, job_id: int, choice_value: s
         return JobResult(False, "Job unavailable.")
     if not is_job_available_this_tick(guild_id, job_id):
         return JobResult(False, "This job is unavailable until next tick.")
-    lock_row = get_user_running_timed_job(guild_id, user_id, current_tick())
-    if lock_row is not None:
-        return JobResult(False, _timed_lock_message(lock_row))
     choices = _parse_quiz_choices(job)
     if not choices:
         return JobResult(False, "Quiz choices are not configured.")

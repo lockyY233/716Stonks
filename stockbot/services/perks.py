@@ -14,6 +14,10 @@ from stockbot.db.repositories import get_state_value, set_state_value
 DAILY_CLOSE_RANK_BONUS_PERK_ID = 3_000_000_001
 
 
+def _perk_override_key(guild_id: int, user_id: int, perk_id: int) -> str:
+    return f"perk_user_override:{guild_id}:{user_id}:{perk_id}"
+
+
 def _cmp(actual: float, operator: str, expected: float) -> bool:
     if operator == ">":
         return actual > expected
@@ -114,6 +118,36 @@ def _apply_effect_to_accumulators(
             effect_display_parts.append(f"{target_stat} {scale_str}")
 
 
+def _coerce_effects(raw: object) -> list[dict]:
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [e for e in raw if isinstance(e, dict)]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    return _coerce_effects(parsed)
+
+
+def _coerce_level_effects(raw: object, max_level: int) -> list[list[dict]]:
+    out: list[list[dict]] = [[] for _ in range(max(1, int(max_level)))]
+    text = str(raw or "").strip()
+    if not text:
+        return out
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return out
+    if isinstance(parsed, list):
+        for idx in range(min(len(parsed), len(out))):
+            out[idx] = _coerce_effects(parsed[idx])
+    return out
+
+
 def apply_income_perks(
     guild_id: int,
     user_id: int,
@@ -139,6 +173,13 @@ def evaluate_user_perks(
     base_job_slots: int | None = None,
     base_timed_duration: float | None = None,
     base_chance_roll_bonus: float | None = None,
+    base_slot_bet_multiplier: float | None = None,
+    base_slot_bet_limit: float | None = None,
+    base_slot_win_multiplier: float | None = None,
+    base_slot_hourly_spin_limit: float | None = None,
+    base_steal_chance: float | None = None,
+    base_steal_amount_min: float | None = None,
+    base_steal_amount_max: float | None = None,
 ) -> dict:
     """
     Evaluate perk requirements and aggregate effect modifiers for supported stats:
@@ -149,6 +190,13 @@ def evaluate_user_perks(
     - job_slots
     - timed_duration
     - chance_roll_bonus
+    - slot_bet_multiplier
+    - slot_bet_limit
+    - slot_win_multiplier
+    - slot_hourly_spin_limit
+    - steal_chance
+    - steal_amount_min
+    - steal_amount_max
     """
     if base_trade_limits is None:
         base_trade_limits = int(get_app_config("TRADING_LIMITS"))
@@ -160,6 +208,20 @@ def evaluate_user_perks(
         base_timed_duration = 0.0
     if base_chance_roll_bonus is None:
         base_chance_roll_bonus = 0.0
+    if base_slot_bet_multiplier is None:
+        base_slot_bet_multiplier = 1.0
+    if base_slot_bet_limit is None:
+        base_slot_bet_limit = float(get_app_config("SLOT_BET_MAX"))
+    if base_slot_win_multiplier is None:
+        base_slot_win_multiplier = 1.0
+    if base_slot_hourly_spin_limit is None:
+        base_slot_hourly_spin_limit = float(get_app_config("SLOT_HOURLY_SPIN_LIMIT"))
+    if base_steal_chance is None:
+        base_steal_chance = 0.25
+    if base_steal_amount_min is None:
+        base_steal_amount_min = 50.0
+    if base_steal_amount_max is None:
+        base_steal_amount_max = 100.0
 
     with get_connection() as conn:
         holdings_rows = conn.execute(
@@ -170,10 +232,12 @@ def evaluate_user_perks(
             """,
             (guild_id, user_id),
         ).fetchall()
-        commodity_qty_by_name = {
-            str(r["commodity_name"]).strip().lower(): int(r["quantity"])
-            for r in holdings_rows
-        }
+        commodity_qty_by_name: dict[str, int] = {}
+        for r in holdings_rows:
+            key = str(r["commodity_name"]).strip().lower()
+            if not key:
+                continue
+            commodity_qty_by_name[key] = commodity_qty_by_name.get(key, 0) + int(r["quantity"] or 0)
         tag_qty_rows = conn.execute(
             """
             SELECT ct.tag AS tag, COALESCE(SUM(uc.quantity), 0) AS qty
@@ -181,7 +245,7 @@ def evaluate_user_perks(
             LEFT JOIN user_commodities uc
               ON uc.guild_id = ct.guild_id
              AND uc.user_id = ?
-             AND uc.commodity_name = ct.commodity_name
+             AND uc.commodity_name = ct.commodity_name COLLATE NOCASE
             WHERE ct.guild_id = ?
             GROUP BY ct.tag
             """,
@@ -194,13 +258,26 @@ def evaluate_user_perks(
         }
         commodity_perk_rows = conn.execute(
             """
-            SELECT uc.commodity_name, uc.quantity,
+            SELECT c.name AS commodity_name, CAST(SUM(uc.quantity) AS INTEGER) AS quantity,
                    c.perk_name, c.perk_description, c.perk_min_qty, c.perk_effects_json
             FROM user_commodities uc
             JOIN commodities c
               ON c.guild_id = uc.guild_id
-             AND c.name = uc.commodity_name
+             AND c.name = uc.commodity_name COLLATE NOCASE
             WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
+            GROUP BY c.name, c.perk_name, c.perk_description, c.perk_min_qty, c.perk_effects_json
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+        property_rows = conn.execute(
+            """
+            SELECT up.property_id, up.level, up.ascended,
+                   p.name, p.max_level, p.level_effects_json, p.ascension_effects_json
+            FROM user_properties up
+            JOIN properties p
+              ON p.id = up.property_id
+             AND p.guild_id = up.guild_id
+            WHERE up.guild_id = ? AND up.user_id = ?
             """,
             (guild_id, user_id),
         ).fetchall()
@@ -211,7 +288,7 @@ def evaluate_user_perks(
                 FROM user_commodities uc
                 JOIN commodities c
                   ON c.guild_id = uc.guild_id
-                 AND c.name = uc.commodity_name
+                 AND c.name = uc.commodity_name COLLATE NOCASE
                 WHERE uc.guild_id = ? AND uc.user_id = ?
                 """,
                 (guild_id, user_id),
@@ -252,6 +329,27 @@ def evaluate_user_perks(
                 """,
                 tuple(perk_ids),
             ).fetchall()
+        override_rows = conn.execute(
+            """
+            SELECT key, value
+            FROM app_state
+            WHERE key LIKE ?
+            """,
+            (f"perk_user_override:{guild_id}:{user_id}:%",),
+        ).fetchall()
+
+    override_by_perk: dict[int, str] = {}
+    for row in override_rows:
+        key = str(row["key"] or "")
+        value = str(row["value"] or "").strip().lower()
+        if value not in {"auto", "on", "off"}:
+            continue
+        try:
+            perk_id = int(key.rsplit(":", 1)[-1])
+        except (TypeError, ValueError):
+            continue
+        if perk_id > 0:
+            override_by_perk[perk_id] = value
 
     req_by_perk: dict[int, list[dict]] = {}
     for row in req_rows:
@@ -268,6 +366,13 @@ def evaluate_user_perks(
         "job_slots",
         "timed_duration",
         "chance_roll_bonus",
+        "slot_bet_multiplier",
+        "slot_bet_limit",
+        "slot_win_multiplier",
+        "slot_hourly_spin_limit",
+        "steal_chance",
+        "steal_amount_min",
+        "steal_amount_max",
     )
     stat_add = {k: 0.0 for k in tracked_stats}
     stat_mul = {k: 1.0 for k in tracked_stats}
@@ -275,49 +380,55 @@ def evaluate_user_perks(
 
     for perk in perks:
         perk_id = int(perk["id"])
+        override_mode = override_by_perk.get(perk_id, "auto")
+        if override_mode == "off":
+            continue
         stack_mode = str(perk.get("stack_mode", "add") or "add").strip().lower()
         max_stacks = max(1, int(perk.get("max_stacks", 1) or 1))
 
-        reqs = req_by_perk.get(perk_id, [])
-        group_rows: dict[int, list[dict]] = {}
-        for req in reqs:
-            group_rows.setdefault(int(req.get("group_id", 1) or 1), []).append(req)
-
-        matched_group_stacks: list[int] = []
-        for _group_id, rows in group_rows.items():
-            group_ok = True
-            stack_candidates: list[int] = []
-            for req in rows:
-                req_type = _normalize_req_type(req.get("req_type", "commodity_qty"))
-                op = str(req.get("operator", ">=") or ">=").strip()
-                expected = int(float(req.get("value", 1) or 1))
-                if expected < 0:
-                    expected = 0
-                actual = 0.0
-                if req_type == "commodity_qty":
-                    c_name = str(req.get("commodity_name", "") or "").strip().lower()
-                    actual = float(commodity_qty_by_name.get(c_name, 0))
-                elif req_type == "tag_qty":
-                    tag = str(req.get("commodity_name", "") or "").strip().lower()
-                    actual = float(qty_by_tag.get(tag, 0))
-                elif req_type == "any_single_commodity_qty":
-                    actual = float(max(commodity_qty_by_name.values()) if commodity_qty_by_name else 0)
-                else:
-                    group_ok = False
-                    break
-
-                if not _cmp(actual, op, expected):
-                    group_ok = False
-                    break
-                stack_candidates.append(_stack_count(actual, op, expected))
-
-            if group_ok:
-                group_stack = min(stack_candidates) if stack_candidates else 1
-                matched_group_stacks.append(max(1, group_stack))
-
-        # No requirements means always active.
-        if not group_rows:
+        if override_mode == "on":
             matched_group_stacks = [1]
+        else:
+            reqs = req_by_perk.get(perk_id, [])
+            group_rows: dict[int, list[dict]] = {}
+            for req in reqs:
+                group_rows.setdefault(int(req.get("group_id", 1) or 1), []).append(req)
+
+            matched_group_stacks: list[int] = []
+            for _group_id, rows in group_rows.items():
+                group_ok = True
+                stack_candidates: list[int] = []
+                for req in rows:
+                    req_type = _normalize_req_type(req.get("req_type", "commodity_qty"))
+                    op = str(req.get("operator", ">=") or ">=").strip()
+                    expected = int(float(req.get("value", 1) or 1))
+                    if expected < 0:
+                        expected = 0
+                    actual = 0.0
+                    if req_type == "commodity_qty":
+                        c_name = str(req.get("commodity_name", "") or "").strip().lower()
+                        actual = float(commodity_qty_by_name.get(c_name, 0))
+                    elif req_type == "tag_qty":
+                        tag = str(req.get("commodity_name", "") or "").strip().lower()
+                        actual = float(qty_by_tag.get(tag, 0))
+                    elif req_type == "any_single_commodity_qty":
+                        actual = float(max(commodity_qty_by_name.values()) if commodity_qty_by_name else 0)
+                    else:
+                        group_ok = False
+                        break
+
+                    if not _cmp(actual, op, expected):
+                        group_ok = False
+                        break
+                    stack_candidates.append(_stack_count(actual, op, expected))
+
+                if group_ok:
+                    group_stack = min(stack_candidates) if stack_candidates else 1
+                    matched_group_stacks.append(max(1, group_stack))
+
+            # No requirements means always active.
+            if not group_rows:
+                matched_group_stacks = [1]
 
         if not matched_group_stacks:
             continue
@@ -353,6 +464,7 @@ def evaluate_user_perks(
                 "name": str(perk.get("name", f"perk#{perk_id}")),
                 "description": str(perk.get("description", "")),
                 "stacks": stacks,
+                "override_mode": override_mode,
                 "add": perk_add["income"],
                 "mul": perk_mul["income"],
                 "adds": dict(perk_add),
@@ -430,6 +542,60 @@ def evaluate_user_perks(
             }
         )
 
+    # Property effects (level effects + permanent ascension effects).
+    for row in property_rows:
+        row_data = dict(row)
+        level = max(0, int(row_data.get("level", 0) or 0))
+        ascended = int(row_data.get("ascended", 0) or 0) > 0
+        max_level = max(1, int(row_data.get("max_level", 5) or 5))
+        property_name = str(row_data.get("name", f"Property #{row_data.get('property_id', '?')}"))
+
+        level_effects = _coerce_level_effects(row_data.get("level_effects_json", ""), max_level)
+        current_level_effects = level_effects[level - 1] if 1 <= level <= len(level_effects) else []
+        ascension_effects = _coerce_effects(row_data.get("ascension_effects_json", ""))
+
+        for source_name, effects in (
+            (f"{property_name} L{level}", current_level_effects),
+            (f"{property_name} Ascension", ascension_effects if ascended else []),
+        ):
+            if not effects:
+                continue
+            perk_add = {k: 0.0 for k in tracked_stats}
+            perk_mul = {k: 1.0 for k in tracked_stats}
+            effect_display_parts: list[str] = []
+            for effect in effects:
+                _apply_effect_to_accumulators(
+                    effect,
+                    stacks=1,
+                    commodity_qty_by_name=commodity_qty_by_name,
+                    tracked_stats=tracked_stats,
+                    perk_add=perk_add,
+                    perk_mul=perk_mul,
+                    effect_display_parts=effect_display_parts,
+                )
+            has_change = any(abs(perk_add[k]) > 1e-9 or abs(perk_mul[k] - 1.0) > 1e-9 for k in tracked_stats)
+            if not has_change:
+                continue
+            for key in tracked_stats:
+                stat_add[key] += perk_add[key]
+                stat_mul[key] *= perk_mul[key]
+            derived_id = 4_000_000_000 + int(row_data.get("property_id", 0) or 0)
+            if "Ascension" in source_name:
+                derived_id += 100_000_000
+            matched.append(
+                {
+                    "perk_id": int(derived_id),
+                    "name": source_name,
+                    "description": "Property effect",
+                    "stacks": 1,
+                    "add": perk_add["income"],
+                    "mul": perk_mul["income"],
+                    "adds": dict(perk_add),
+                    "muls": dict(perk_mul),
+                    "display": " | ".join(effect_display_parts),
+                }
+            )
+
     # Daily close rank bonus (top 3) stored in app_state and active until next close.
     daily_bonus_raw = get_state_value(f"daily_networth_bonus:{guild_id}:{user_id}")
     try:
@@ -455,7 +621,8 @@ def evaluate_user_perks(
             }
         )
 
-    final_income = max(0.0, (float(base_income) + stat_add["income"]) * stat_mul["income"])
+    # Allow negative income effects; downstream payout logic can route deficits to owe.
+    final_income = (float(base_income) + stat_add["income"]) * stat_mul["income"]
     final_trade_limits = max(0.0, (float(base_trade_limits) + stat_add["trade_limits"]) * stat_mul["trade_limits"])
     final_networth = max(0.0, (float(base_networth) + stat_add["networth"]) * stat_mul["networth"])
     final_commodities_limit = max(
@@ -470,6 +637,39 @@ def evaluate_user_perks(
     final_chance_roll_bonus = (
         float(base_chance_roll_bonus) + stat_add["chance_roll_bonus"]
     ) * stat_mul["chance_roll_bonus"]
+    final_slot_bet_multiplier = max(
+        0.01,
+        (float(base_slot_bet_multiplier) + stat_add["slot_bet_multiplier"]) * stat_mul["slot_bet_multiplier"],
+    )
+    final_slot_bet_limit = max(
+        0.0,
+        (float(base_slot_bet_limit) + stat_add["slot_bet_limit"]) * stat_mul["slot_bet_limit"],
+    )
+    final_slot_win_multiplier = max(
+        0.0,
+        (float(base_slot_win_multiplier) + stat_add["slot_win_multiplier"]) * stat_mul["slot_win_multiplier"],
+    )
+    final_slot_hourly_spin_limit = max(
+        0.0,
+        (float(base_slot_hourly_spin_limit) + stat_add["slot_hourly_spin_limit"]) * stat_mul["slot_hourly_spin_limit"],
+    )
+    final_steal_chance = max(
+        0.0,
+        min(
+            1.0,
+            (float(base_steal_chance) + stat_add["steal_chance"]) * stat_mul["steal_chance"],
+        ),
+    )
+    final_steal_amount_min = max(
+        0.0,
+        (float(base_steal_amount_min) + stat_add["steal_amount_min"]) * stat_mul["steal_amount_min"],
+    )
+    final_steal_amount_max = max(
+        0.0,
+        (float(base_steal_amount_max) + stat_add["steal_amount_max"]) * stat_mul["steal_amount_max"],
+    )
+    if final_steal_amount_min > final_steal_amount_max:
+        final_steal_amount_min, final_steal_amount_max = final_steal_amount_max, final_steal_amount_min
     return {
         "base": {
             "income": float(base_income),
@@ -479,6 +679,13 @@ def evaluate_user_perks(
             "job_slots": float(base_job_slots),
             "timed_duration": float(base_timed_duration),
             "chance_roll_bonus": float(base_chance_roll_bonus),
+            "slot_bet_multiplier": float(base_slot_bet_multiplier),
+            "slot_bet_limit": float(base_slot_bet_limit),
+            "slot_win_multiplier": float(base_slot_win_multiplier),
+            "slot_hourly_spin_limit": float(base_slot_hourly_spin_limit),
+            "steal_chance": float(base_steal_chance),
+            "steal_amount_min": float(base_steal_amount_min),
+            "steal_amount_max": float(base_steal_amount_max),
         },
         "final": {
             "income": float(final_income),
@@ -488,6 +695,13 @@ def evaluate_user_perks(
             "job_slots": float(int(round(final_job_slots))),
             "timed_duration": float(final_timed_duration),
             "chance_roll_bonus": float(final_chance_roll_bonus),
+            "slot_bet_multiplier": float(final_slot_bet_multiplier),
+            "slot_bet_limit": float(final_slot_bet_limit),
+            "slot_win_multiplier": float(final_slot_win_multiplier),
+            "slot_hourly_spin_limit": float(int(round(final_slot_hourly_spin_limit))),
+            "steal_chance": float(final_steal_chance),
+            "steal_amount_min": float(final_steal_amount_min),
+            "steal_amount_max": float(final_steal_amount_max),
         },
         "matched_perks": matched,
     }
@@ -525,9 +739,24 @@ async def check_and_announce_perk_activations(
 ) -> list[str]:
     if interaction.guild is None:
         return []
+    return await check_and_announce_perk_activations_for_user(
+        client=interaction.client,
+        guild_id=interaction.guild.id,
+        user_id=int(target_user_id or interaction.user.id),
+    )
 
-    guild_id = interaction.guild.id
-    user_id = int(target_user_id or interaction.user.id)
+async def check_and_announce_perk_activations_for_user(
+    *,
+    client: discord.Client,
+    guild_id: int,
+    user_id: int,
+) -> list[str]:
+    guild = client.get_guild(guild_id)
+    if guild is None:
+        try:
+            guild = await client.fetch_guild(guild_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return []
 
     eval_result = evaluate_user_perks(guild_id, user_id, base_income=0.0)
     matched = list(eval_result.get("matched_perks", []))
@@ -581,7 +810,7 @@ async def check_and_announce_perk_activations(
         return []
 
     perk_names = [current_names.get(perk_id, f"perk#{perk_id}") for perk_id in newly_activated_ids]
-    channel = await _pick_announcement_channel(interaction.guild, interaction.client)
+    channel = await _pick_announcement_channel(guild, client)
     if channel is None:
         return perk_names
     blocks: list[str] = []

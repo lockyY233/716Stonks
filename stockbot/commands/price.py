@@ -20,6 +20,7 @@ from stockbot.db import (
     get_price_history,
     get_user_shares,
 )
+from stockbot.services.trading import preview_sell_transaction
 
 
 class PriceView(View):
@@ -58,7 +59,30 @@ class PriceView(View):
         company = get_company(interaction.guild.id, self.symbol)
         if company is not None:
             price = float(company.get("current_price", company["base_price"]))
-            message = f"Confirm sell action for {self.symbol} @ **${price:.2f}**:"
+            preview = preview_sell_transaction(
+                interaction.guild.id,
+                interaction.user.id,
+                self.symbol,
+                shares=1,
+            )
+            if preview is None:
+                message = (
+                    f"Confirm sell action for {self.symbol} @ **${price:.2f}**:\n"
+                    f"Avg buy price: unavailable.\n"
+                    f"Transaction fee: calculated at execution time.\n"
+                    f"Estimated P/L: unavailable.\n"
+                    f"Total (1 share): **${price:.2f}** (gross)."
+                )
+            else:
+                message = (
+                    f"Confirm sell action for {self.symbol} @ **${price:.2f}**:\n"
+                    f"Avg buy price: ${preview['avg_buy_price']:.2f}/share.\n"
+                    f"Transaction fee: {preview['fee_percent']:.2f}% => ${preview['fee']:.2f}.\n"
+                    f"Estimated P/L: **${preview['estimated_pl_after_fee']:+.2f}** "
+                    f"(before fee ${preview['estimated_pl_before_fee']:+.2f}).\n"
+                    f"Total (1 share): **${preview['net_gain']:.2f}** "
+                    f"(gross ${preview['gross_gain']:.2f})."
+                )
         else:
             message = "Confirm sell action:"
         await interaction.response.send_message(

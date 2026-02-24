@@ -25,6 +25,15 @@
     .qty-input { max-width: 110px; }
     .small-btn { padding:7px 10px; }
     .history-card { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .props-card { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .perks-card { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .props-grid { display:grid; grid-template-columns: 1.4fr 0.9fr 0.8fr 0.9fr 1.6fr; gap:8px; align-items:center; }
+    .perks-grid { display:grid; grid-template-columns: 1.2fr 0.8fr 0.9fr 1fr auto; gap:8px; align-items:center; }
+    .perk-list { margin-top:8px; display:grid; gap:6px; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid #334155; border-radius:999px; font-size:.78rem; color:var(--muted); }
+    .pill.on { border-color:#16a34a; color:#22c55e; }
+    .pill.off { border-color:#7f1d1d; color:#ef4444; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .85rem; }
     .history-table-wrap { overflow-x: auto; }
     .history-table { width: 100%; border-collapse: collapse; }
     .history-table th, .history-table td { border-bottom: 1px solid #1f2937; padding: 8px 6px; text-align: left; font-size: .9rem; white-space: nowrap; }
@@ -37,6 +46,8 @@
       .row3 { grid-template-columns: 1fr; }
       .top { flex-direction: column; align-items: flex-start; gap: 6px; }
       .inventory-grid { grid-template-columns: 1fr; }
+      .props-grid { grid-template-columns: 1fr; }
+      .perks-grid { grid-template-columns: 1fr; }
       .qty-input { max-width: unset; }
     }
   </style>
@@ -64,6 +75,9 @@
         <div><label>Current Trade Limit (read-only)</label><input id="trade_limit_status" readonly /></div>
         <div><label>Trade Usage Action</label><button id="resetTradeBtn" type="button" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Reset Trade Usage</button></div>
       </div>
+      <div class="row">
+        <div><label>Daily Networth Bonus (perk-like override)</label><input id="daily_networth_bonus" type="number" step="0.01" /></div>
+      </div>
       <button id="saveBtn">Save</button>
       <div id="msg" class="muted" style="margin-top:8px;"></div>
 
@@ -86,6 +100,37 @@
           </div>
         </div>
         <div id="inventoryRows" class="inventory-grid"></div>
+      </div>
+
+      <div class="props-card">
+        <div class="inventory-head">
+          <div class="title" style="font-size:1rem;">Properties</div>
+          <div class="muted" id="propertiesSummary">Loading...</div>
+        </div>
+        <div id="propertiesRows" class="props-grid"></div>
+        <div class="muted" style="margin-top:6px;">Quick actions: Add sets level=1, Remove clears ownership, Clear Ascension removes ascension buffs.</div>
+      </div>
+
+      <div class="perks-card">
+        <div class="inventory-head">
+          <div class="title" style="font-size:1rem;">Perks</div>
+          <div class="muted" id="perksSummary">Loading...</div>
+        </div>
+        <div class="row3">
+          <div><label>Income (base → final)</label><input id="perk_income" readonly class="mono" /></div>
+          <div><label>Networth (base → final)</label><input id="perk_networth" readonly class="mono" /></div>
+          <div><label>Trade Limits (base → final)</label><input id="perk_trade_limit" readonly class="mono" /></div>
+        </div>
+        <div class="row3">
+          <div><label>Commodities Limit</label><input id="perk_commodities_limit" readonly class="mono" /></div>
+          <div><label>Job Slots</label><input id="perk_job_slots" readonly class="mono" /></div>
+          <div><label>Timed Duration / Chance Bonus</label><input id="perk_misc" readonly class="mono" /></div>
+        </div>
+        <div id="perksRows" class="perks-grid"></div>
+        <div>
+          <label style="margin-top:8px;">Matched Perks</label>
+          <div id="matchedPerks" class="perk-list"></div>
+        </div>
       </div>
 
       <div class="history-card">
@@ -117,6 +162,8 @@
     let INVENTORY = [];
     let AVAILABLE = [];
     let BANK_HISTORY = [];
+    let PLAYER_PROPERTIES = [];
+    let PLAYER_PERKS = null;
     function el(id){ return document.getElementById(id); }
     const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
     function withAuthToken(url) {
@@ -133,9 +180,11 @@
       }
     }
     async function load() {
-      const [playerRes, invRes, histRes] = await Promise.all([
+      const [playerRes, invRes, propsRes, perksRes, histRes] = await Promise.all([
         fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}`), { cache: "no-store" }),
         fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities`), { cache: "no-store" }),
+        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/properties`), { cache: "no-store" }),
+        fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/perks`), { cache: "no-store" }),
         fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/bank-history`), { cache: "no-store" }),
       ]);
       if (!playerRes.ok) return;
@@ -147,6 +196,7 @@
       el("networth").value = Number(p.networth).toFixed(2);
       el("owe").value = Number(p.owe || 0).toFixed(2);
       el("rank").value = p.rank || "";
+      el("daily_networth_bonus").value = Number(p.daily_networth_bonus || 0).toFixed(2);
       if (p.trade_limit_enabled) {
         el("trade_limit_status").value =
           `${Number(p.trade_limit_remaining || 0)}/${Number(p.trade_limit_limit || 0)} shares remaining `
@@ -159,6 +209,15 @@
         INVENTORY = Array.isArray(invData.inventory) ? invData.inventory : [];
         AVAILABLE = Array.isArray(invData.available) ? invData.available : [];
         renderInventory();
+      }
+      if (propsRes.ok) {
+        const propsData = await propsRes.json();
+        PLAYER_PROPERTIES = Array.isArray(propsData.properties) ? propsData.properties : [];
+        renderProperties();
+      }
+      if (perksRes.ok) {
+        PLAYER_PERKS = await perksRes.json();
+        renderPerks();
       }
       if (histRes.ok) {
         const histData = await histRes.json();
@@ -265,6 +324,181 @@
       });
     }
 
+    function fmtArrow(base, final, decimals = 2) {
+      const a = Number(base || 0);
+      const b = Number(final || 0);
+      return `${a.toFixed(decimals)} -> ${b.toFixed(decimals)}`;
+    }
+
+    function renderProperties() {
+      const rows = el("propertiesRows");
+      const summary = el("propertiesSummary");
+      const owned = PLAYER_PROPERTIES.filter((p) => Number(p.level || 0) > 0 || Number(p.ascended || 0) > 0 || Number(p.ascended_count || 0) > 0);
+      summary.textContent = `${owned.length}/${PLAYER_PROPERTIES.length} owned`;
+      if (!PLAYER_PROPERTIES.length) {
+        rows.innerHTML = `<div class="muted">No properties configured yet.</div>`;
+        return;
+      }
+      rows.innerHTML = PLAYER_PROPERTIES.map((p) => {
+        const pid = Number(p.id || 0);
+        const level = Number(p.level || 0);
+        const maxLevel = Math.max(1, Number(p.max_level || 1));
+        const asc = Number(p.ascended || 0) > 0;
+        const ascCount = Number(p.ascended_count || 0);
+        const ownedNow = level > 0 || asc || ascCount > 0;
+        return `
+          <div>
+            <strong>${esc(String(p.name || `Property ${pid}`))}</strong>
+            <div class="muted">Max ${maxLevel} · ${Number(p.enabled || 0) ? "Enabled" : "Disabled"} · ${ownedNow ? "Owned" : "Not owned"}</div>
+          </div>
+          <input data-prop-level="${pid}" type="number" min="0" max="${maxLevel}" step="1" value="${level}" />
+          <label class="muted" style="display:flex;align-items:center;gap:6px;margin:0;">
+            <input data-prop-asc="${pid}" type="checkbox" ${asc ? "checked" : ""} style="width:auto;" />
+            Ascended
+          </label>
+          <input data-prop-asc-count="${pid}" type="number" min="0" step="1" value="${ascCount}" />
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button data-prop-add="${pid}" type="button" class="small-btn">Add</button>
+            <button data-prop-remove="${pid}" type="button" class="small-btn" style="background:#7f1d1d;border-color:#ef4444;color:#fee2e2;">Remove</button>
+            <button data-prop-clear-asc="${pid}" type="button" class="small-btn">Clear Ascension</button>
+            <button data-prop-save="${pid}" type="button" class="small-btn">Save</button>
+          </div>
+        `;
+      }).join("");
+
+      async function saveProperty(payload) {
+        const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/properties/set`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          el("msg").textContent = "Property updated.";
+        } else {
+          const err = await res.json().catch(() => ({ error: "Failed to update property" }));
+          el("msg").textContent = err.error || "Failed to update property.";
+        }
+        await load();
+      }
+
+      document.querySelectorAll("button[data-prop-save]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const pid = Number(btn.getAttribute("data-prop-save") || 0);
+          if (!pid) return;
+          const levelInput = document.querySelector(`input[data-prop-level="${pid}"]`);
+          const ascInput = document.querySelector(`input[data-prop-asc="${pid}"]`);
+          const ascCountInput = document.querySelector(`input[data-prop-asc-count="${pid}"]`);
+          const payload = {
+            property_id: pid,
+            level: Number(levelInput?.value || 0),
+            ascended: Boolean(ascInput?.checked),
+            ascended_count: Number(ascCountInput?.value || 0),
+          };
+          await saveProperty(payload);
+        });
+      });
+      document.querySelectorAll("button[data-prop-add]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const pid = Number(btn.getAttribute("data-prop-add") || 0);
+          if (!pid) return;
+          await saveProperty({ property_id: pid, level: 1, ascended: false, ascended_count: 0 });
+        });
+      });
+      document.querySelectorAll("button[data-prop-remove]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const pid = Number(btn.getAttribute("data-prop-remove") || 0);
+          if (!pid) return;
+          await saveProperty({ property_id: pid, level: 0, ascended: false, ascended_count: 0 });
+        });
+      });
+      document.querySelectorAll("button[data-prop-clear-asc]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const pid = Number(btn.getAttribute("data-prop-clear-asc") || 0);
+          if (!pid) return;
+          const levelInput = document.querySelector(`input[data-prop-level="${pid}"]`);
+          await saveProperty({ property_id: pid, level: Number(levelInput?.value || 0), ascended: false, ascended_count: 0 });
+        });
+      });
+    }
+
+    function renderPerks() {
+      const summaryEl = el("perksSummary");
+      const rows = el("perksRows");
+      const matched = el("matchedPerks");
+      const s = PLAYER_PERKS?.summary || null;
+      const allPerks = Array.isArray(PLAYER_PERKS?.all_perks) ? PLAYER_PERKS.all_perks : [];
+      const matchedPerks = Array.isArray(PLAYER_PERKS?.matched_perks) ? PLAYER_PERKS.matched_perks : [];
+
+      summaryEl.textContent = `${matchedPerks.length} matched / ${allPerks.length} configured`;
+      if (s) {
+        el("perk_income").value = `$${fmtArrow(s.base_income, s.final_income)}`;
+        el("perk_networth").value = `$${fmtArrow(s.base_networth, s.final_networth)}`;
+        el("perk_trade_limit").value = fmtArrow(s.base_trade_limits, s.final_trade_limits, 0);
+        el("perk_commodities_limit").value = fmtArrow(s.base_commodities_limit, s.final_commodities_limit, 0);
+        el("perk_job_slots").value = fmtArrow(s.base_job_slots, s.final_job_slots, 0);
+        el("perk_misc").value = `${fmtArrow(s.base_timed_duration, s.final_timed_duration)} min / ${fmtArrow(s.base_chance_roll_bonus, s.final_chance_roll_bonus)}`;
+      }
+
+      if (!allPerks.length) {
+        rows.innerHTML = `<div class="muted">No configured perks for this guild.</div>`;
+      } else {
+        rows.innerHTML = allPerks.map((p) => {
+          const id = Number(p.id || 0);
+          const matchedCls = Number(p.matched || 0) ? "on" : "off";
+          const matchedTxt = Number(p.matched || 0) ? "Matched" : "Not matched";
+          const enabledTxt = Number(p.enabled || 0) ? "Enabled" : "Disabled";
+          const overrideMode = String(p.override_mode || "auto");
+          const overrideLabel = overrideMode === "on" ? "Forced ON" : (overrideMode === "off" ? "Forced OFF" : "Auto");
+          const editHref = withAuthToken(`/perk/${id}?tab=perks`);
+          return `
+            <div><strong>${esc(String(p.name || `Perk ${id}`))}</strong></div>
+            <div><span class="pill ${matchedCls}">${matchedTxt}</span></div>
+            <div><span class="pill">${enabledTxt}</span></div>
+            <button class="small-btn" data-perk-toggle="${id}" type="button">${overrideLabel}</button>
+            <a href="${editHref}">Edit</a>
+          `;
+        }).join("");
+        document.querySelectorAll("button[data-perk-toggle]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const perkId = Number(btn.getAttribute("data-perk-toggle") || 0);
+            if (!perkId) return;
+            const p = allPerks.find((row) => Number(row.id || 0) === perkId);
+            const mode = String(p?.override_mode || "auto");
+            const nextMode = mode === "auto" ? "on" : (mode === "on" ? "off" : "auto");
+            const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/perks/${perkId}/override`), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ mode: nextMode }),
+            });
+            if (res.ok) {
+              el("msg").textContent = `Perk override set to ${nextMode.toUpperCase()}.`;
+            } else {
+              const err = await res.json().catch(() => ({ error: "Failed to update perk override" }));
+              el("msg").textContent = err.error || "Failed to update perk override.";
+            }
+            await load();
+          });
+        });
+      }
+
+      if (!matchedPerks.length) {
+        matched.innerHTML = `<div class="muted">No active perk effects for this player.</div>`;
+      } else {
+        matched.innerHTML = matchedPerks.map((p) => {
+          const name = esc(String(p.name || "Unknown"));
+          const desc = esc(String(p.description || ""));
+          const display = esc(String(p.display || ""));
+          return `
+            <div class="card" style="padding:8px;">
+              <div><strong>${name}</strong> <span class="muted">(x${Number(p.stacks || 1)})</span></div>
+              <div class="muted">${desc || "No description."}</div>
+              <div class="mono">${display || "-"}</div>
+            </div>
+          `;
+        }).join("");
+      }
+    }
+
     async function setCommodityQty(name, quantity) {
       const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/commodities/set`), {
         method: "POST",
@@ -298,6 +532,7 @@
         networth: Number(el("networth").value),
         owe: Number(el("owe").value),
         rank: el("rank").value,
+        daily_networth_bonus: Number(el("daily_networth_bonus").value),
       };
       const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/update`), {
         method: "POST",

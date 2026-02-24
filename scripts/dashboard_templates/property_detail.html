@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Property Editor</title>
+  <style>
+    :root { --bg:#0f172a; --line:#1f2937; --text:#e5e7eb; --muted:#94a3b8; --btn:#334155; --btnH:#475569; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 980px; margin: 20px auto; padding: 0 14px; }
+    .card { background: linear-gradient(180deg,#0b1220,#0a101c); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .title { font-size:1.2rem; font-weight:700; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+    .row.one { grid-template-columns:1fr; }
+    label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px; }
+    input, textarea, select { width:100%; padding:8px; border-radius:8px; border:1px solid #334155; background:#0b1323; color:var(--text); }
+    textarea { min-height: 80px; resize: vertical; }
+    .input-error { border-color:#ef4444 !important; box-shadow: 0 0 0 1px #ef4444 inset; }
+    button { padding:9px 12px; border:1px solid #334155; border-radius:8px; background:var(--btn); color:var(--text); cursor:pointer; }
+    button:hover { background: var(--btnH); }
+    .danger-btn { background:#7f1d1d; border-color:#ef4444; color:#fee2e2; }
+    .danger-btn:hover { background:#991b1b; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    .preview { width: 300px; height: 300px; max-width: 100%; border-radius: 10px; object-fit: cover; border: 1px solid #1f2937; background: #0b1323; display: block; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #1f2937; padding:6px; vertical-align: middle; font-size:.86rem; }
+    th { color: var(--muted); text-align:left; }
+    .small-btn { padding:7px 10px; font-size:.82rem; }
+    .ownersTitle { margin-top: 6px; font-size: 1rem; font-weight: 700; }
+    .ownersWrap { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: #0b1323; overflow: auto; max-height: 240px; }
+    .ownersTable { width: 100%; border-collapse: collapse; }
+    .ownersTable th, .ownersTable td { padding: 8px 10px; border-bottom: 1px solid #1f2937; font-size: .88rem; text-align: left; }
+    .ownersTable th { color: var(--muted); font-size: .8rem; font-weight: 600; position: sticky; top: 0; background: #0f1b30; }
+    .ownersEmpty { padding: 10px; color: var(--muted); font-size: .85rem; }
+    a { color:#7dd3fc; text-decoration:none; font-size:.9rem; }
+    @media (max-width: 760px) {
+      .row { grid-template-columns: 1fr; }
+      .top { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .preview { width: 100%; height: auto; aspect-ratio: 1 / 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="top">
+        <div class="title">Property · <span id="titleName">-</span></div>
+        <a id="backLink" href="/">Back to Dashboard</a>
+      </div>
+      <div class="row">
+        <div><label>Name</label><input id="name" /></div>
+        <div><label>Enabled</label><select id="enabled"><option value="1">Enabled</option><option value="0">Disabled</option></select></div>
+      </div>
+      <div class="row">
+        <div><label>Buy Price</label><input id="buy_price" type="number" step="0.01" min="0" /></div>
+        <div><label>Max Level</label><input id="max_level" type="number" step="1" min="1" max="10" /></div>
+      </div>
+      <div class="row">
+        <div><label>Ascension Cost</label><input id="ascension_cost" type="number" step="0.01" min="0" /></div>
+        <div><label>Image URL</label><input id="image_url" /></div>
+      </div>
+      <div class="row">
+        <div><label>Thumbnail Preview</label><img id="preview" class="preview" alt="Property thumbnail" /></div>
+        <div></div>
+      </div>
+      <div class="row one">
+        <div><label>Description</label><textarea id="description"></textarea></div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Edit Level</label>
+          <select id="level_select"></select>
+        </div>
+        <div><label>Upgrade Cost for Selected Level</label><input id="level_upgrade_cost" type="number" step="0.01" min="0" /></div>
+      </div>
+      <div class="row one">
+        <div>
+          <label>Selected Level Effects</label>
+          <table>
+            <thead>
+              <tr>
+                <th>Target</th><th>Mode</th><th>Value</th><th>Scale Source</th><th>Scale Key</th><th>Scale Factor</th><th>Cap</th><th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="levelEffectsRows"></tbody>
+          </table>
+          <div class="row" style="margin-top:8px;">
+            <div><label>Target</label><select id="lvl_new_target"><option value="income">income</option><option value="trade_limits">trade_limits</option><option value="networth">networth</option><option value="commodities_limit">commodities_limit</option><option value="job_slots">job_slots</option><option value="timed_duration">timed_duration</option><option value="chance_roll_bonus">chance_roll_bonus</option></select></div>
+            <div><label>Mode</label><select id="lvl_new_mode"><option value="flat">flat</option><option value="multiplier">multiplier</option><option value="per_item">per_item</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Value</label><input id="lvl_new_value" type="number" step="0.0001" value="0" /></div>
+            <div><label>Scale Source</label><select id="lvl_new_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Scale Key</label><input id="lvl_new_key" value="" /></div>
+            <div><label>Scale Factor</label><input id="lvl_new_scale_factor" type="number" step="0.0001" value="0" /></div>
+          </div>
+          <div class="row">
+            <div><label>Cap (0 = no cap)</label><input id="lvl_new_cap" type="number" step="0.0001" value="0" /></div>
+            <div style="display:flex;align-items:flex-end;"><button id="addLevelEffectBtn" class="small-btn" type="button">Add Level Effect</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row one">
+        <div>
+          <label>Ascension Effects</label>
+          <table>
+            <thead>
+              <tr>
+                <th>Target</th><th>Mode</th><th>Value</th><th>Scale Source</th><th>Scale Key</th><th>Scale Factor</th><th>Cap</th><th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="ascEffectsRows"></tbody>
+          </table>
+          <div class="row" style="margin-top:8px;">
+            <div><label>Target</label><select id="asc_new_target"><option value="income">income</option><option value="trade_limits">trade_limits</option><option value="networth">networth</option><option value="commodities_limit">commodities_limit</option><option value="job_slots">job_slots</option><option value="timed_duration">timed_duration</option><option value="chance_roll_bonus">chance_roll_bonus</option></select></div>
+            <div><label>Mode</label><select id="asc_new_mode"><option value="flat">flat</option><option value="multiplier">multiplier</option><option value="per_item">per_item</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Value</label><input id="asc_new_value" type="number" step="0.0001" value="0" /></div>
+            <div><label>Scale Source</label><select id="asc_new_source"><option value="none">none</option><option value="commodity_qty">commodity_qty</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>Scale Key</label><input id="asc_new_key" value="" /></div>
+            <div><label>Scale Factor</label><input id="asc_new_scale_factor" type="number" step="0.0001" value="0" /></div>
+          </div>
+          <div class="row">
+            <div><label>Cap (0 = no cap)</label><input id="asc_new_cap" type="number" step="0.0001" value="0" /></div>
+            <div style="display:flex;align-items:flex-end;"><button id="addAscEffectBtn" class="small-btn" type="button">Add Ascension Effect</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ownersTitle">Owners</div>
+      <div class="ownersWrap">
+        <table class="ownersTable">
+          <thead><tr><th>User</th><th>Level</th><th>Ascended</th></tr></thead>
+          <tbody id="ownersRows"><tr><td colspan="3" class="ownersEmpty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px;">
+        <button id="saveBtn">Save</button>
+        <button id="deleteBtn" class="danger-btn" type="button">Delete Property</button>
+      </div>
+      <div id="msg" class="muted" style="margin-top:8px;"></div>
+    </div>
+  </div>
+  <script>
+    const PROPERTY_ID = Number({{ property_id|tojson }});
+    const URL_AUTH_TOKEN = new URLSearchParams(window.location.search).get("token");
+    const FALLBACK = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='100%' height='100%' fill='%230b1323'/><text x='50%' y='50%' fill='%2394a3b8' font-size='22' text-anchor='middle' dominant-baseline='middle'>No Img</text></svg>";
+    let CURRENT = null;
+    let LEVEL_EFFECTS = [];
+    let ASC_EFFECTS = [];
+    function el(id){ return document.getElementById(id); }
+    function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch])); }
+    function withAuthToken(url) {
+      if (!URL_AUTH_TOKEN) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(URL_AUTH_TOKEN)}`;
+    }
+    function wireBackLink() {
+      const back = el("backLink");
+      if (!back) return;
+      const tab = String(
+        new URLSearchParams(window.location.search).get("tab")
+        || localStorage.getItem("dashboard_tab")
+        || "properties"
+      );
+      back.href = withAuthToken(`/?tab=${encodeURIComponent(tab)}`);
+    }
+    function syncPreview() {
+      const img = el("preview");
+      if (!img) return;
+      img.onerror = () => { img.onerror = null; img.src = FALLBACK; };
+      img.src = el("image_url").value || FALLBACK;
+    }
+    function clearValidation(){ document.querySelectorAll(".input-error").forEach((n)=>n.classList.remove("input-error")); }
+    function markInvalid(id){ const n = el(id); if (n) n.classList.add("input-error"); }
+    function effectRowHtml(eff, idx, prefix) {
+      return `<tr data-${prefix}-eff-index="${idx}">
+        <td><select data-${prefix}-eff-target="${idx}"><option value="income"${eff.target_stat==="income"?" selected":""}>income</option><option value="trade_limits"${eff.target_stat==="trade_limits"?" selected":""}>trade_limits</option><option value="networth"${eff.target_stat==="networth"?" selected":""}>networth</option><option value="commodities_limit"${eff.target_stat==="commodities_limit"?" selected":""}>commodities_limit</option><option value="job_slots"${eff.target_stat==="job_slots"?" selected":""}>job_slots</option><option value="timed_duration"${eff.target_stat==="timed_duration"?" selected":""}>timed_duration</option><option value="chance_roll_bonus"${eff.target_stat==="chance_roll_bonus"?" selected":""}>chance_roll_bonus</option></select></td>
+        <td><select data-${prefix}-eff-mode="${idx}"><option value="flat"${eff.value_mode==="flat"?" selected":""}>flat</option><option value="multiplier"${eff.value_mode==="multiplier"?" selected":""}>multiplier</option><option value="per_item"${eff.value_mode==="per_item"?" selected":""}>per_item</option></select></td>
+        <td><input data-${prefix}-eff-value="${idx}" type="number" step="0.0001" value="${Number(eff.value||0)}" /></td>
+        <td><select data-${prefix}-eff-source="${idx}"><option value="none"${String(eff.scale_source||"none")==="none"?" selected":""}>none</option><option value="commodity_qty"${String(eff.scale_source||"none")==="commodity_qty"?" selected":""}>commodity_qty</option></select></td>
+        <td><input data-${prefix}-eff-key="${idx}" value="${esc(String(eff.scale_key||""))}" /></td>
+        <td><input data-${prefix}-eff-scale-factor="${idx}" type="number" step="0.0001" value="${Number(eff.scale_factor||0)}" /></td>
+        <td><input data-${prefix}-eff-cap="${idx}" type="number" step="0.0001" value="${Number(eff.cap||0)}" /></td>
+        <td><button class="small-btn" data-del-${prefix}-eff="${idx}" type="button">Delete</button></td>
+      </tr>`;
+    }
+    function collectEffects(prefix) {
+      const rows = document.querySelectorAll(`tr[data-${prefix}-eff-index]`);
+      const out = [];
+      for (const row of rows) {
+        const idx = Number(row.getAttribute(`data-${prefix}-eff-index`));
+        const obj = {
+          target_stat: document.querySelector(`[data-${prefix}-eff-target="${idx}"]`)?.value || "income",
+          value_mode: document.querySelector(`[data-${prefix}-eff-mode="${idx}"]`)?.value || "flat",
+          value: Number(document.querySelector(`[data-${prefix}-eff-value="${idx}"]`)?.value || 0),
+          scale_source: document.querySelector(`[data-${prefix}-eff-source="${idx}"]`)?.value || "none",
+          scale_key: String(document.querySelector(`[data-${prefix}-eff-key="${idx}"]`)?.value || ""),
+          scale_factor: Number(document.querySelector(`[data-${prefix}-eff-scale-factor="${idx}"]`)?.value || 0),
+          cap: Number(document.querySelector(`[data-${prefix}-eff-cap="${idx}"]`)?.value || 0),
+        };
+        out.push(obj);
+      }
+      return out;
+    }
+    function renderLevelEffects() {
+      const tbody = el("levelEffectsRows");
+      if (!LEVEL_EFFECTS.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted">No effects for this level.</td></tr>`;
+      } else {
+        tbody.innerHTML = LEVEL_EFFECTS.map((e, i) => effectRowHtml(e, i, "lvl")).join("");
+      }
+      document.querySelectorAll("[data-del-lvl-eff]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.getAttribute("data-del-lvl-eff"));
+          if (!Number.isFinite(idx)) return;
+          LEVEL_EFFECTS.splice(idx, 1);
+          renderLevelEffects();
+        });
+      });
+    }
+    function renderAscEffects() {
+      const tbody = el("ascEffectsRows");
+      if (!ASC_EFFECTS.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted">No ascension effects.</td></tr>`;
+      } else {
+        tbody.innerHTML = ASC_EFFECTS.map((e, i) => effectRowHtml(e, i, "asc")).join("");
+      }
+      document.querySelectorAll("[data-del-asc-eff]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.getAttribute("data-del-asc-eff"));
+          if (!Number.isFinite(idx)) return;
+          ASC_EFFECTS.splice(idx, 1);
+          renderAscEffects();
+        });
+      });
+    }
+    function renderOwners(rows) {
+      const tbody = el("ownersRows");
+      if (!Array.isArray(rows) || !rows.length) {
+        tbody.innerHTML = `<tr><td colspan="3" class="ownersEmpty">No owners yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => `<tr>
+        <td>${esc(String(r.display_name || `User ${r.user_id || "?"}`))}<div class="muted">${esc(String(r.user_id || ""))}</div></td>
+        <td>${esc(String(r.level || 0))}</td>
+        <td>${Number(r.ascended || 0) > 0 ? "Yes" : "No"}</td>
+      </tr>`).join("");
+    }
+    function refreshLevelEditorFromCurrent() {
+      if (!CURRENT) return;
+      const level = Number(el("level_select").value || 1);
+      const idx = Math.max(0, level - 1);
+      const costs = Array.isArray(CURRENT.level_costs) ? CURRENT.level_costs : [];
+      const effects = Array.isArray(CURRENT.level_effects) ? CURRENT.level_effects : [];
+      el("level_upgrade_cost").value = Number(costs[idx] || 0).toFixed(2);
+      LEVEL_EFFECTS = Array.isArray(effects[idx]) ? effects[idx].slice() : [];
+      renderLevelEffects();
+    }
+    async function load() {
+      const res = await fetch(withAuthToken(`/api/property/${encodeURIComponent(PROPERTY_ID)}`), { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        el("msg").textContent = data.error || "Failed to load property.";
+        return;
+      }
+      CURRENT = data.property || null;
+      if (!CURRENT) return;
+      el("titleName").textContent = String(CURRENT.name || PROPERTY_ID);
+      el("name").value = String(CURRENT.name || "");
+      el("enabled").value = Number(CURRENT.enabled || 0) > 0 ? "1" : "0";
+      el("buy_price").value = Number(CURRENT.buy_price || 0).toFixed(2);
+      el("max_level").value = Number(CURRENT.max_level || 5);
+      el("ascension_cost").value = Number(CURRENT.ascension_cost || 0).toFixed(2);
+      el("image_url").value = String(CURRENT.image_url || "");
+      syncPreview();
+      el("description").value = String(CURRENT.description || "");
+      const maxLevel = Math.max(1, Number(CURRENT.max_level || 5));
+      el("level_select").innerHTML = Array.from({ length: maxLevel }, (_, i) => {
+        const lvl = i + 1;
+        return `<option value="${lvl}">Level ${lvl}</option>`;
+      }).join("");
+      el("level_select").value = "1";
+      ASC_EFFECTS = Array.isArray(CURRENT.ascension_effects) ? CURRENT.ascension_effects.slice() : [];
+      renderAscEffects();
+      refreshLevelEditorFromCurrent();
+      renderOwners(Array.isArray(data.owners) ? data.owners : []);
+    }
+    async function save() {
+      clearValidation();
+      el("msg").textContent = "";
+      const name = String(el("name").value || "").trim();
+      if (!name) {
+        markInvalid("name");
+        el("msg").textContent = "Name is required.";
+        return;
+      }
+      if (!CURRENT) return;
+      const maxLevel = Math.max(1, Math.min(10, Number(el("max_level").value || CURRENT.max_level || 5)));
+      if (!Number.isFinite(maxLevel)) {
+        markInvalid("max_level");
+        return;
+      }
+      CURRENT.level_effects = Array.isArray(CURRENT.level_effects) ? CURRENT.level_effects : [];
+      CURRENT.level_costs = Array.isArray(CURRENT.level_costs) ? CURRENT.level_costs : [];
+      while (CURRENT.level_effects.length < maxLevel) CURRENT.level_effects.push([]);
+      while (CURRENT.level_costs.length < maxLevel) CURRENT.level_costs.push(0);
+      CURRENT.level_effects = CURRENT.level_effects.slice(0, maxLevel);
+      CURRENT.level_costs = CURRENT.level_costs.slice(0, maxLevel);
+      const selectedLevel = Math.max(1, Number(el("level_select").value || 1));
+      const idx = selectedLevel - 1;
+      CURRENT.level_effects[idx] = collectEffects("lvl");
+      CURRENT.level_costs[idx] = Math.max(0, Number(el("level_upgrade_cost").value || 0));
+      ASC_EFFECTS = collectEffects("asc");
+      const payload = {
+        name,
+        enabled: Number(el("enabled").value || 1),
+        buy_price: Math.max(0, Number(el("buy_price").value || 0)),
+        max_level: maxLevel,
+        ascension_cost: Math.max(0, Number(el("ascension_cost").value || 0)),
+        image_url: String(el("image_url").value || "").trim(),
+        description: String(el("description").value || "").trim(),
+        level_costs: CURRENT.level_costs,
+        level_effects: CURRENT.level_effects,
+        ascension_effects: ASC_EFFECTS,
+      };
+      const res = await fetch(withAuthToken(`/api/property/${encodeURIComponent(PROPERTY_ID)}/update`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        el("msg").textContent = data.error || "Save failed.";
+        return;
+      }
+      el("msg").textContent = "Saved.";
+      await load();
+    }
+    async function removeProperty() {
+      if (!confirm("Delete this property? This cannot be undone.")) return;
+      const res = await fetch(withAuthToken(`/api/property/${encodeURIComponent(PROPERTY_ID)}/delete`), { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        el("msg").textContent = data.error || "Delete failed.";
+        return;
+      }
+      window.location.assign(withAuthToken("/?tab=properties"));
+    }
+    el("level_select").addEventListener("change", () => {
+      if (!CURRENT) return;
+      const prevLevel = Math.max(1, Number(el("level_select").getAttribute("data-prev") || 1));
+      const prevIdx = prevLevel - 1;
+      CURRENT.level_effects[prevIdx] = collectEffects("lvl");
+      CURRENT.level_costs[prevIdx] = Math.max(0, Number(el("level_upgrade_cost").value || 0));
+      el("level_select").setAttribute("data-prev", String(el("level_select").value || "1"));
+      refreshLevelEditorFromCurrent();
+    });
+    el("addLevelEffectBtn").addEventListener("click", () => {
+      LEVEL_EFFECTS = collectEffects("lvl");
+      LEVEL_EFFECTS.push({
+        target_stat: el("lvl_new_target").value,
+        value_mode: el("lvl_new_mode").value,
+        value: Number(el("lvl_new_value").value || 0),
+        scale_source: el("lvl_new_source").value,
+        scale_key: String(el("lvl_new_key").value || "").trim(),
+        scale_factor: Number(el("lvl_new_scale_factor").value || 0),
+        cap: Number(el("lvl_new_cap").value || 0),
+      });
+      renderLevelEffects();
+    });
+    el("addAscEffectBtn").addEventListener("click", () => {
+      ASC_EFFECTS = collectEffects("asc");
+      ASC_EFFECTS.push({
+        target_stat: el("asc_new_target").value,
+        value_mode: el("asc_new_mode").value,
+        value: Number(el("asc_new_value").value || 0),
+        scale_source: el("asc_new_source").value,
+        scale_key: String(el("asc_new_key").value || "").trim(),
+        scale_factor: Number(el("asc_new_scale_factor").value || 0),
+        cap: Number(el("asc_new_cap").value || 0),
+      });
+      renderAscEffects();
+    });
+    el("image_url").addEventListener("input", syncPreview);
+    el("saveBtn").addEventListener("click", save);
+    el("deleteBtn").addEventListener("click", removeProperty);
+    wireBackLink();
+    load();
+  </script>
+</body>
+</html>

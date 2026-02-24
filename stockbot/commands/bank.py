@@ -5,6 +5,7 @@ from discord import ButtonStyle, Embed, Interaction, app_commands
 from discord.ui import Button, Modal, Select, TextInput, View, button
 
 from stockbot.commands.register import REGISTER_REQUIRED_MESSAGE, RegisterNowView
+from stockbot.commands.property import send_property_panel
 from stockbot.db import (
     add_action_history,
     create_bank_request,
@@ -55,7 +56,8 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
                     "## Choose a service below.\n\n"
                     "- **Loan**: submit request for GM approval.\n"
                     "- **Pay Loan**: repay part/all of your current owe.\n"
-                    "- **Pawn**: sell owned commodity at pawn rate."
+                    "- **Pawn**: sell owned commodity at pawn rate.\n"
+                    "- **Property Dealer**: buy and upgrade endgame properties."
                 )
             )
         )
@@ -64,11 +66,7 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
         loan_btn = discord.ui.Button(label="Loan", style=ButtonStyle.blurple)
         pay_btn = discord.ui.Button(label="Pay Loan", style=ButtonStyle.green)
         pawn_btn = discord.ui.Button(label="Pawn", style=ButtonStyle.red)
-        coming_btn = discord.ui.Button(
-            label="More Services Soon",
-            style=ButtonStyle.secondary,
-            disabled=True,
-        )
+        property_btn = discord.ui.Button(label="Property Dealer", style=ButtonStyle.secondary)
 
         async def loan_cb(interaction: Interaction) -> None:
             await _send_loan_info(interaction, guild_id, user_id)
@@ -79,13 +77,13 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
         async def pawn_cb(interaction: Interaction) -> None:
             await _send_pawn_selector(interaction, guild_id, user_id)
 
-        async def coming_cb(interaction: Interaction) -> None:
-            await interaction.response.defer()
+        async def property_cb(interaction: Interaction) -> None:
+            await send_property_panel(interaction, guild_id, user_id, ephemeral=True)
 
         loan_btn.callback = loan_cb
         pay_btn.callback = pay_cb
         pawn_btn.callback = pawn_cb
-        coming_btn.callback = coming_cb
+        property_btn.callback = property_cb
 
         # Keep interactive controls inside the V2 container bubble.
         if hasattr(ui, "ActionRow"):
@@ -93,7 +91,7 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
             row.add_item(loan_btn)
             row.add_item(pay_btn)
             row.add_item(pawn_btn)
-            row.add_item(coming_btn)
+            row.add_item(property_btn)
             container.add_item(row)
         else:
             # If ActionRow is unavailable in this runtime, skip V2 path.
@@ -343,9 +341,9 @@ class BankMenuView(View):
     async def pawn(self, interaction: Interaction, _button: Button) -> None:
         await _send_pawn_selector(interaction, self._guild_id, self._user_id)
 
-    @button(label="More Services Soon", style=ButtonStyle.secondary, disabled=True)
-    async def coming_soon(self, interaction: Interaction, _button: Button) -> None:
-        await interaction.response.defer()
+    @button(label="Property Dealer", style=ButtonStyle.secondary)
+    async def property_dealer(self, interaction: Interaction, _button: Button) -> None:
+        await send_property_panel(interaction, self._guild_id, self._user_id, ephemeral=True)
 
 
 class PawnCommoditySelect(Select):

@@ -387,11 +387,18 @@ async def perform_sell(
         limit_display = "Disabled."
 
     fee_pct = fee_ratio * 100.0
+    realized_pl_before_fee = gross_gain - cost_removed
+    realized_pl_after_fee = net_gain - cost_removed
     return (
         True,
         (
             f"Sold {shares} shares of {symbol_upper} for \n"
             f"**${net_gain:.2f}** net (gross ${gross_gain:.2f}).\n"
+            f"- Avg buy price: \n"
+            f"**${avg_cost:.2f}/share**\n"
+            f"- Realized P/L (est.): \n"
+            f"**${realized_pl_after_fee:+.2f}** "
+            f"(before fee ${realized_pl_before_fee:+.2f})\n"
             f"- Trading limit: \n"
             f"{limit_display}\n"
             f"- Transaction fee: \n"
@@ -566,11 +573,17 @@ def preview_sell_transaction(
     fee_ratio = max(0.0, float(get_app_config("TRADING_FEES"))) / 100.0
     fee = realized_profit * fee_ratio
     net_gain = max(0.0, gross_gain - fee)
+    estimated_pl_before_fee = gross_gain - cost_removed
+    estimated_pl_after_fee = net_gain - cost_removed
     return {
         "shares": int(shares),
         "unit_price": price,
+        "avg_buy_price": avg_cost,
+        "cost_basis_removed": cost_removed,
         "gross_gain": gross_gain,
         "fee_percent": fee_ratio * 100.0,
         "fee": fee,
         "net_gain": net_gain,
+        "estimated_pl_before_fee": estimated_pl_before_fee,
+        "estimated_pl_after_fee": estimated_pl_after_fee,
     }

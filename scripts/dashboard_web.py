@@ -11,6 +11,8 @@ import io
 import hashlib
 import shlex
 import subprocess
+import math
+import random
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +21,7 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from flask import Flask, g, jsonify, redirect, render_template_string, request, send_file
+from flask import Flask, g, jsonify, redirect, render_template_string, request, send_file, session
 from PIL import Image, UnidentifiedImageError
 
 # Ensure project root is importable when running as a standalone script via systemd.
@@ -34,10 +36,28 @@ def _load_template(name: str) -> str:
 
 from stockbot.config.settings import DEFAULT_RANK, RANK_INCOME
 from stockbot.config.runtime import APP_CONFIG_SPECS as CORE_APP_CONFIG_SPECS
+from stockbot.db import (
+    add_action_history,
+    get_commodity,
+    get_company,
+    get_state_value,
+    get_user,
+    get_user_commodities,
+    get_user_shares,
+    recalc_user_networth,
+    set_holding,
+    set_state_value,
+    update_company_trade_volume,
+    update_user_networth,
+    update_user_bank,
+    upsert_user_commodity,
+    upsert_holding,
+)
 from stockbot.services.activity import active_user_ids_last_day
 from stockbot.services.jobs import get_active_jobs, refresh_jobs_rotation, swap_active_job
+from stockbot.services.money import money
 from stockbot.services.perks import evaluate_user_perks
-from stockbot.services.shop_state import get_shop_items, refresh_shop, set_item_availability, swap_item
+from stockbot.services.shop_state import get_shop_items, refresh_shop, set_item_availability, sold_key, swap_item
 
 @dataclass(frozen=True)
 class _CfgSpec:
@@ -78,6 +98,7 @@ APP_CONFIG_DETAIL_HTML = _load_template("app_config_detail.html")
 PERK_DETAIL_HTML = _load_template("perk_detail.html")
 
 JOB_DETAIL_HTML = _load_template("job_detail.html")
+PROPERTY_DETAIL_HTML = _load_template("property_detail.html")
 
 
 def create_app() -> Flask:
@@ -85,8 +106,46 @@ def create_app() -> Flask:
     repo_root = Path(__file__).resolve().parents[1]
     db_path = Path(os.getenv("DASHBOARD_DB_PATH", str(repo_root / "data" / "stockbot.db")))
     auth_cookie = "webadmin_session"
-    session_ttl_seconds = max(300, int(os.getenv("WEBADMIN_SESSION_TTL_SECONDS", "43200")))
-    godtoken_env = (os.getenv("WEBADMIN_GODTOKEN") or os.getenv("GODTOKEN") or "GODTOKEN").strip()
+
+    def _read_env_deploy_value(key: str) -> str:
+        env_file = repo_root / ".env.deploy"
+        if not env_file.exists():
+            return ""
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                text = line.strip()
+                if not text or text.startswith("#") or "=" not in text:
+                    continue
+                k, v = text.split("=", 1)
+                if k.strip() != key:
+                    continue
+                value = v.strip()
+                if len(value) >= 2 and (
+                    (value.startswith('"') and value.endswith('"'))
+                    or (value.startswith("'") and value.endswith("'"))
+                ):
+                    value = value[1:-1]
+                return value.strip()
+        except Exception:
+            return ""
+        return ""
+
+    # Single source of truth for dashboard godtoken: .env.deploy
+    godtoken_env = (
+        _read_env_deploy_value("WEBADMIN_GODTOKEN")
+        or _read_env_deploy_value("GODTOKEN")
+    )
+    session_secret = (
+        _read_env_deploy_value("WEBADMIN_SESSION_SECRET")
+        or os.getenv("WEBADMIN_SESSION_SECRET", "").strip()
+        or os.getenv("FLASK_SECRET_KEY", "").strip()
+    )
+    if not session_secret:
+        session_secret = secrets.token_hex(32)
+    app.secret_key = session_secret
+    app.config["SESSION_COOKIE_NAME"] = auth_cookie
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
     def _connect() -> sqlite3.Connection:
         conn = sqlite3.connect(db_path, timeout=10.0)
@@ -123,7 +182,7 @@ def create_app() -> Flask:
             conn.execute(
                 """
                 DELETE FROM app_state
-                WHERE (key LIKE 'webadmin:token:%' OR key LIKE 'webadmin:session:%')
+                WHERE key LIKE 'webadmin:token:%'
                   AND CAST(value AS INTEGER) < ?
                 """,
                 (now_epoch,),
@@ -145,41 +204,7 @@ def create_app() -> Flask:
                 conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
                 return False
             conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
-            conn.execute(
-                """
-                INSERT INTO app_state (key, value)
-                VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (f"webadmin:grace:{token}", str(now_epoch + 120)),
-            )
             return True
-
-    def _token_in_grace(token: str) -> bool:
-        raw = _state_get(f"webadmin:grace:{token}")
-        if raw is None:
-            return False
-        try:
-            return int(raw) >= int(time.time())
-        except ValueError:
-            return False
-
-    def _create_session() -> str:
-        sid = secrets.token_urlsafe(32)
-        expires_at = int(time.time()) + session_ttl_seconds
-        _state_set(f"webadmin:session:{sid}", str(expires_at))
-        return sid
-
-    def _session_valid(session_id: str | None) -> bool:
-        if not session_id:
-            return False
-        raw = _state_get(f"webadmin:session:{session_id}")
-        if raw is None:
-            return False
-        try:
-            return int(raw) >= int(time.time())
-        except ValueError:
-            return False
 
     def _config_key(name: str) -> str:
         return f"config:{name}"
@@ -197,6 +222,17 @@ def create_app() -> Flask:
             "PAWN_SELL_RATE",
             "OWNER_BUY_FEE_RATE",
             "IMAGE_UPLOAD_TOTAL_GB",
+            "SLOT_BET_MIN",
+            "SLOT_BET_MAX",
+            "SLOT_PAIR_PAYOUT_BASE",
+            "SLOT_HOURLY_SPIN_LIMIT",
+            "SLOT_TRIPLE_MULT_CHERRY",
+            "SLOT_TRIPLE_MULT_LEMON",
+            "SLOT_TRIPLE_MULT_WATERMELON",
+            "SLOT_TRIPLE_MULT_BELL",
+            "SLOT_TRIPLE_MULT_STAR",
+            "SLOT_TRIPLE_MULT_SEVEN",
+            "SLOT_TRIPLE_MULT_DIAMOND",
         }:
             number = float(value)
             if name == "MARKET_CLOSE_HOUR":
@@ -209,6 +245,22 @@ def create_app() -> Flask:
                 return max(0.0, min(100.0, number))
             if name == "IMAGE_UPLOAD_TOTAL_GB":
                 return max(0.1, number)
+            if name in {"SLOT_BET_MIN", "SLOT_BET_MAX"}:
+                return max(0.01, number)
+            if name == "SLOT_PAIR_PAYOUT_BASE":
+                return max(0.0, number)
+            if name in {
+                "SLOT_TRIPLE_MULT_CHERRY",
+                "SLOT_TRIPLE_MULT_LEMON",
+                "SLOT_TRIPLE_MULT_WATERMELON",
+                "SLOT_TRIPLE_MULT_BELL",
+                "SLOT_TRIPLE_MULT_STAR",
+                "SLOT_TRIPLE_MULT_SEVEN",
+                "SLOT_TRIPLE_MULT_DIAMOND",
+            }:
+                return max(0.0, number)
+            if name == "SLOT_HOURLY_SPIN_LIMIT":
+                return max(0.0, number)
             if name in {"START_BALANCE", "DRIFT_NOISE_GAIN", "DRIFT_NOISE_LOW_FREQ_RATIO", "DRIFT_NOISE_LOW_GAIN", "TRADING_FEES"}:
                 return max(0.0, number)
             return number
@@ -246,6 +298,7 @@ def create_app() -> Flask:
             "IMAGE_UPLOAD_MAX_SOURCE_MB",
             "IMAGE_UPLOAD_MAX_DIM",
             "IMAGE_UPLOAD_MAX_STORED_KB",
+            "SLOT_MAX_SPINS",
         }:
             if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "ACTIVITY_APPLICATION_ID"}:
                 text = str(value).strip()
@@ -301,6 +354,9 @@ def create_app() -> Flask:
         explicit = str(os.getenv("DASHBOARD_PUBLIC_BASE_URL", "")).strip().rstrip("/")
         if explicit:
             return explicit
+        forwarded_proto = str(request.headers.get("X-Forwarded-Proto", "")).split(",", 1)[0].strip().lower()
+        if forwarded_proto in {"http", "https"}:
+            return f"{forwarded_proto}://{request.host}"
         return request.host_url.rstrip("/")
 
     def _db_access_url() -> str:
@@ -377,6 +433,15 @@ def create_app() -> Flask:
             return None
         return name
 
+    def _canonicalize_media_url(raw_value: object) -> str:
+        text = str(raw_value or "").strip()
+        if not text:
+            return ""
+        filename = _filename_from_stored_image_url(text)
+        if not filename:
+            return text
+        return _media_url_for(filename)
+
     def _is_http_url(text: str) -> bool:
         try:
             parsed = urlparse(str(text).strip())
@@ -396,6 +461,8 @@ def create_app() -> Flask:
         rows = conn.execute(
             """
             SELECT image_url FROM commodities WHERE image_url != ''
+            UNION ALL
+            SELECT image_url FROM properties WHERE image_url != ''
             UNION ALL
             SELECT image_url FROM close_news WHERE image_url != ''
             """
@@ -700,6 +767,62 @@ def create_app() -> Flask:
                     "ALTER TABLE user_jobs ADD COLUMN running_until_epoch REAL NOT NULL DEFAULT 0;"
                 )
 
+    def _ensure_properties_tables() -> None:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS properties (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    image_url TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    max_level INTEGER NOT NULL DEFAULT 5,
+                    buy_price REAL NOT NULL DEFAULT 0,
+                    level_costs_json TEXT NOT NULL DEFAULT '[0,0,0,0,0]',
+                    level_effects_json TEXT NOT NULL DEFAULT '[[],[],[],[],[]]',
+                    ascension_cost REAL NOT NULL DEFAULT 0,
+                    ascension_effects_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(guild_id, name)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_properties (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    property_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL DEFAULT 0,
+                    ascended INTEGER NOT NULL DEFAULT 0,
+                    ascended_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id, property_id),
+                    FOREIGN KEY (guild_id, user_id)
+                        REFERENCES users (guild_id, user_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (property_id)
+                        REFERENCES properties (id)
+                        ON DELETE CASCADE
+                );
+                """
+            )
+            prop_cols = {row["name"] for row in conn.execute("PRAGMA table_info(properties);").fetchall()}
+            if prop_cols and "level_costs_json" not in prop_cols:
+                conn.execute("ALTER TABLE properties ADD COLUMN level_costs_json TEXT NOT NULL DEFAULT '[0,0,0,0,0]';")
+            if prop_cols and "level_effects_json" not in prop_cols:
+                conn.execute("ALTER TABLE properties ADD COLUMN level_effects_json TEXT NOT NULL DEFAULT '[[],[],[],[],[]]';")
+            if prop_cols and "ascension_cost" not in prop_cols:
+                conn.execute("ALTER TABLE properties ADD COLUMN ascension_cost REAL NOT NULL DEFAULT 0;")
+            if prop_cols and "ascension_effects_json" not in prop_cols:
+                conn.execute("ALTER TABLE properties ADD COLUMN ascension_effects_json TEXT NOT NULL DEFAULT '[]';")
+            if prop_cols and "max_level" not in prop_cols:
+                conn.execute("ALTER TABLE properties ADD COLUMN max_level INTEGER NOT NULL DEFAULT 5;")
+            up_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_properties);").fetchall()}
+            if up_cols and "ascended" not in up_cols:
+                conn.execute("ALTER TABLE user_properties ADD COLUMN ascended INTEGER NOT NULL DEFAULT 0;")
+            if up_cols and "ascended_count" not in up_cols:
+                conn.execute("ALTER TABLE user_properties ADD COLUMN ascended_count INTEGER NOT NULL DEFAULT 0;")
+
     def _ensure_commodities_columns() -> None:
         with _connect() as conn:
             cols = {
@@ -824,11 +947,89 @@ def create_app() -> Flask:
             return "chance"
         return t
 
+    def _parse_effects_json(raw: object) -> list[dict]:
+        if isinstance(raw, dict):
+            return [raw]
+        if isinstance(raw, list):
+            return [e for e in raw if isinstance(e, dict)]
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        return _parse_effects_json(parsed)
+
     def _normalize_req_type(raw: object) -> str:
         req_type = str(raw or "commodity_qty").strip().lower() or "commodity_qty"
         if req_type == "any_single_commodities_qty":
             return "any_single_commodity_qty"
         return req_type
+
+    def _activity_perk_base_income(guild_id: int, user_id: int) -> float:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT rank
+                FROM users
+                WHERE guild_id = ? AND user_id = ?
+                LIMIT 1
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+        rank = str(row["rank"] or DEFAULT_RANK) if row is not None else DEFAULT_RANK
+        lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
+        return lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
+
+    def _matched_perk_map_for_user(guild_id: int, user_id: int) -> dict[int, str]:
+        base_income = _activity_perk_base_income(guild_id, user_id)
+        base_trade_limits = int(_get_config("TRADING_LIMITS"))
+        base_commodities_limit = int(_get_config("COMMODITIES_LIMIT"))
+        result = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=base_income,
+            base_trade_limits=base_trade_limits,
+            base_networth=None,
+            base_commodities_limit=base_commodities_limit,
+            base_job_slots=1,
+            base_timed_duration=0.0,
+            base_chance_roll_bonus=0.0,
+        )
+        out: dict[int, str] = {}
+        for row in list(result.get("matched_perks", [])):
+            try:
+                perk_id = int(row.get("perk_id", 0))
+            except (TypeError, ValueError):
+                continue
+            if perk_id <= 0:
+                continue
+            out[perk_id] = str(row.get("name", f"perk#{perk_id}"))
+        return out
+
+    def _active_perk_ids_from_state(guild_id: int, user_id: int) -> set[int]:
+        prefix = f"perk_active:{guild_id}:{user_id}:"
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT key, value
+                FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"{prefix}%",),
+            ).fetchall()
+        active_ids: set[int] = set()
+        for row in rows:
+            value = str(row["value"] or "").strip()
+            if value != "1":
+                continue
+            key = str(row["key"] or "")
+            try:
+                active_ids.add(int(key.rsplit(":", 1)[-1]))
+            except (TypeError, ValueError):
+                continue
+        return active_ids
 
     def _get_config(name: str):
         spec = APP_CONFIG_SPECS[name]
@@ -868,6 +1069,130 @@ def create_app() -> Flask:
         if name in {"ANNOUNCEMENT_CHANNEL_ID", "GM_ID", "ACTIVITY_APPLICATION_ID"}:
             return str(value)
         return value
+
+    def _slot_config_payload() -> dict[str, object]:
+        keys = (
+            "SLOT_BET_MIN",
+            "SLOT_BET_MAX",
+            "SLOT_MAX_SPINS",
+            "SLOT_HOURLY_SPIN_LIMIT",
+            "SLOT_PAIR_PAYOUT_BASE",
+            "SLOT_TRIPLE_MULT_CHERRY",
+            "SLOT_TRIPLE_MULT_LEMON",
+            "SLOT_TRIPLE_MULT_WATERMELON",
+            "SLOT_TRIPLE_MULT_BELL",
+            "SLOT_TRIPLE_MULT_STAR",
+            "SLOT_TRIPLE_MULT_SEVEN",
+            "SLOT_TRIPLE_MULT_DIAMOND",
+        )
+        return {k: _get_config(k) for k in keys}
+
+    def _dual_game_prefix(guild_id: int) -> str:
+        return f"dual:game:{guild_id}:"
+
+    def _dual_game_key(guild_id: int, code: str) -> str:
+        return f"{_dual_game_prefix(guild_id)}{code.upper()}"
+
+    def _dual_generate_code(guild_id: int) -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        for _ in range(100):
+            code = "".join(random.choice(alphabet) for _ in range(6))
+            if _state_get(_dual_game_key(guild_id, code)) is None:
+                return code
+        raise RuntimeError("Could not generate a unique DUAL code.")
+
+    def _dual_load_game(guild_id: int, code: str) -> dict | None:
+        raw = _state_get(_dual_game_key(guild_id, code))
+        if not raw:
+            return None
+        try:
+            game = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return game if isinstance(game, dict) else None
+
+    def _dual_save_game(guild_id: int, game: dict) -> None:
+        code = str(game.get("code", "")).strip().upper()
+        if not code:
+            raise ValueError("DUAL game code missing.")
+        game["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _state_set(_dual_game_key(guild_id, code), json.dumps(game, separators=(",", ":")))
+
+    def _dual_all_games(guild_id: int) -> list[dict]:
+        prefix = _dual_game_prefix(guild_id)
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT key, value
+                FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"{prefix}%",),
+            ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            try:
+                parsed = json.loads(str(row["value"] or ""))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            code = str(parsed.get("code", "")).strip().upper()
+            if code:
+                parsed["code"] = code
+                out.append(parsed)
+        return out
+
+    def _dual_find_game_for_user(guild_id: int, user_id: int) -> dict | None:
+        user_key = str(int(user_id))
+        for game in _dual_all_games(guild_id):
+            status = str(game.get("status", "lobby"))
+            if status not in {"lobby", "active"}:
+                continue
+            players = game.get("players")
+            if isinstance(players, dict) and user_key in players:
+                return game
+        return None
+
+    def _dual_game_public_view(game: dict) -> dict[str, object]:
+        players_raw = game.get("players")
+        players: list[dict[str, object]] = []
+        ready_count = 0
+        if isinstance(players_raw, dict):
+            for uid, row in players_raw.items():
+                if not isinstance(row, dict):
+                    continue
+                is_ready = bool(row.get("ready", False))
+                if is_ready:
+                    ready_count += 1
+                players.append(
+                    {
+                        "user_id": str(uid),
+                        "display_name": str(row.get("display_name", f"User {uid}")),
+                        "bet": float(row.get("bet", 0.0) or 0.0),
+                        "ready": is_ready,
+                        "ready_bet": float(row.get("ready_bet", 0.0) or 0.0),
+                        "last_guess": row.get("last_guess"),
+                        "last_hint": str(row.get("last_hint", "")),
+                        "guessed_round": int(row.get("guessed_round", 0) or 0),
+                    }
+                )
+        players.sort(key=lambda p: str(p.get("display_name", "")).lower())
+        return {
+            "code": str(game.get("code", "")).upper(),
+            "host_user_id": str(game.get("host_user_id", "")),
+            "status": str(game.get("status", "lobby")),
+            "pot": float(game.get("pot", 0.0) or 0.0),
+            "round": int(game.get("round", 1) or 1),
+            "min_value": int(game.get("min_value", 0) or 0),
+            "max_value": int(game.get("max_value", 100) or 100),
+            "player_count": len(players),
+            "ready_count": ready_count,
+            "players": players,
+            "winner_user_id": str(game.get("winner_user_id", "")) if game.get("winner_user_id") else "",
+            "created_at": str(game.get("created_at", "")),
+            "updated_at": str(game.get("updated_at", "")),
+        }
 
     def _create_database_backup_now(prefix: str = "manual") -> str:
         backup_dir = db_path.parent / "backups"
@@ -953,9 +1278,24 @@ def create_app() -> Flask:
             ticks_remaining = period
         return ticks_remaining * tick_interval
 
+    def _until_next_tick_seconds() -> int:
+        tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
+        last_tick_epoch_raw = _state_get("last_tick_epoch")
+        try:
+            last_tick_epoch = float(last_tick_epoch_raw) if last_tick_epoch_raw is not None else 0.0
+        except ValueError:
+            last_tick_epoch = 0.0
+        if last_tick_epoch <= 0.0:
+            return tick_interval
+        remaining = int(math.ceil((last_tick_epoch + tick_interval) - time.time()))
+        if remaining < 0:
+            return 0
+        return remaining
+
     _ensure_config_defaults()
     _ensure_perk_tables()
     _ensure_jobs_tables()
+    _ensure_properties_tables()
     _ensure_commodity_tags_table()
     _ensure_commodities_columns()
     _ensure_company_owners_table()
@@ -963,7 +1303,6 @@ def create_app() -> Flask:
     @app.before_request
     def _auth_gate():
         _cleanup_expired_auth_entries()
-        g._new_webadmin_sid = None
         g.webadmin_authenticated = False
         g.webadmin_read_only = True
         public_paths = {
@@ -988,14 +1327,15 @@ def create_app() -> Flask:
             return ("", 204)
 
         token = (request.args.get("token") or "").strip()
-        godtoken_state = (_state_get("webadmin:godtoken") or "").strip()
-        godtoken_ok = bool(token) and (
-            token == godtoken_env or (godtoken_state and token == godtoken_state)
-        )
+        godtoken_ok = bool(token) and bool(godtoken_env) and token == godtoken_env
+        session_auth = bool(session.get("webadmin_authenticated"))
+        if session_auth:
+            g.webadmin_authenticated = True
+            g.webadmin_read_only = False
+            return None
         if token:
-            if godtoken_ok or _token_in_grace(token) or _consume_one_time_token(token):
-                sid = _create_session()
-                g._new_webadmin_sid = sid
+            if godtoken_ok or _consume_one_time_token(token):
+                session["webadmin_authenticated"] = True
                 g.webadmin_authenticated = True
                 g.webadmin_read_only = False
                 return None
@@ -1009,17 +1349,6 @@ def create_app() -> Flask:
 
     @app.after_request
     def _set_session_cookie(resp):
-        sid = getattr(g, "_new_webadmin_sid", None)
-        if sid:
-            resp.set_cookie(
-                auth_cookie,
-                sid,
-                max_age=session_ttl_seconds,
-                httponly=True,
-                samesite="Lax",
-                secure=(request.scheme == "https"),
-            )
-
         # CORS for Activity/UI cross-origin reads.
         if request.path.startswith("/api/") or request.path.startswith("/media/uploads/"):
             origin = (request.headers.get("Origin") or "").strip()
@@ -1117,8 +1446,19 @@ def create_app() -> Flask:
     def job_page(job_id: int):
         return render_template_string(JOB_DETAIL_HTML, job_id=job_id)
 
+    @app.get("/property/<int:property_id>")
+    def property_page(property_id: int):
+        return render_template_string(PROPERTY_DETAIL_HTML, property_id=property_id)
+
     @app.get("/api/stocks")
     def api_stocks():
+        tz_name = str(_get_config("DISPLAY_TIMEZONE"))
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        local_today = datetime.now(tz).date().isoformat()
+
         with _connect() as conn:
             rows = conn.execute(
                 """
@@ -1150,6 +1490,53 @@ def create_app() -> Flask:
                 ORDER BY symbol, rn DESC
                 """
             ).fetchall()
+            prev_close_rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        guild_id,
+                        symbol,
+                        close_price,
+                        date,
+                        ROW_NUMBER() OVER (PARTITION BY guild_id, symbol ORDER BY date DESC) AS rn
+                    FROM daily_close
+                    WHERE date < ?
+                )
+                SELECT guild_id, symbol, close_price, date
+                FROM ranked
+                WHERE rn = 1
+                """,
+                (local_today,),
+            ).fetchall()
+            latest_close_rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        guild_id,
+                        symbol,
+                        close_price,
+                        date,
+                        ROW_NUMBER() OVER (PARTITION BY guild_id, symbol ORDER BY date DESC) AS rn
+                    FROM daily_close
+                )
+                SELECT guild_id, symbol, close_price, date
+                FROM ranked
+                WHERE rn = 1
+                """
+            ).fetchall()
+            user_id_raw = str(request.args.get("user_id", "") or "").strip()
+            user_holdings_rows = []
+            if user_id_raw.startswith("+"):
+                user_id_raw = user_id_raw[1:]
+            if user_id_raw.isdigit():
+                user_holdings_rows = conn.execute(
+                    """
+                    SELECT symbol, shares
+                    FROM holdings
+                    WHERE guild_id = ? AND user_id = ? AND shares > 0
+                    """,
+                    (int(rows[0]["guild_id"]) if rows else 0, int(user_id_raw)),
+                ).fetchall()
 
         history_map: dict[str, list[float]] = {}
         for h in history_rows:
@@ -1159,9 +1546,21 @@ def create_app() -> Flask:
         for o in owner_rows:
             key = (int(o["guild_id"]), str(o["symbol"]))
             owners_map.setdefault(key, []).append(int(o["user_id"]))
+        prev_close_map: dict[tuple[int, str], tuple[float, str]] = {}
+        for c in prev_close_rows:
+            key = (int(c["guild_id"]), str(c["symbol"]))
+            prev_close_map[key] = (float(c["close_price"]), str(c["date"]))
+        latest_close_map: dict[tuple[int, str], tuple[float, str]] = {}
+        for c in latest_close_rows:
+            key = (int(c["guild_id"]), str(c["symbol"]))
+            latest_close_map[key] = (float(c["close_price"]), str(c["date"]))
+        user_holdings_map: dict[str, int] = {}
+        for h in user_holdings_rows:
+            user_holdings_map[str(h["symbol"])] = int(h["shares"])
         stocks: list[dict] = []
         for r in rows:
             row = dict(r)
+            key = (int(r["guild_id"]), str(r["symbol"]))
             owner_ids = owners_map.get((int(r["guild_id"]), str(r["symbol"])), [])
             if not owner_ids:
                 legacy_owner = int(row.get("owner_user_id", 0) or 0)
@@ -1169,11 +1568,338 @@ def create_app() -> Flask:
             row["owner_user_ids"] = [str(uid) for uid in owner_ids]
             row["owner_user_id"] = str(owner_ids[0]) if owner_ids else "0"
             row["history_prices"] = history_map.get(str(r["symbol"]), [])
+            prev_close = prev_close_map.get(key) or latest_close_map.get(key)
+            if prev_close is not None:
+                row["previous_close_price"] = float(prev_close[0])
+                row["previous_close_date"] = str(prev_close[1])
+            else:
+                row["previous_close_price"] = None
+                row["previous_close_date"] = ""
+            row["owned_shares"] = int(user_holdings_map.get(str(r["symbol"]), 0))
             stocks.append(row)
         return jsonify(
             {
                 "server_time_utc": datetime.now(timezone.utc).isoformat(),
                 "stocks": stocks,
+            }
+        )
+
+    def _normalize_owner_ids(raw: object) -> list[int]:
+        if not isinstance(raw, list):
+            return []
+        out: list[int] = []
+        seen: set[int] = set()
+        for item in raw:
+            try:
+                uid = int(item)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            out.append(uid)
+        return out
+
+    def _limit_bucket_key(guild_id: int, user_id: int, bucket_index: int) -> str:
+        return f"trade_used:{guild_id}:{user_id}:{bucket_index}"
+
+    def _cost_basis_key(guild_id: int, user_id: int, symbol: str) -> str:
+        return f"cost_basis:{guild_id}:{user_id}:{symbol}"
+
+    def _get_cost_basis(guild_id: int, user_id: int, symbol: str) -> float:
+        raw = _state_get(_cost_basis_key(guild_id, user_id, symbol))
+        if raw is None:
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 0.0
+
+    def _set_cost_basis(guild_id: int, user_id: int, symbol: str, value: float) -> None:
+        _state_set(_cost_basis_key(guild_id, user_id, symbol), f"{max(0.0, float(value)):.6f}")
+
+    def _get_current_tick() -> int:
+        raw = _state_get("last_tick")
+        if raw is None:
+            return 0
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 0
+
+    def _enforce_and_consume_limit(guild_id: int, user_id: int, shares: int) -> tuple[bool, str]:
+        limit = int(_get_config("TRADING_LIMITS"))
+        period = int(_get_config("TRADING_LIMITS_PERIOD"))
+        tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
+        if limit <= 0:
+            return True, ""
+        if period <= 0:
+            return False, "Trading limits misconfigured: TRADING_LIMITS_PERIOD must be > 0."
+
+        evaluated = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=0.0,
+            base_trade_limits=limit,
+            base_networth=0.0,
+        )
+        limit = int(evaluated["final"]["trade_limits"])
+        if limit <= 0:
+            period_minutes = (period * tick_interval) / 60.0
+            return (
+                False,
+                (
+                    f"Trade limit reached for this period. Remaining: 0 shares "
+                    f"(limit {limit} per {period_minutes:.2f} minutes)."
+                ),
+            )
+
+        tick = _get_current_tick()
+        bucket = tick // period
+        key = _limit_bucket_key(guild_id, user_id, bucket)
+        used_raw = _state_get(key)
+        used = int(float(used_raw)) if used_raw is not None else 0
+        if used + shares > limit:
+            remaining = max(0, limit - used)
+            period_minutes = (period * tick_interval) / 60.0
+            return (
+                False,
+                (
+                    f"Trade limit reached for this period. Remaining: {remaining} shares "
+                    f"(limit {limit} per {period_minutes:.2f} minutes)."
+                ),
+            )
+
+        _state_set(key, str(used + shares))
+        return True, ""
+
+    @app.post("/api/activity/trade/buy")
+    def api_activity_trade_buy():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        symbol = str(data.get("symbol", "") or "").strip().upper()
+        try:
+            shares = int(float(data.get("shares", 0)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid shares"}), 400
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if shares <= 0:
+            return jsonify({"error": "Shares must be a positive integer."}), 400
+        if not symbol:
+            return jsonify({"error": "symbol is required"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+
+        user_id = int(user_id_raw)
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+        company = get_company(guild_id, symbol)
+        if company is None:
+            return jsonify({"error": f"Company `{symbol}` not found."}), 404
+
+        owner_user_ids = _normalize_owner_ids(company.get("owner_user_ids", []))
+        if user_id in owner_user_ids:
+            return jsonify({"error": "Company owners cannot buy their own stock."}), 400
+
+        price = float(company.get("current_price", company["base_price"]))
+        total_cost = round(price * shares, 2)
+        if float(user.get("bank", 0.0)) < total_cost:
+            return jsonify({"error": f"Not enough funds. Need ${total_cost:.2f}."}), 400
+
+        ok, limit_msg = _enforce_and_consume_limit(guild_id, user_id, shares)
+        if not ok:
+            return jsonify({"error": limit_msg}), 400
+
+        owned_before = get_user_shares(guild_id, user_id, symbol)
+        cost_basis_before = _get_cost_basis(guild_id, user_id, symbol)
+        if cost_basis_before <= 0 and owned_before > 0:
+            cost_basis_before = float(owned_before) * price
+
+        new_bank = float(user.get("bank", 0.0)) - total_cost
+        update_user_bank(guild_id, user_id, new_bank)
+        upsert_holding(guild_id, user_id, symbol, shares)
+        _set_cost_basis(guild_id, user_id, symbol, cost_basis_before + total_cost)
+        update_company_trade_volume(
+            guild_id,
+            symbol,
+            float(shares),
+            0.0,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        add_action_history(
+            guild_id=guild_id,
+            user_id=user_id,
+            action_type="buy",
+            target_type="stock",
+            target_symbol=symbol,
+            quantity=float(shares),
+            unit_price=price,
+            total_amount=total_cost,
+            details="source=activity",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        active_key = f"user_last_active:{guild_id}:{user_id}"
+        now_ts = str(time.time())
+        _state_set(active_key, now_ts)
+        set_state_value(active_key, now_ts)
+
+        owner_fee_rate_pct = max(0.0, min(100.0, float(_get_config("OWNER_BUY_FEE_RATE"))))
+        owner_fee = 0.0
+        if owner_user_ids and owner_fee_rate_pct > 0:
+            total_owner_fee = round(total_cost * (owner_fee_rate_pct / 100.0), 2)
+            if total_owner_fee > 0:
+                eligible_owner_ids = [oid for oid in owner_user_ids if get_user(guild_id, oid) is not None]
+                if eligible_owner_ids:
+                    cents = int(round(total_owner_fee * 100))
+                    count = len(eligible_owner_ids)
+                    base_cents = cents // count
+                    rem = cents % count
+                    splits = [base_cents + (1 if i < rem else 0) for i in range(count)]
+                    for idx, owner_id in enumerate(eligible_owner_ids):
+                        part = splits[idx] / 100.0
+                        if part <= 0:
+                            continue
+                        owner_user = get_user(guild_id, owner_id)
+                        if owner_user is None:
+                            continue
+                        owner_fee += part
+                        update_user_bank(guild_id, owner_id, float(owner_user.get("bank", 0.0)) + part)
+                        add_action_history(
+                            guild_id=guild_id,
+                            user_id=owner_id,
+                            action_type="owner_payout",
+                            target_type="stock",
+                            target_symbol=symbol,
+                            quantity=float(shares),
+                            unit_price=part / max(1, shares),
+                            total_amount=part,
+                            details=f"source=buy;buyer={user_id};rate={owner_fee_rate_pct:.2f}%;owners={count};via=activity",
+                            created_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    owner_fee = round(owner_fee, 2)
+
+        new_owned = get_user_shares(guild_id, user_id, symbol)
+        return jsonify(
+            {
+                "ok": True,
+                "symbol": symbol,
+                "shares_delta": shares,
+                "owned_shares": int(new_owned),
+                "unit_price": price,
+                "total_cost": total_cost,
+                "owner_fee": owner_fee,
+                "bank": float(new_bank),
+            }
+        )
+
+    @app.post("/api/activity/trade/sell")
+    def api_activity_trade_sell():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        symbol = str(data.get("symbol", "") or "").strip().upper()
+        try:
+            shares = int(float(data.get("shares", 0)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid shares"}), 400
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if shares <= 0:
+            return jsonify({"error": "Shares must be a positive integer."}), 400
+        if not symbol:
+            return jsonify({"error": "symbol is required"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+
+        user_id = int(user_id_raw)
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+        company = get_company(guild_id, symbol)
+        if company is None:
+            return jsonify({"error": f"Company `{symbol}` not found."}), 404
+
+        owner_user_ids = _normalize_owner_ids(company.get("owner_user_ids", []))
+        if user_id in owner_user_ids:
+            return jsonify({"error": "Company owners cannot sell their own stock."}), 400
+
+        owned = get_user_shares(guild_id, user_id, symbol)
+        if owned < shares:
+            return jsonify({"error": f"You only own {owned} shares of {symbol}."}), 400
+
+        ok, limit_msg = _enforce_and_consume_limit(guild_id, user_id, shares)
+        if not ok:
+            return jsonify({"error": limit_msg}), 400
+
+        price = float(company.get("current_price", company["base_price"]))
+        gross_gain = float(price * shares)
+        cost_basis_before = _get_cost_basis(guild_id, user_id, symbol)
+        if cost_basis_before <= 0 and owned > 0:
+            cost_basis_before = float(owned) * price
+        avg_cost = (cost_basis_before / float(owned)) if owned > 0 else price
+        cost_removed = avg_cost * shares
+        realized_profit = max(0.0, gross_gain - cost_removed)
+        fee_ratio = max(0.0, float(_get_config("TRADING_FEES"))) / 100.0
+        fee = realized_profit * fee_ratio
+        net_gain = round(max(0.0, gross_gain - fee), 2)
+
+        new_bank = float(user.get("bank", 0.0)) + net_gain
+        update_user_bank(guild_id, user_id, new_bank)
+        remaining = owned - shares
+        set_holding(guild_id, user_id, symbol, remaining)
+        new_cost_basis = max(0.0, cost_basis_before - cost_removed)
+        if remaining <= 0:
+            new_cost_basis = 0.0
+        _set_cost_basis(guild_id, user_id, symbol, new_cost_basis)
+        update_company_trade_volume(
+            guild_id,
+            symbol,
+            0.0,
+            float(shares),
+            datetime.now(timezone.utc).isoformat(),
+        )
+        add_action_history(
+            guild_id=guild_id,
+            user_id=user_id,
+            action_type="sell",
+            target_type="stock",
+            target_symbol=symbol,
+            quantity=float(shares),
+            unit_price=price,
+            total_amount=net_gain,
+            details=f"gross={gross_gain:.2f};fee={fee:.2f};source=activity",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        active_key = f"user_last_active:{guild_id}:{user_id}"
+        now_ts = str(time.time())
+        _state_set(active_key, now_ts)
+        set_state_value(active_key, now_ts)
+
+        return jsonify(
+            {
+                "ok": True,
+                "symbol": symbol,
+                "shares_delta": -shares,
+                "owned_shares": int(max(0, remaining)),
+                "unit_price": price,
+                "gross_gain": round(gross_gain, 2),
+                "fee": round(fee, 2),
+                "net_gain": net_gain,
+                "bank": float(new_bank),
+                "avg_buy_price": round(avg_cost, 4),
+                "estimated_pl_before_fee": round(gross_gain - cost_removed, 2),
+                "estimated_pl_after_fee": round(net_gain - cost_removed, 2),
             }
         )
 
@@ -1237,6 +1963,8 @@ def create_app() -> Flask:
                 "seconds_until_close": _until_close_seconds(),
                 "until_reset": f"{_until_reset_seconds() / 60.0:.2f} min",
                 "seconds_until_reset": _until_reset_seconds(),
+                "until_tick": f"{_until_next_tick_seconds() / 60.0:.2f} min",
+                "seconds_until_tick": _until_next_tick_seconds(),
                 "company_count": company_count,
                 "user_count": user_count,
                 "feedback_count": feedback_count,
@@ -1374,13 +2102,14 @@ def create_app() -> Flask:
             ).fetchall()
             commodity_rows = conn.execute(
                 """
-                SELECT uc.commodity_name AS name, uc.quantity, c.price
+                SELECT c.name AS name, CAST(SUM(uc.quantity) AS INTEGER) AS quantity, c.price
                 FROM user_commodities uc
                 JOIN commodities c
                   ON c.guild_id = uc.guild_id
-                 AND c.name = uc.commodity_name
+                 AND c.name = uc.commodity_name COLLATE NOCASE
                 WHERE uc.guild_id = ? AND uc.user_id = ? AND uc.quantity > 0
-                ORDER BY uc.commodity_name
+                GROUP BY c.name, c.price
+                ORDER BY c.name
                 """,
                 (guild_id, user_id),
             ).fetchall()
@@ -1391,17 +2120,38 @@ def create_app() -> Flask:
         base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
         base_trade_limits = int(_get_config("TRADING_LIMITS"))
         base_commodities_limit = int(_get_config("COMMODITIES_LIMIT"))
-        perk_eval = evaluate_user_perks(
-            guild_id=guild_id,
-            user_id=user_id,
-            base_income=base_income,
-            base_trade_limits=base_trade_limits,
-            base_networth=float(user.get("networth", 0.0) or 0.0),
-            base_commodities_limit=base_commodities_limit,
-            base_job_slots=1,
-            base_timed_duration=0.0,
-            base_chance_roll_bonus=0.0,
-        )
+        perk_eval_error = ""
+        try:
+            perk_eval = evaluate_user_perks(
+                guild_id=guild_id,
+                user_id=user_id,
+                base_income=base_income,
+                base_trade_limits=base_trade_limits,
+                base_networth=float(user.get("networth", 0.0) or 0.0),
+                base_commodities_limit=base_commodities_limit,
+                base_job_slots=1,
+                base_timed_duration=0.0,
+                base_chance_roll_bonus=0.0,
+            )
+        except Exception as exc:
+            # Keep Activity status available even if perk backend is temporarily broken
+            # (schema mismatch, malformed config/effects, etc.).
+            perk_eval_error = str(exc)
+            perk_eval = {
+                "final": {
+                    "income": float(base_income),
+                    "trade_limits": float(base_trade_limits),
+                    "networth": float(user.get("networth", 0.0) or 0.0),
+                    "commodities_limit": float(base_commodities_limit),
+                    "job_slots": 1.0,
+                    "timed_duration": 0.0,
+                    "chance_roll_bonus": 0.0,
+                    "slot_bet_multiplier": 1.0,
+                    "slot_bet_limit": float(_get_config("SLOT_BET_MAX")),
+                    "slot_win_multiplier": 1.0,
+                },
+                "matched_perks": [],
+            }
 
         period = max(1, int(_get_config("TRADING_LIMITS_PERIOD")))
         tick_interval = max(1, int(_get_config("TICK_INTERVAL")))
@@ -1478,9 +2228,511 @@ def create_app() -> Flask:
                 "job_slots": int(perk_eval["final"]["job_slots"]),
                 "timed_duration": float(perk_eval["final"]["timed_duration"]),
                 "chance_roll_bonus": float(perk_eval["final"]["chance_roll_bonus"]),
+                "slot_bet_multiplier": float(perk_eval["final"]["slot_bet_multiplier"]),
+                "slot_bet_limit": float(perk_eval["final"]["slot_bet_limit"]),
+                "slot_win_multiplier": float(perk_eval["final"]["slot_win_multiplier"]),
             },
         }
+        if perk_eval_error:
+            payload["status_warning"] = f"Perk evaluation fallback: {perk_eval_error}"
         return jsonify(payload)
+
+    @app.get("/api/activity/history")
+    def api_activity_history():
+        user_id_raw = str(request.args.get("user_id", "") or "").strip()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        user_id = int(user_id_raw)
+        if user_id <= 0:
+            return jsonify({"error": "Invalid user_id"}), 400
+        try:
+            limit = max(1, min(100, int(request.args.get("limit", 25))))
+        except (TypeError, ValueError):
+            limit = 25
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            if guild_id <= 0:
+                return jsonify({"error": "No guild data"}), 404
+            user_row = conn.execute(
+                """
+                SELECT 1
+                FROM users
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "User not registered"}), 404
+            total_row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM action_history
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    action_type,
+                    target_type,
+                    target_symbol,
+                    quantity,
+                    unit_price,
+                    total_amount,
+                    details,
+                    created_at
+                FROM action_history
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY datetime(created_at) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (guild_id, user_id, limit, offset),
+            ).fetchall()
+        total = int(total_row["c"]) if total_row is not None else 0
+        debit_actions = {"buy", "loan_repayment"}
+        credit_actions = {"sell", "pawn", "loan_approved", "owner_payout"}
+        out_rows: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            action = str(item.get("action_type") or "").strip().lower()
+            amount = float(item.get("total_amount") or 0.0)
+            if action == "job":
+                delta = amount
+            elif action in debit_actions:
+                delta = -abs(amount)
+            elif action in credit_actions:
+                delta = abs(amount)
+            else:
+                delta = 0.0
+            item["delta"] = delta
+            out_rows.append(item)
+        return jsonify(
+            {
+                "user_id": user_id,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "rows": out_rows,
+            }
+        )
+
+    @app.get("/api/activity/dual/status")
+    def api_activity_dual_status():
+        user_id_raw = str(request.args.get("user_id", "") or "").strip()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        user_id = int(user_id_raw)
+        if user_id <= 0:
+            return jsonify({"error": "Invalid user_id"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            if guild_id <= 0:
+                return jsonify({"error": "No guild data"}), 404
+            user_row = conn.execute(
+                """
+                SELECT user_id, bank, display_name
+                FROM users
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "User not registered"}), 404
+
+        user_game = _dual_find_game_for_user(guild_id, user_id)
+        open_lobbies = []
+        for g in _dual_all_games(guild_id):
+            if str(g.get("status", "lobby")) != "lobby":
+                continue
+            view = _dual_game_public_view(g)
+            open_lobbies.append(view)
+        open_lobbies.sort(key=lambda g: str(g.get("updated_at", "")), reverse=True)
+        return jsonify(
+            {
+                "user_id": user_id,
+                "bank": float(user_row["bank"] or 0.0),
+                "display_name": str(user_row["display_name"] or f"User {user_id}"),
+                "current_game": _dual_game_public_view(user_game) if user_game else None,
+                "open_lobbies": open_lobbies[:20],
+            }
+        )
+
+    @app.post("/api/activity/dual/create")
+    def api_activity_dual_create():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        display_name = str(data.get("display_name", "") or "").strip()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        user_id = int(user_id_raw)
+        if user_id <= 0:
+            return jsonify({"error": "Invalid user_id"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+
+        if _dual_find_game_for_user(guild_id, user_id) is not None:
+            return jsonify({"error": "You are already in a DUAL game."}), 400
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+
+        code = _dual_generate_code(guild_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        game = {
+            "code": code,
+            "host_user_id": str(user_id),
+            "status": "lobby",
+            "pot": 0.0,
+            "round": 1,
+            "min_value": 0,
+            "max_value": 100,
+            "target": None,
+            "winner_user_id": None,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "players": {
+                str(user_id): {
+                    "display_name": display_name or str(user.get("display_name", f"User {user_id}")),
+                    "bet": 0.0,
+                    "ready": False,
+                    "ready_bet": 0.0,
+                    "last_guess": None,
+                    "last_hint": "",
+                    "guessed_round": 0,
+                    "joined_at": now_iso,
+                }
+            },
+        }
+        _dual_save_game(guild_id, game)
+        return jsonify({"ok": True, "game": _dual_game_public_view(game)})
+
+    @app.post("/api/activity/dual/join")
+    def api_activity_dual_join():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        display_name = str(data.get("display_name", "") or "").strip()
+        code = str(data.get("code", "") or "").strip().upper()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not code:
+            return jsonify({"error": "code is required"}), 400
+        user_id = int(user_id_raw)
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+        if _dual_find_game_for_user(guild_id, user_id) is not None:
+            return jsonify({"error": "You are already in a DUAL game."}), 400
+
+        game = _dual_load_game(guild_id, code)
+        if game is None:
+            return jsonify({"error": "DUAL room not found."}), 404
+        if str(game.get("status", "lobby")) != "lobby":
+            return jsonify({"error": "DUAL room is not accepting joins."}), 400
+
+        players = game.get("players")
+        if not isinstance(players, dict):
+            players = {}
+        if str(user_id) in players:
+            return jsonify({"error": "You already joined this DUAL room."}), 400
+        if len(players) >= 4:
+            return jsonify({"error": "DUAL room is full (max 4 players)."}), 400
+
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        players[str(user_id)] = {
+            "display_name": display_name or str(user.get("display_name", f"User {user_id}")),
+            "bet": 0.0,
+            "ready": False,
+            "ready_bet": 0.0,
+            "last_guess": None,
+            "last_hint": "",
+            "guessed_round": 0,
+            "joined_at": now_iso,
+        }
+        game["players"] = players
+        game["pot"] = float(money(float(game.get("pot", 0.0) or 0.0)))
+        _dual_save_game(guild_id, game)
+        return jsonify({"ok": True, "game": _dual_game_public_view(game)})
+
+    @app.post("/api/activity/dual/ready")
+    def api_activity_dual_ready():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        code = str(data.get("code", "") or "").strip().upper()
+        try:
+            bet = max(0.01, float(data.get("bet", 0.0)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid bet"}), 400
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not code:
+            return jsonify({"error": "code is required"}), 400
+        user_id = int(user_id_raw)
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        game = _dual_load_game(guild_id, code)
+        if game is None:
+            return jsonify({"error": "DUAL room not found."}), 404
+        if str(game.get("status", "lobby")) != "lobby":
+            return jsonify({"error": "DUAL is not in lobby state."}), 400
+        players = game.get("players")
+        if not isinstance(players, dict) or str(user_id) not in players:
+            return jsonify({"error": "You are not in this DUAL room."}), 403
+
+        player = players[str(user_id)]
+        player["ready"] = True
+        player["ready_bet"] = float(money(bet))
+        player["bet"] = float(money(bet))
+        game["players"] = players
+
+        ready_count = 0
+        for row in players.values():
+            if not isinstance(row, dict):
+                continue
+            if bool(row.get("ready", False)):
+                ready_count += 1
+
+        if len(players) >= 2 and ready_count == len(players):
+            deductions: list[tuple[int, float]] = []
+            for uid, row in players.items():
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    pid = int(uid)
+                except (TypeError, ValueError):
+                    continue
+                stake = float(row.get("ready_bet", 0.0) or 0.0)
+                u = get_user(guild_id, pid)
+                if u is None:
+                    return jsonify({"error": "A player is no longer registered."}), 400
+                bank = float(u.get("bank", 0.0) or 0.0)
+                if bank < stake:
+                    row["ready"] = False
+                    row["ready_bet"] = 0.0
+                    row["bet"] = 0.0
+                    game["players"] = players
+                    _dual_save_game(guild_id, game)
+                    return jsonify(
+                        {
+                            "error": f"{row.get('display_name', f'User {uid}')} has insufficient funds and was un-readied."
+                        }
+                    ), 400
+                deductions.append((pid, stake))
+
+            total_pot = 0.0
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for pid, stake in deductions:
+                u = get_user(guild_id, pid)
+                if u is None:
+                    continue
+                update_user_bank(guild_id, pid, float(u.get("bank", 0.0) or 0.0) - stake)
+                total_pot += stake
+                add_action_history(
+                    guild_id=guild_id,
+                    user_id=pid,
+                    action_type="dual_bet",
+                    target_type="game",
+                    target_symbol=code,
+                    quantity=1.0,
+                    unit_price=float(stake),
+                    total_amount=float(stake),
+                    details="source=activity_dual_ready",
+                    created_at=now_iso,
+                )
+
+            min_value = int(game.get("min_value", 0) or 0)
+            max_value = int(game.get("max_value", 100) or 100)
+            if min_value > max_value:
+                min_value, max_value = max_value, min_value
+            target = random.randint(min_value, max_value)
+            game["status"] = "active"
+            game["pot"] = float(money(total_pot))
+            game["target"] = int(target)
+            game["round"] = 1
+            game["winner_user_id"] = None
+            for row in players.values():
+                if not isinstance(row, dict):
+                    continue
+                row["guessed_round"] = 0
+                row["last_guess"] = None
+                row["last_hint"] = ""
+        else:
+            game["pot"] = float(money(0.0))
+
+        _dual_save_game(guild_id, game)
+        return jsonify({"ok": True, "game": _dual_game_public_view(game)})
+
+    @app.post("/api/activity/dual/start")
+    def api_activity_dual_start():
+        return jsonify({"error": "Manual start is disabled. Players must ready up."}), 400
+
+    @app.post("/api/activity/dual/guess")
+    def api_activity_dual_guess():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        code = str(data.get("code", "") or "").strip().upper()
+        try:
+            guess = int(data.get("guess"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "guess must be an integer"}), 400
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not code:
+            return jsonify({"error": "code is required"}), 400
+        user_id = int(user_id_raw)
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        game = _dual_load_game(guild_id, code)
+        if game is None:
+            return jsonify({"error": "DUAL room not found."}), 404
+        if str(game.get("status", "")) != "active":
+            return jsonify({"error": "DUAL is not active."}), 400
+        players = game.get("players")
+        if not isinstance(players, dict) or str(user_id) not in players:
+            return jsonify({"error": "You are not in this DUAL room."}), 403
+
+        min_value = int(game.get("min_value", 0) or 0)
+        max_value = int(game.get("max_value", 100) or 100)
+        if guess < min_value or guess > max_value:
+            return jsonify({"error": f"Guess must be between {min_value} and {max_value}."}), 400
+        target = int(game.get("target", min_value))
+        round_no = max(1, int(game.get("round", 1) or 1))
+        player = players[str(user_id)]
+        if int(player.get("guessed_round", 0) or 0) >= round_no:
+            return jsonify({"error": "You already guessed this round."}), 400
+
+        if guess == target:
+            hint = "exact"
+            winner_user_id = str(user_id)
+            pot = float(game.get("pot", 0.0) or 0.0)
+            winner_user = get_user(guild_id, user_id)
+            if winner_user is not None and pot > 0:
+                new_bank = float(winner_user.get("bank", 0.0) or 0.0) + pot
+                update_user_bank(guild_id, user_id, new_bank)
+                add_action_history(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    action_type="dual_win",
+                    target_type="game",
+                    target_symbol=code,
+                    quantity=1.0,
+                    unit_price=float(pot),
+                    total_amount=float(pot),
+                    details=f"players={len(players)};target={target};round={round_no}",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            game["status"] = "finished"
+            game["winner_user_id"] = winner_user_id
+        elif guess < target:
+            hint = "too low"
+        else:
+            hint = "too high"
+
+        player["last_guess"] = int(guess)
+        player["last_hint"] = hint
+        player["guessed_round"] = round_no
+
+        if str(game.get("status")) == "active":
+            all_guessed = True
+            for row in players.values():
+                if not isinstance(row, dict) or int(row.get("guessed_round", 0) or 0) < round_no:
+                    all_guessed = False
+                    break
+            if all_guessed:
+                game["round"] = round_no + 1
+
+        game["players"] = players
+        _dual_save_game(guild_id, game)
+        return jsonify(
+            {
+                "ok": True,
+                "hint": hint,
+                "game": _dual_game_public_view(game),
+            }
+        )
+
+    @app.post("/api/activity/dual/cancel")
+    def api_activity_dual_cancel():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        code = str(data.get("code", "") or "").strip().upper()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not code:
+            return jsonify({"error": "code is required"}), 400
+        user_id = int(user_id_raw)
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        game = _dual_load_game(guild_id, code)
+        if game is None:
+            return jsonify({"error": "DUAL room not found."}), 404
+        if str(game.get("host_user_id", "")) != str(user_id):
+            return jsonify({"error": "Only the host can cancel DUAL."}), 403
+        if str(game.get("status", "lobby")) != "lobby":
+            return jsonify({"error": "Only lobby DUAL rooms can be canceled."}), 400
+        players = game.get("players")
+        if isinstance(players, dict):
+            for uid, row in players.items():
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    pid = int(uid)
+                except (TypeError, ValueError):
+                    continue
+                stake = float(row.get("bet", 0.0) or 0.0)
+                if stake <= 0:
+                    continue
+                u = get_user(guild_id, pid)
+                if u is None:
+                    continue
+                update_user_bank(guild_id, pid, float(u.get("bank", 0.0) or 0.0) + stake)
+                add_action_history(
+                    guild_id=guild_id,
+                    user_id=pid,
+                    action_type="dual_refund",
+                    target_type="game",
+                    target_symbol=code,
+                    quantity=1.0,
+                    unit_price=float(stake),
+                    total_amount=float(stake),
+                    details="source=activity_dual_cancel",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+        _state_delete(_dual_game_key(guild_id, code))
+        return jsonify({"ok": True})
 
     @app.get("/api/company/<symbol>")
     def api_company(symbol: str):
@@ -1572,6 +2824,7 @@ def create_app() -> Flask:
         out: list[dict] = []
         for row in rows:
             item = dict(row)
+            item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
             item["tags"] = tag_map.get(str(item.get("name", "")).lower(), [])
             out.append(item)
         return jsonify({"commodities": out})
@@ -1581,14 +2834,314 @@ def create_app() -> Flask:
         with _connect() as conn:
             guild_id = _pick_default_guild_id(conn)
         bucket, items, available = get_shop_items(guild_id)
+        out_items: list[dict] = []
+        for row in items:
+            item = dict(row)
+            item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
+            out_items.append(item)
         return jsonify(
             {
                 "guild_id": guild_id,
                 "bucket": bucket,
-                "items": items,
+                "items": out_items,
                 "available": available,
             }
         )
+
+    @app.post("/api/activity/shop/buy")
+    def api_activity_shop_buy():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        commodity_name = str(data.get("name", "") or "").strip()
+        quantity = 1
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not commodity_name:
+            return jsonify({"error": "name is required"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+
+        user_id = int(user_id_raw)
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+        before_perks = _matched_perk_map_for_user(guild_id, user_id)
+        app.logger.warning(
+            "[activity-shop] buy start guild=%s user=%s item=%s before_perks=%s",
+            guild_id,
+            user_id,
+            commodity_name,
+            sorted(before_perks.values()),
+        )
+
+        _bucket, items, _available = get_shop_items(guild_id)
+        shop_item = next(
+            (it for it in items if str(it.get("name", "")).strip().lower() == commodity_name.lower()),
+            None,
+        )
+        if shop_item is None:
+            return jsonify({"error": f"`{commodity_name}` is not in current shop rotation."}), 400
+        if int(shop_item.get("in_stock", 0) or 0) != 1:
+            return jsonify({"error": f"`{commodity_name}` is currently sold out."}), 400
+
+        commodity = get_commodity(guild_id, commodity_name)
+        if commodity is None:
+            return jsonify({"error": f"Commodity `{commodity_name}` not found."}), 404
+        if int(commodity.get("enabled", 1) or 0) != 1:
+            return jsonify({"error": f"Commodity `{commodity_name}` is currently disabled."}), 400
+
+        base_limit = int(_get_config("COMMODITIES_LIMIT"))
+        evaluated = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=0.0,
+            base_trade_limits=0,
+            base_networth=0.0,
+            base_commodities_limit=base_limit,
+            base_job_slots=1,
+        )
+        limit = int(evaluated["final"]["commodities_limit"])
+        holdings = get_user_commodities(guild_id, user_id)
+        used = sum(max(0, int(row.get("quantity", 0))) for row in holdings)
+        if limit > 0 and used + quantity > limit:
+            remaining = max(0, limit - used)
+            return jsonify({"error": f"Commodity limit reached. Remaining slots: {remaining}/{limit} units."}), 400
+
+        price = float(commodity.get("price", 0.0))
+        total_cost = round(price * quantity, 2)
+        user_bank = float(user.get("bank", 0.0))
+        if user_bank < total_cost:
+            return jsonify({"error": f"Not enough funds. Need ${total_cost:.2f}, you have ${user_bank:.2f}."}), 400
+
+        new_bank = user_bank - total_cost
+        update_user_bank(guild_id, user_id, new_bank)
+        upsert_user_commodity(guild_id, user_id, str(commodity.get("name", commodity_name)), quantity)
+        new_networth = float(user.get("networth", 0.0)) + total_cost
+        update_user_networth(guild_id, user_id, new_networth)
+        add_action_history(
+            guild_id=guild_id,
+            user_id=user_id,
+            action_type="buy",
+            target_type="commodity",
+            target_symbol=str(commodity.get("name", commodity_name)),
+            quantity=float(quantity),
+            unit_price=price,
+            total_amount=total_cost,
+            details="source=activity_shop",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        # Shop item is one-time available per tick bucket.
+        _bucket2, _items2, _ = get_shop_items(guild_id)
+        set_state_value(sold_key(guild_id, _bucket2, str(commodity.get("name", commodity_name))), "1")
+
+        # Keep stored networth in sync with canonical calculation.
+        recalc_user_networth(guild_id, user_id)
+        after_perks = _matched_perk_map_for_user(guild_id, user_id)
+        newly_matched_ids = [
+            perk_id
+            for perk_id in sorted(after_perks.keys())
+            if perk_id not in before_perks
+        ]
+        # Force a re-announce for perks newly matched by this activity buy
+        # so stale perk_active state cannot suppress expected user mentions.
+        for perk_id in newly_matched_ids:
+            set_state_value(f"perk_active:{guild_id}:{user_id}:{perk_id}", "0")
+        active_state_ids = _active_perk_ids_from_state(guild_id, user_id)
+        activated_perks = [
+            after_perks[perk_id]
+            for perk_id in sorted(after_perks.keys())
+            if perk_id not in active_state_ids
+        ]
+        queue_key = f"perk_check_queue:{guild_id}:{user_id}:{int(time.time() * 1000)}"
+        _state_set(queue_key, "1")
+        set_state_value(queue_key, "1")
+        active_key = f"user_last_active:{guild_id}:{user_id}"
+        now_ts = str(time.time())
+        _state_set(active_key, now_ts)
+        set_state_value(active_key, now_ts)
+        app.logger.warning(
+            "[activity-shop] buy done guild=%s user=%s item=%s queue=%s activated=%s newly_matched_ids=%s active_state_ids=%s after_perks=%s",
+            guild_id,
+            user_id,
+            commodity_name,
+            queue_key,
+            activated_perks,
+            newly_matched_ids,
+            sorted(active_state_ids),
+            sorted(after_perks.values()),
+        )
+
+        return jsonify(
+            {
+                "ok": True,
+                "name": str(commodity.get("name", commodity_name)),
+                "quantity": int(quantity),
+                "unit_price": price,
+                "total_cost": total_cost,
+                "bank": float(new_bank),
+                "activated_perks": activated_perks,
+            }
+        )
+
+    @app.post("/api/activity/shop/sell")
+    def api_activity_shop_sell():
+        data = request.get_json(silent=True) or {}
+        user_id_raw = str(data.get("user_id", "") or "").strip()
+        commodity_name = str(data.get("name", "") or "").strip()
+        if user_id_raw.startswith("+"):
+            user_id_raw = user_id_raw[1:]
+        if not user_id_raw.isdigit():
+            return jsonify({"error": "user_id is required"}), 400
+        if not commodity_name:
+            return jsonify({"error": "name is required"}), 400
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+        if guild_id <= 0:
+            return jsonify({"error": "No guild data"}), 404
+
+        user_id = int(user_id_raw)
+        user = get_user(guild_id, user_id)
+        if user is None:
+            return jsonify({"error": "User not registered"}), 404
+        commodity = get_commodity(guild_id, commodity_name)
+        if commodity is None:
+            return jsonify({"error": f"Commodity `{commodity_name}` not found."}), 404
+
+        before_perks = _matched_perk_map_for_user(guild_id, user_id)
+        app.logger.warning(
+            "[activity-shop] sell start guild=%s user=%s item=%s before_perks=%s",
+            guild_id,
+            user_id,
+            commodity_name,
+            sorted(before_perks.values()),
+        )
+
+        holdings = get_user_commodities(guild_id, user_id)
+        match = next(
+            (row for row in holdings if str(row.get("name", "")).lower() == str(commodity.get("name", "")).lower()),
+            None,
+        )
+        owned_qty = int(match.get("quantity", 0)) if match is not None else 0
+        if owned_qty < 1:
+            return jsonify({"error": f"You do not own `{commodity.get('name', commodity_name)}`."}), 400
+
+        rate_pct = max(0.0, min(100.0, float(_get_config("PAWN_SELL_RATE"))))
+        rate = rate_pct / 100.0
+        price = float(commodity.get("price", 0.0))
+        payout = round(price * rate, 2)
+
+        new_bank = float(user.get("bank", 0.0)) + payout
+        update_user_bank(guild_id, user_id, new_bank)
+        upsert_user_commodity(guild_id, user_id, str(commodity.get("name", commodity_name)), -1)
+        networth = recalc_user_networth(guild_id, user_id)
+
+        add_action_history(
+            guild_id=guild_id,
+            user_id=user_id,
+            action_type="pawn",
+            target_type="commodity",
+            target_symbol=str(commodity.get("name", commodity_name)),
+            quantity=1.0,
+            unit_price=price * rate,
+            total_amount=payout,
+            details=f"market_price={price:.2f};pawn_rate={rate_pct:.2f}%;source=activity_shop",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        queue_key = f"perk_check_queue:{guild_id}:{user_id}:{int(time.time() * 1000)}"
+        _state_set(queue_key, "1")
+        set_state_value(queue_key, "1")
+        active_key = f"user_last_active:{guild_id}:{user_id}"
+        now_ts = str(time.time())
+        _state_set(active_key, now_ts)
+        set_state_value(active_key, now_ts)
+
+        after_perks = _matched_perk_map_for_user(guild_id, user_id)
+        app.logger.warning(
+            "[activity-shop] sell done guild=%s user=%s item=%s queue=%s after_perks=%s",
+            guild_id,
+            user_id,
+            commodity_name,
+            queue_key,
+            sorted(after_perks.values()),
+        )
+
+        return jsonify(
+            {
+                "ok": True,
+                "name": str(commodity.get("name", commodity_name)),
+                "quantity": 1,
+                "unit_price": price * rate,
+                "total_gain": payout,
+                "bank": float(new_bank),
+                "networth": float(networth),
+            }
+        )
+
+    @app.get("/api/activity/image-proxy")
+    def api_activity_image_proxy():
+        raw_url = str(request.args.get("url", "") or "").strip()
+        if not raw_url:
+            return jsonify({"error": "url is required"}), 400
+        parsed = urlparse(raw_url)
+
+        # Handle local uploaded media directly from disk.
+        local_media_path = ""
+        if raw_url.startswith("/media/uploads/"):
+            local_media_path = raw_url
+        elif parsed.scheme in {"http", "https"} and parsed.path.startswith("/media/uploads/"):
+            local_media_path = parsed.path
+
+        if local_media_path:
+            filename = Path(local_media_path).name
+            if not filename:
+                return jsonify({"error": "Invalid media path"}), 400
+            path = _uploads_dir() / filename
+            if not path.exists() or not path.is_file():
+                return jsonify({"error": "Not found"}), 404
+            ext = path.suffix.lower()
+            mimetype = {
+                ".webp": "image/webp",
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+            }.get(ext, "application/octet-stream")
+            return send_file(path, mimetype=mimetype)
+
+        if parsed.scheme not in {"http", "https"}:
+            return jsonify({"error": "Invalid URL scheme"}), 400
+        if not parsed.netloc:
+            return jsonify({"error": "Invalid URL host"}), 400
+
+        req = Request(
+            raw_url,
+            headers={
+                "User-Agent": "716Stonks-ActivityImageProxy/1.0",
+                "Accept": "image/*",
+            },
+        )
+        try:
+            with urlopen(req, timeout=10) as resp:
+                content_type = str(resp.headers.get("Content-Type", "")).split(";")[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    return jsonify({"error": "Target is not an image"}), 400
+                data = resp.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    return jsonify({"error": "Image too large"}), 413
+        except HTTPError as exc:
+            return jsonify({"error": f"Upstream image fetch failed: HTTP {exc.code}"}), 502
+        except URLError as exc:
+            return jsonify({"error": f"Upstream image fetch failed: {exc.reason}"}), 502
+        except Exception as exc:
+            return jsonify({"error": f"Upstream image fetch failed: {exc}"}), 502
+
+        return send_file(io.BytesIO(data), mimetype=content_type)
 
     @app.post("/api/shop/refresh")
     def api_shop_refresh():
@@ -1664,6 +3217,7 @@ def create_app() -> Flask:
                 (int(row["guild_id"]), name),
             ).fetchall()
         item = dict(row)
+        item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
         item["tags"] = [str(r["tag"]) for r in tag_rows]
         owners = []
         for r in owner_rows:
@@ -1677,6 +3231,118 @@ def create_app() -> Flask:
                 }
             )
         return jsonify({"commodity": item, "owners": owners})
+
+    @app.get("/api/properties")
+    def api_properties():
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, guild_id, name, description, image_url, enabled, max_level, buy_price,
+                       level_costs_json, level_effects_json, ascension_cost, ascension_effects_json, updated_at
+                FROM properties
+                ORDER BY name ASC
+                """
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
+            max_level = max(1, int(item.get("max_level", 5) or 5))
+            try:
+                costs = json.loads(str(item.get("level_costs_json", "[]") or "[]"))
+            except json.JSONDecodeError:
+                costs = []
+            if not isinstance(costs, list):
+                costs = []
+            normalized_costs = []
+            for i in range(max_level):
+                raw = costs[i] if i < len(costs) else 0
+                try:
+                    normalized_costs.append(max(0.0, float(raw)))
+                except (TypeError, ValueError):
+                    normalized_costs.append(0.0)
+            item["level_costs"] = normalized_costs
+            try:
+                effects_raw = json.loads(str(item.get("level_effects_json", "[]") or "[]"))
+            except json.JSONDecodeError:
+                effects_raw = []
+            if not isinstance(effects_raw, list):
+                effects_raw = []
+            level_effects: list[list[dict]] = [[] for _ in range(max_level)]
+            for i in range(min(max_level, len(effects_raw))):
+                level_effects[i] = _parse_effects_json(effects_raw[i])
+            item["level_effects"] = level_effects
+            item["ascension_effects"] = _parse_effects_json(item.get("ascension_effects_json", "[]"))
+            items.append(item)
+        return jsonify({"properties": items})
+
+    @app.get("/api/property/<int:property_id>")
+    def api_property(property_id: int):
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, guild_id, name, description, image_url, enabled, max_level, buy_price,
+                       level_costs_json, level_effects_json, ascension_cost, ascension_effects_json, updated_at
+                FROM properties
+                WHERE id = ?
+                """,
+                (property_id,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Property not found"}), 404
+            owner_rows = conn.execute(
+                """
+                SELECT up.user_id, COALESCE(u.display_name, '') AS display_name, up.level, up.ascended
+                FROM user_properties up
+                LEFT JOIN users u
+                  ON u.guild_id = up.guild_id
+                 AND u.user_id = up.user_id
+                WHERE up.guild_id = ? AND up.property_id = ? AND (up.level > 0 OR up.ascended > 0)
+                ORDER BY up.level DESC, up.ascended DESC, up.user_id ASC
+                """,
+                (int(row["guild_id"]), property_id),
+            ).fetchall()
+        item = dict(row)
+        item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
+        max_level = max(1, int(item.get("max_level", 5) or 5))
+        try:
+            costs = json.loads(str(item.get("level_costs_json", "[]") or "[]"))
+        except json.JSONDecodeError:
+            costs = []
+        if not isinstance(costs, list):
+            costs = []
+        normalized_costs = []
+        for i in range(max_level):
+            raw = costs[i] if i < len(costs) else 0
+            try:
+                normalized_costs.append(max(0.0, float(raw)))
+            except (TypeError, ValueError):
+                normalized_costs.append(0.0)
+        item["level_costs"] = normalized_costs
+        try:
+            effects_raw = json.loads(str(item.get("level_effects_json", "[]") or "[]"))
+        except json.JSONDecodeError:
+            effects_raw = []
+        if not isinstance(effects_raw, list):
+            effects_raw = []
+        level_effects: list[list[dict]] = [[] for _ in range(max_level)]
+        for i in range(min(max_level, len(effects_raw))):
+            level_effects[i] = _parse_effects_json(effects_raw[i])
+        item["level_effects"] = level_effects
+        item["ascension_effects"] = _parse_effects_json(item.get("ascension_effects_json", "[]"))
+        owners = []
+        for r in owner_rows:
+            uid = str(r["user_id"])
+            display_name = str(r["display_name"] or "").strip() or f"User {uid}"
+            owners.append(
+                {
+                    "user_id": uid,
+                    "display_name": display_name,
+                    "level": int(r["level"] or 0),
+                    "ascended": int(r["ascended"] or 0),
+                }
+            )
+        return jsonify({"property": item, "owners": owners})
 
     @app.get("/api/players")
     def api_players():
@@ -2143,6 +3809,11 @@ def create_app() -> Flask:
             player["trade_limit_used"] = 0
             player["trade_limit_remaining"] = 0
             player["trade_limit_window_minutes"] = 0.0
+        bonus_raw = _state_get(f"daily_networth_bonus:{guild_id}:{user_id}")
+        try:
+            player["daily_networth_bonus"] = float(bonus_raw) if bonus_raw is not None else 0.0
+        except (TypeError, ValueError):
+            player["daily_networth_bonus"] = 0.0
 
         return jsonify({"player": player})
 
@@ -2240,6 +3911,285 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/player/<int:user_id>/properties")
+    def api_player_properties(user_id: int):
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            rows = conn.execute(
+                """
+                SELECT
+                    p.id,
+                    p.name,
+                    p.enabled,
+                    p.max_level,
+                    COALESCE(up.level, 0) AS level,
+                    COALESCE(up.ascended, 0) AS ascended,
+                    COALESCE(up.ascended_count, 0) AS ascended_count
+                FROM properties p
+                LEFT JOIN user_properties up
+                  ON up.guild_id = p.guild_id
+                 AND up.user_id = ?
+                 AND up.property_id = p.id
+                WHERE p.guild_id = ?
+                ORDER BY p.name ASC
+                """,
+                (user_id, guild_id),
+            ).fetchall()
+        props = []
+        for r in rows:
+            item = dict(r)
+            item["id"] = int(item["id"])
+            item["enabled"] = int(item.get("enabled") or 0)
+            item["max_level"] = max(1, int(item.get("max_level") or 1))
+            item["level"] = max(0, int(item.get("level") or 0))
+            item["ascended"] = int(item.get("ascended") or 0)
+            item["ascended_count"] = max(0, int(item.get("ascended_count") or 0))
+            props.append(item)
+        return jsonify({"properties": props})
+
+    @app.post("/api/player/<int:user_id>/properties/set")
+    def api_player_set_property_state(user_id: int):
+        data = request.get_json(silent=True) or {}
+        try:
+            property_id = int(data.get("property_id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid property_id"}), 400
+        try:
+            level = max(0, int(float(data.get("level", 0))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid level"}), 400
+        ascended_raw = data.get("ascended", 0)
+        ascended = 1 if str(ascended_raw).strip().lower() in {"1", "true", "yes", "on"} else 0
+        try:
+            ascended_count = max(0, int(float(data.get("ascended_count", 0))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid ascended_count"}), 400
+
+        if property_id <= 0:
+            return jsonify({"error": "property_id is required"}), 400
+
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id, user_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            prop_row = conn.execute(
+                """
+                SELECT id, max_level
+                FROM properties
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, property_id),
+            ).fetchone()
+            if prop_row is None:
+                return jsonify({"error": "Property not found"}), 404
+
+            max_level = max(1, int(prop_row["max_level"] or 1))
+            level = max(0, min(max_level, level))
+            if ascended <= 0:
+                ascended_count = 0
+
+            if level <= 0 and ascended <= 0 and ascended_count <= 0:
+                conn.execute(
+                    """
+                    DELETE FROM user_properties
+                    WHERE guild_id = ? AND user_id = ? AND property_id = ?
+                    """,
+                    (guild_id, user_id, property_id),
+                )
+            else:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO user_properties (
+                        guild_id, user_id, property_id, level, ascended, ascended_count, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id, property_id)
+                    DO UPDATE SET
+                        level = excluded.level,
+                        ascended = excluded.ascended,
+                        ascended_count = excluded.ascended_count,
+                        updated_at = excluded.updated_at
+                    """,
+                    (guild_id, user_id, property_id, level, ascended, ascended_count, now),
+                )
+        return jsonify(
+            {
+                "ok": True,
+                "property_id": property_id,
+                "level": level,
+                "ascended": ascended,
+                "ascended_count": ascended_count,
+            }
+        )
+
+    @app.get("/api/player/<int:user_id>/perks")
+    def api_player_perks(user_id: int):
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id, user_id, display_name, rank
+                FROM users
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(row["guild_id"])
+            rank = str(row["rank"] or DEFAULT_RANK)
+            display_name = str(row["display_name"] or f"User {user_id}")
+            perks_rows = conn.execute(
+                """
+                SELECT id, name, enabled
+                FROM perks
+                WHERE guild_id = ?
+                ORDER BY name ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+            override_rows = conn.execute(
+                """
+                SELECT key, value
+                FROM app_state
+                WHERE key LIKE ?
+                """,
+                (f"perk_user_override:{guild_id}:{user_id}:%",),
+            ).fetchall()
+
+        override_by_id: dict[int, str] = {}
+        for row in override_rows:
+            key = str(row["key"] or "")
+            value = str(row["value"] or "").strip().lower()
+            if value not in {"auto", "on", "off"}:
+                continue
+            try:
+                pid = int(key.rsplit(":", 1)[-1])
+            except (TypeError, ValueError):
+                continue
+            if pid > 0:
+                override_by_id[pid] = value
+
+        lookup = {k.lower(): float(v) for k, v in RANK_INCOME.items()}
+        base_income = lookup.get(rank.lower(), float(RANK_INCOME.get(DEFAULT_RANK, 0.0)))
+        base_trade_limits = int(_get_config("TRADING_LIMITS"))
+        base_commodities_limit = int(_get_config("COMMODITIES_LIMIT"))
+        result = evaluate_user_perks(
+            guild_id=guild_id,
+            user_id=user_id,
+            base_income=base_income,
+            base_trade_limits=base_trade_limits,
+            base_networth=None,
+            base_commodities_limit=base_commodities_limit,
+            base_job_slots=1,
+            base_timed_duration=0.0,
+            base_chance_roll_bonus=0.0,
+        )
+        matched = list(result.get("matched_perks", []))
+        matched_ids = {
+            int(m.get("perk_id", 0))
+            for m in matched
+            if int(m.get("perk_id", 0)) > 0
+        }
+        all_perks = []
+        for r in perks_rows:
+            item = dict(r)
+            pid = int(item.get("id") or 0)
+            item["id"] = pid
+            item["enabled"] = int(item.get("enabled") or 0)
+            item["matched"] = pid in matched_ids
+            item["override_mode"] = override_by_id.get(pid, "auto")
+            all_perks.append(item)
+
+        return jsonify(
+            {
+                "user_id": str(user_id),
+                "display_name": display_name,
+                "rank": rank,
+                "summary": {
+                    "base_income": float(result["base"]["income"]),
+                    "final_income": float(result["final"]["income"]),
+                    "base_trade_limits": float(result["base"]["trade_limits"]),
+                    "final_trade_limits": float(result["final"]["trade_limits"]),
+                    "base_networth": float(result["base"]["networth"]),
+                    "final_networth": float(result["final"]["networth"]),
+                    "base_commodities_limit": float(result["base"]["commodities_limit"]),
+                    "final_commodities_limit": float(result["final"]["commodities_limit"]),
+                    "base_job_slots": float(result["base"]["job_slots"]),
+                    "final_job_slots": float(result["final"]["job_slots"]),
+                    "base_timed_duration": float(result["base"]["timed_duration"]),
+                    "final_timed_duration": float(result["final"]["timed_duration"]),
+                    "base_chance_roll_bonus": float(result["base"]["chance_roll_bonus"]),
+                    "final_chance_roll_bonus": float(result["final"]["chance_roll_bonus"]),
+                    "base_slot_bet_multiplier": float(result["base"]["slot_bet_multiplier"]),
+                    "final_slot_bet_multiplier": float(result["final"]["slot_bet_multiplier"]),
+                    "base_slot_bet_limit": float(result["base"]["slot_bet_limit"]),
+                    "final_slot_bet_limit": float(result["final"]["slot_bet_limit"]),
+                    "base_slot_win_multiplier": float(result["base"]["slot_win_multiplier"]),
+                    "final_slot_win_multiplier": float(result["final"]["slot_win_multiplier"]),
+                },
+                "matched_perks": matched,
+                "all_perks": all_perks,
+            }
+        )
+
+    @app.post("/api/player/<int:user_id>/perks/<int:perk_id>/override")
+    def api_player_perk_override(user_id: int, perk_id: int):
+        data = request.get_json(silent=True) or {}
+        mode = str(data.get("mode", "auto") or "auto").strip().lower()
+        if mode not in {"auto", "on", "off"}:
+            return jsonify({"error": "mode must be auto, on, or off"}), 400
+
+        with _connect() as conn:
+            user_row = conn.execute(
+                """
+                SELECT guild_id
+                FROM users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return jsonify({"error": "Player not found"}), 404
+            guild_id = int(user_row["guild_id"])
+            perk_row = conn.execute(
+                """
+                SELECT id
+                FROM perks
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, perk_id),
+            ).fetchone()
+            if perk_row is None:
+                return jsonify({"error": "Perk not found"}), 404
+
+        key = f"perk_user_override:{guild_id}:{user_id}:{perk_id}"
+        if mode == "auto":
+            with _connect() as conn:
+                conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+        else:
+            _state_set(key, mode)
+        return jsonify({"ok": True, "mode": mode})
+
     @app.post("/api/player/<int:user_id>/commodities/set")
     def api_player_set_commodity_qty(user_id: int):
         data = request.get_json(silent=True) or {}
@@ -2265,7 +4215,7 @@ def create_app() -> Flask:
             guild_id = int(user_row["guild_id"])
             exists = conn.execute(
                 """
-                SELECT 1
+                SELECT name
                 FROM commodities
                 WHERE guild_id = ? AND name = ? COLLATE NOCASE
                 """,
@@ -2273,6 +4223,7 @@ def create_app() -> Flask:
             ).fetchone()
             if exists is None:
                 return jsonify({"error": "Commodity not found"}), 404
+            canonical_name = str(exists["name"])
 
             if quantity <= 0:
                 conn.execute(
@@ -2280,7 +4231,7 @@ def create_app() -> Flask:
                     DELETE FROM user_commodities
                     WHERE guild_id = ? AND user_id = ? AND commodity_name = ? COLLATE NOCASE
                     """,
-                    (guild_id, user_id, commodity_name),
+                    (guild_id, user_id, canonical_name),
                 )
             else:
                 conn.execute(
@@ -2290,7 +4241,7 @@ def create_app() -> Flask:
                     ON CONFLICT(guild_id, user_id, commodity_name)
                     DO UPDATE SET quantity = excluded.quantity
                     """,
-                    (guild_id, user_id, commodity_name, quantity),
+                    (guild_id, user_id, canonical_name, quantity),
                 )
 
             # Keep networth in sync with inventory edits.
@@ -2300,7 +4251,7 @@ def create_app() -> Flask:
                 FROM user_commodities uc
                 JOIN commodities c
                   ON c.guild_id = uc.guild_id
-                 AND c.name = uc.commodity_name
+                 AND c.name = uc.commodity_name COLLATE NOCASE
                 WHERE uc.guild_id = ? AND uc.user_id = ?
                 """,
                 (guild_id, user_id),
@@ -2315,7 +4266,7 @@ def create_app() -> Flask:
                 (total, guild_id, user_id),
             )
 
-        return jsonify({"ok": True, "commodity_name": commodity_name, "quantity": quantity})
+        return jsonify({"ok": True, "commodity_name": canonical_name, "quantity": quantity})
 
     @app.get("/api/perk-preview")
     def api_perk_preview():
@@ -2378,6 +4329,12 @@ def create_app() -> Flask:
                 "final_timed_duration": float(result["final"]["timed_duration"]),
                 "base_chance_roll_bonus": float(result["base"]["chance_roll_bonus"]),
                 "final_chance_roll_bonus": float(result["final"]["chance_roll_bonus"]),
+                "base_slot_bet_multiplier": float(result["base"]["slot_bet_multiplier"]),
+                "final_slot_bet_multiplier": float(result["final"]["slot_bet_multiplier"]),
+                "base_slot_bet_limit": float(result["base"]["slot_bet_limit"]),
+                "final_slot_bet_limit": float(result["final"]["slot_bet_limit"]),
+                "base_slot_win_multiplier": float(result["base"]["slot_win_multiplier"]),
+                "final_slot_win_multiplier": float(result["final"]["slot_win_multiplier"]),
                 "matched_perks": matched,
             }
         )
@@ -2397,6 +4354,47 @@ def create_app() -> Flask:
                 }
             )
         return jsonify({"configs": configs})
+
+    @app.get("/api/slots")
+    def api_slots():
+        return jsonify({"slot_settings": _slot_config_payload()})
+
+    @app.post("/api/slots/update")
+    def api_slots_update():
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        for key in (
+            "SLOT_BET_MIN",
+            "SLOT_BET_MAX",
+            "SLOT_MAX_SPINS",
+            "SLOT_HOURLY_SPIN_LIMIT",
+            "SLOT_PAIR_PAYOUT_BASE",
+            "SLOT_TRIPLE_MULT_CHERRY",
+            "SLOT_TRIPLE_MULT_LEMON",
+            "SLOT_TRIPLE_MULT_WATERMELON",
+            "SLOT_TRIPLE_MULT_BELL",
+            "SLOT_TRIPLE_MULT_STAR",
+            "SLOT_TRIPLE_MULT_SEVEN",
+            "SLOT_TRIPLE_MULT_DIAMOND",
+        ):
+            if key in data:
+                updates[key] = data.get(key)
+        if not updates:
+            return jsonify({"error": "No slot settings provided."}), 400
+        normalized: dict[str, object] = {}
+        for key, raw in updates.items():
+            try:
+                normalized[key] = _set_config(key, raw)
+            except Exception as exc:
+                return jsonify({"error": f"Invalid value for {key}: {exc}"}), 400
+
+        low = float(_get_config("SLOT_BET_MIN"))
+        high = float(_get_config("SLOT_BET_MAX"))
+        if low > high:
+            _set_config("SLOT_BET_MIN", high)
+            _set_config("SLOT_BET_MAX", low)
+
+        return jsonify({"ok": True, "slot_settings": _slot_config_payload()})
 
     @app.get("/api/app-config/<config_name>")
     def api_app_config(config_name: str):
@@ -2445,7 +4443,12 @@ def create_app() -> Flask:
                 """,
                 (guild_id,),
             ).fetchall()
-        return jsonify({"guild_id": guild_id, "news": [dict(r) for r in rows]})
+        news = []
+        for r in rows:
+            item = dict(r)
+            item["image_url"] = _canonicalize_media_url(item.get("image_url", ""))
+            news.append(item)
+        return jsonify({"guild_id": guild_id, "news": news})
 
     @app.post("/api/close-news")
     def api_close_news_create():
@@ -2805,7 +4808,7 @@ def create_app() -> Flask:
             except json.JSONDecodeError:
                 return jsonify({"error": "Invalid perk_effects_json"}), 400
             updates["perk_effects_json"] = raw_json
-        tags = _parse_tags(data.get("tags", ""))
+        tags = _parse_tags(data.get("tags", "")) if tags_in_payload else []
 
         with _connect() as conn:
             row = conn.execute(
@@ -2826,37 +4829,85 @@ def create_app() -> Flask:
                 return jsonify({"error": "Commodity not found"}), 404
             guild_id = int(guild_row["guild_id"])
             old_name = str(guild_row["name"])
-            next_name = str(updates.get("name", old_name))
+            next_name = str(updates.get("name", old_name)).strip()
+            if not next_name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            renamed = next_name.lower() != old_name.lower()
+            if renamed:
+                existing = conn.execute(
+                    """
+                    SELECT 1
+                    FROM commodities
+                    WHERE guild_id = ? AND name = ? COLLATE NOCASE
+                    """,
+                    (guild_id, next_name),
+                ).fetchone()
+                if existing is not None:
+                    return jsonify({"error": f"Commodity `{next_name}` already exists"}), 409
             if "image_url" in updates:
                 try:
                     updates["image_url"] = _normalize_image_url_for_storage(conn, updates.get("image_url", ""))
                 except ValueError as e:
                     return jsonify({"error": str(e)}), 400
+            if renamed:
+                # Allow parent/child commodity name updates in one transaction.
+                conn.execute("PRAGMA defer_foreign_keys = ON;")
             if updates:
                 set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
                 values = list(updates.values())
-                values.append(name)
-                conn.execute(
-                    f"UPDATE commodities SET {set_clause} WHERE name = ? COLLATE NOCASE",
-                    values,
-                )
-            conn.execute(
-                """
-                DELETE FROM commodity_tags
-                WHERE guild_id = ? AND commodity_name = ? COLLATE NOCASE
-                """,
-                (guild_id, old_name),
-            )
-            for tag in tags:
+                values.extend([guild_id, old_name])
+                try:
+                    conn.execute(
+                        f"UPDATE commodities SET {set_clause} WHERE guild_id = ? AND name = ? COLLATE NOCASE",
+                        values,
+                    )
+                except sqlite3.IntegrityError:
+                    return jsonify({"error": f"Commodity `{next_name}` already exists"}), 409
+            if renamed:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO commodity_tags (guild_id, commodity_name, tag)
-                    VALUES (?, ?, ?)
+                    UPDATE user_commodities
+                    SET commodity_name = ?
+                    WHERE guild_id = ? AND commodity_name = ? COLLATE NOCASE
                     """,
-                    (guild_id, next_name, tag),
+                    (next_name, guild_id, old_name),
                 )
+                conn.execute(
+                    """
+                    UPDATE commodity_tags
+                    SET commodity_name = ?
+                    WHERE guild_id = ? AND commodity_name = ? COLLATE NOCASE
+                    """,
+                    (next_name, guild_id, old_name),
+                )
+                conn.execute(
+                    """
+                    UPDATE perk_requirements
+                    SET commodity_name = ?
+                    WHERE commodity_name = ? COLLATE NOCASE
+                      AND perk_id IN (SELECT id FROM perks WHERE guild_id = ?)
+                    """,
+                    (next_name, old_name, guild_id),
+                )
+            target_name = next_name if renamed else old_name
+            if tags_in_payload:
+                conn.execute(
+                    """
+                    DELETE FROM commodity_tags
+                    WHERE guild_id = ? AND commodity_name = ? COLLATE NOCASE
+                    """,
+                    (guild_id, target_name),
+                )
+                for tag in tags:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO commodity_tags (guild_id, commodity_name, tag)
+                        VALUES (?, ?, ?)
+                        """,
+                        (guild_id, target_name, tag),
+                    )
             _gc_uploaded_images(conn)
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "name": next_name})
 
     @app.post("/api/commodity")
     def api_commodity_create():
@@ -2960,10 +5011,214 @@ def create_app() -> Flask:
             _gc_uploaded_images(conn)
         return jsonify({"ok": True, "deleted": real_name})
 
+    @app.post("/api/property")
+    def api_property_create():
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        description = str(data.get("description", "")).strip()
+        image_url = str(data.get("image_url", "")).strip()
+        enabled = 1 if int(data.get("enabled", 1) or 1) > 0 else 0
+        max_level = max(1, min(10, int(float(data.get("max_level", 5) or 5))))
+        buy_price = max(0.0, float(data.get("buy_price", 0.0) or 0.0))
+        ascension_cost = max(0.0, float(data.get("ascension_cost", 0.0) or 0.0))
+        level_costs = data.get("level_costs", [0, 0, 0, 0, 0])
+        if not isinstance(level_costs, list):
+            level_costs = []
+        normalized_costs: list[float] = []
+        for i in range(max_level):
+            raw = level_costs[i] if i < len(level_costs) else 0
+            try:
+                normalized_costs.append(max(0.0, float(raw)))
+            except (TypeError, ValueError):
+                normalized_costs.append(0.0)
+        level_effects = data.get("level_effects", [])
+        if not isinstance(level_effects, list):
+            level_effects = []
+        normalized_effects: list[list[dict]] = []
+        for i in range(max_level):
+            raw = level_effects[i] if i < len(level_effects) else []
+            normalized_effects.append(_parse_effects_json(raw))
+        ascension_effects = _parse_effects_json(data.get("ascension_effects", []))
+        now = datetime.now(timezone.utc).isoformat()
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            try:
+                image_url, image_status = _normalize_image_url_with_status(conn, image_url)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO properties (
+                        guild_id, name, description, image_url, enabled, max_level,
+                        buy_price, level_costs_json, level_effects_json,
+                        ascension_cost, ascension_effects_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        guild_id,
+                        name,
+                        description,
+                        image_url,
+                        enabled,
+                        max_level,
+                        buy_price,
+                        json.dumps(normalized_costs, separators=(",", ":")),
+                        json.dumps(normalized_effects, separators=(",", ":")),
+                        ascension_cost,
+                        json.dumps(ascension_effects, separators=(",", ":")),
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return jsonify({"error": "Property with this name already exists"}), 400
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True, "id": int(cur.lastrowid), "image_status": image_status, "image_url": image_url})
+
+    @app.post("/api/property/<int:property_id>/update")
+    def api_property_update(property_id: int):
+        data = request.get_json(silent=True) or {}
+        updates: dict[str, object] = {}
+        if "name" in data:
+            name = str(data.get("name", "")).strip()
+            if not name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            updates["name"] = name
+        if "description" in data:
+            updates["description"] = str(data.get("description", "")).strip()
+        if "image_url" in data:
+            updates["image_url"] = str(data.get("image_url", "")).strip()
+        if "enabled" in data:
+            updates["enabled"] = 1 if int(data.get("enabled", 1) or 1) > 0 else 0
+        if "max_level" in data:
+            updates["max_level"] = max(1, min(10, int(float(data.get("max_level", 5) or 5))))
+        if "buy_price" in data:
+            updates["buy_price"] = max(0.0, float(data.get("buy_price", 0.0) or 0.0))
+        if "ascension_cost" in data:
+            updates["ascension_cost"] = max(0.0, float(data.get("ascension_cost", 0.0) or 0.0))
+
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            row = conn.execute(
+                """
+                SELECT max_level, level_costs_json, level_effects_json
+                FROM properties
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, property_id),
+            ).fetchone()
+            if row is None:
+                return jsonify({"error": "Property not found"}), 404
+            image_status = "unchanged"
+            if "image_url" in updates:
+                try:
+                    updates["image_url"], image_status = _normalize_image_url_with_status(conn, updates["image_url"])
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
+
+            max_level = int(updates.get("max_level", row["max_level"]) or 5)
+            max_level = max(1, min(10, max_level))
+            updates["max_level"] = max_level
+
+            if "level_costs" in data:
+                raw_costs = data.get("level_costs")
+                if not isinstance(raw_costs, list):
+                    return jsonify({"error": "level_costs must be a list"}), 400
+                normalized_costs: list[float] = []
+                for i in range(max_level):
+                    raw = raw_costs[i] if i < len(raw_costs) else 0
+                    try:
+                        normalized_costs.append(max(0.0, float(raw)))
+                    except (TypeError, ValueError):
+                        normalized_costs.append(0.0)
+                updates["level_costs_json"] = json.dumps(normalized_costs, separators=(",", ":"))
+            else:
+                try:
+                    old_costs = json.loads(str(row["level_costs_json"] or "[]"))
+                except json.JSONDecodeError:
+                    old_costs = []
+                if not isinstance(old_costs, list):
+                    old_costs = []
+                normalized_costs = []
+                for i in range(max_level):
+                    raw = old_costs[i] if i < len(old_costs) else 0
+                    try:
+                        normalized_costs.append(max(0.0, float(raw)))
+                    except (TypeError, ValueError):
+                        normalized_costs.append(0.0)
+                updates["level_costs_json"] = json.dumps(normalized_costs, separators=(",", ":"))
+
+            if "level_effects" in data:
+                raw_effects = data.get("level_effects")
+                if not isinstance(raw_effects, list):
+                    return jsonify({"error": "level_effects must be a list"}), 400
+                normalized_effects: list[list[dict]] = []
+                for i in range(max_level):
+                    raw = raw_effects[i] if i < len(raw_effects) else []
+                    normalized_effects.append(_parse_effects_json(raw))
+                updates["level_effects_json"] = json.dumps(normalized_effects, separators=(",", ":"))
+            else:
+                try:
+                    old_effects = json.loads(str(row["level_effects_json"] or "[]"))
+                except json.JSONDecodeError:
+                    old_effects = []
+                if not isinstance(old_effects, list):
+                    old_effects = []
+                normalized_effects = []
+                for i in range(max_level):
+                    raw = old_effects[i] if i < len(old_effects) else []
+                    normalized_effects.append(_parse_effects_json(raw))
+                updates["level_effects_json"] = json.dumps(normalized_effects, separators=(",", ":"))
+
+            if "ascension_effects" in data:
+                updates["ascension_effects_json"] = json.dumps(
+                    _parse_effects_json(data.get("ascension_effects")),
+                    separators=(",", ":"),
+                )
+            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+            set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+            vals = list(updates.values()) + [guild_id, property_id]
+            try:
+                cur = conn.execute(
+                    f"""
+                    UPDATE properties
+                    SET {set_clause}
+                    WHERE guild_id = ? AND id = ?
+                    """,
+                    vals,
+                )
+            except sqlite3.IntegrityError:
+                return jsonify({"error": "Property with this name already exists"}), 400
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Property not found"}), 404
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True, "image_status": image_status, "image_url": str(updates.get("image_url", ""))})
+
+    @app.post("/api/property/<int:property_id>/delete")
+    def api_property_delete(property_id: int):
+        with _connect() as conn:
+            guild_id = _pick_default_guild_id(conn)
+            cur = conn.execute(
+                """
+                DELETE FROM properties
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, property_id),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({"error": "Property not found"}), 404
+            _gc_uploaded_images(conn)
+        return jsonify({"ok": True})
+
     @app.post("/api/player/<int:user_id>/update")
     def api_player_update(user_id: int):
         data = request.get_json(silent=True) or {}
         updates: dict[str, object] = {}
+        bonus_set = False
+        bonus_value = 0.0
         if "bank" in data:
             try:
                 updates["bank"] = max(0.0, float(data.get("bank")))
@@ -2981,23 +5236,33 @@ def create_app() -> Flask:
                 return jsonify({"error": "Invalid value for owe"}), 400
         if "rank" in data:
             updates["rank"] = str(data.get("rank", "")).strip()
-        if not updates:
+        if "daily_networth_bonus" in data:
+            try:
+                bonus_value = float(data.get("daily_networth_bonus", 0.0))
+                bonus_set = True
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid value for daily_networth_bonus"}), 400
+        if not updates and not bonus_set:
             return jsonify({"error": "No valid fields provided"}), 400
 
-        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
-        values = list(updates.values())
-        values.append(user_id)
         with _connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM users WHERE user_id = ?",
+                "SELECT guild_id FROM users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
             if row is None:
                 return jsonify({"error": "Player not found"}), 404
-            conn.execute(
-                f"UPDATE users SET {set_clause} WHERE user_id = ?",
-                values,
-            )
+            guild_id = int(row["guild_id"])
+            if updates:
+                set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+                values = list(updates.values())
+                values.append(user_id)
+                conn.execute(
+                    f"UPDATE users SET {set_clause} WHERE user_id = ?",
+                    values,
+                )
+            if bonus_set:
+                _state_set(f"daily_networth_bonus:{guild_id}:{user_id}", str(float(bonus_value)))
         return jsonify({"ok": True})
 
     @app.post("/api/player/<int:user_id>/reset-trade-usage")
