@@ -35,6 +35,7 @@ from stockbot.commands.property import setup_property
 from stockbot.commands.notify import setup_notify
 from stockbot.commands.slot import setup_slot
 from stockbot.commands.steal import setup_steal
+from stockbot.commands.laugh import setup_laugh
 
 def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_addcompany(tree)
@@ -73,3 +74,4 @@ def setup_commands(tree: app_commands.CommandTree) -> None:
     setup_notify(tree)
     setup_slot(tree)
     setup_steal(tree)
+    setup_laugh(tree)

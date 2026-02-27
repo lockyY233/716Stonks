@@ -137,6 +137,9 @@
                 <option value="job_slots">job_slots</option>
                 <option value="timed_duration">timed_duration</option>
                 <option value="chance_roll_bonus">chance_roll_bonus</option>
+                <option value="slot_bet_limit">slot_bet_limit</option>
+                <option value="slot_win_multiplier">slot_win_multiplier</option>
+                <option value="slot_hourly_spin_limit">slot_hourly_spin_limit</option>
               </select>
             </div>
             <div>
@@ -220,7 +223,7 @@
       }
       tbody.innerHTML = EFFECTS.map((eff, i) => `
         <tr data-eff-index="${i}">
-          <td><select data-eff-target="${i}"><option value="income"${eff.target_stat === "income" ? " selected" : ""}>income</option><option value="trade_limits"${eff.target_stat === "trade_limits" ? " selected" : ""}>trade_limits</option><option value="networth"${eff.target_stat === "networth" ? " selected" : ""}>networth</option><option value="commodities_limit"${eff.target_stat === "commodities_limit" ? " selected" : ""}>commodities_limit</option><option value="job_slots"${eff.target_stat === "job_slots" ? " selected" : ""}>job_slots</option><option value="timed_duration"${eff.target_stat === "timed_duration" ? " selected" : ""}>timed_duration</option><option value="chance_roll_bonus"${eff.target_stat === "chance_roll_bonus" ? " selected" : ""}>chance_roll_bonus</option></select></td>
+          <td><select data-eff-target="${i}"><option value="income"${eff.target_stat === "income" ? " selected" : ""}>income</option><option value="trade_limits"${eff.target_stat === "trade_limits" ? " selected" : ""}>trade_limits</option><option value="networth"${eff.target_stat === "networth" ? " selected" : ""}>networth</option><option value="commodities_limit"${eff.target_stat === "commodities_limit" ? " selected" : ""}>commodities_limit</option><option value="job_slots"${eff.target_stat === "job_slots" ? " selected" : ""}>job_slots</option><option value="timed_duration"${eff.target_stat === "timed_duration" ? " selected" : ""}>timed_duration</option><option value="chance_roll_bonus"${eff.target_stat === "chance_roll_bonus" ? " selected" : ""}>chance_roll_bonus</option><option value="slot_bet_limit"${eff.target_stat === "slot_bet_limit" ? " selected" : ""}>slot_bet_limit</option><option value="slot_win_multiplier"${eff.target_stat === "slot_win_multiplier" ? " selected" : ""}>slot_win_multiplier</option><option value="slot_hourly_spin_limit"${eff.target_stat === "slot_hourly_spin_limit" ? " selected" : ""}>slot_hourly_spin_limit</option></select></td>
           <td><select data-eff-mode="${i}"><option value="flat"${eff.value_mode === "flat" ? " selected" : ""}>flat</option><option value="multiplier"${eff.value_mode === "multiplier" ? " selected" : ""}>multiplier</option><option value="per_item"${eff.value_mode === "per_item" ? " selected" : ""}>per_item</option></select></td>
           <td><input data-eff-value="${i}" type="number" step="0.0001" value="${Number(eff.value || 0)}" /></td>
           <td><select data-eff-source="${i}"><option value="none"${String(eff.scale_source || "none") === "none" ? " selected" : ""}>none</option><option value="commodity_qty"${String(eff.scale_source || "none") === "commodity_qty" ? " selected" : ""}>commodity_qty</option></select></td>

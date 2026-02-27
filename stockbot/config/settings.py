@@ -16,6 +16,8 @@ STONKERS_ROLE_NAME = "📈💰📊Stonkers"        # Role granted on successful 
 STONKERS_ROLE_INACTIVE = "StonkerBot Sad"
 ANNOUNCEMENT_CHANNEL_ID = 0                 # Target channel ID for market close announcements; 0 = auto-pick
 ANNOUNCE_MENTION_ROLE = 1                  # 1 = mention stonkers role in close announcement; 0 = no mention
+IS_ANNOUNCEMENT = 1                        # 1 = send close announcements; 0 = disable all close announcement messages
+MAINTENANCE_MODE = 0                       # 1 = only GM can use bot commands; others get maintenance message
 GM_ID = 0                                   # Discord user ID for game master; excluded from ranking leaderboards when >0
 ACTIVITY_APPLICATION_ID = 0                 # Discord embedded app (Activity) application ID for /activity launch
 DRIFT_NOISE_FREQUENCY = 0.7                 # Normalized [0,1] -> fraction of Nyquist (tick/2)

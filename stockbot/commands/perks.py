@@ -86,11 +86,6 @@ def setup_perks(tree: app_commands.CommandTree) -> None:
             inline=True,
         )
         embed.add_field(
-            name="Slot Bet Mult",
-            value=f"{float(base_stats['slot_bet_multiplier']):.2f} -> **{float(final_stats['slot_bet_multiplier']):.2f}**",
-            inline=True,
-        )
-        embed.add_field(
             name="Slot Bet Limit",
             value=f"${float(base_stats['slot_bet_limit']):.2f} -> **${float(final_stats['slot_bet_limit']):.2f}**",
             inline=True,
@@ -103,21 +98,6 @@ def setup_perks(tree: app_commands.CommandTree) -> None:
         embed.add_field(
             name="Slot Hourly Spins",
             value=f"{int(base_stats['slot_hourly_spin_limit'])} -> **{int(final_stats['slot_hourly_spin_limit'])}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="Steal Chance",
-            value=f"{float(base_stats['steal_chance']) * 100:.1f}% -> **{float(final_stats['steal_chance']) * 100:.1f}%**",
-            inline=True,
-        )
-        embed.add_field(
-            name="Steal Amount Min",
-            value=f"${float(base_stats['steal_amount_min']):.2f} -> **${float(final_stats['steal_amount_min']):.2f}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="Steal Amount Max",
-            value=f"${float(base_stats['steal_amount_max']):.2f} -> **${float(final_stats['steal_amount_max']):.2f}**",
             inline=True,
         )
 

@@ -12,6 +12,12 @@ from stockbot.db.database import get_connection
 from stockbot.db.repositories import get_state_value, set_state_value
 
 DAILY_CLOSE_RANK_BONUS_PERK_ID = 3_000_000_001
+DISABLED_PERK_EFFECT_TARGETS = {
+    "slot_bet_multiplier",
+    "steal_chance",
+    "steal_amount_min",
+    "steal_amount_max",
+}
 
 
 def _perk_override_key(guild_id: int, user_id: int, perk_id: int) -> str:
@@ -73,6 +79,8 @@ def _apply_effect_to_accumulators(
     effect_display_parts: list[str],
 ) -> None:
     target_stat = str(effect.get("target_stat", "") or "").strip().lower()
+    if target_stat in DISABLED_PERK_EFFECT_TARGETS:
+        return
     if target_stat not in tracked_stats:
         return
     value_mode = str(effect.get("value_mode", "flat") or "flat").strip().lower()

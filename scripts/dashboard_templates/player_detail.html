@@ -527,12 +527,20 @@
       await setCommodityQty(name, nextQty);
     }
     async function save() {
+      const bank = Number(el("bank").value);
+      const networth = Number(el("networth").value);
+      const owe = Number(el("owe").value);
+      const dailyNetworthBonus = Number(el("daily_networth_bonus").value);
+      if (![bank, networth, owe, dailyNetworthBonus].every(Number.isFinite)) {
+        el("msg").textContent = "Bank, networth, owe, and daily bonus must be valid numbers.";
+        return;
+      }
       const payload = {
-        bank: Number(el("bank").value),
-        networth: Number(el("networth").value),
-        owe: Number(el("owe").value),
+        bank,
+        networth,
+        owe,
         rank: el("rank").value,
-        daily_networth_bonus: Number(el("daily_networth_bonus").value),
+        daily_networth_bonus: dailyNetworthBonus,
       };
       const res = await fetch(withAuthToken(`/api/player/${encodeURIComponent(USER_ID)}/update`), {
         method: "POST",

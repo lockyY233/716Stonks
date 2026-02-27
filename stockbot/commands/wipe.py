@@ -1,6 +1,6 @@
-from discord import Interaction, app_commands
+from discord import Interaction, Member, app_commands
 
-from stockbot.db import wipe_companies, wipe_price_history, wipe_users
+from stockbot.db import wipe_price_history, wipe_user_history, wipe_users
 
 
 CONFIRM_TEXT = "WIPE"
@@ -11,18 +11,20 @@ def setup_wipe(tree: app_commands.CommandTree) -> None:
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
         target="What data to wipe.",
+        target_user="Optional: only wipe this user when target is users or user_history.",
         confirm="Type WIPE to confirm.",
     )
     @app_commands.choices(
         target=[
             app_commands.Choice(name="price_history", value="price_history"),
             app_commands.Choice(name="users", value="users"),
-            app_commands.Choice(name="companies", value="companies"),
+            app_commands.Choice(name="user_history", value="user_history"),
         ]
     )
     async def wipe(
         interaction: Interaction,
         target: str,
+        target_user: Member | None,
         confirm: str,
     ) -> None:
         if interaction.guild is None:
@@ -40,11 +42,17 @@ def setup_wipe(tree: app_commands.CommandTree) -> None:
 
         guild_id = interaction.guild.id
         if target == "price_history":
+            if target_user is not None:
+                await interaction.response.send_message(
+                    "`target_user` can only be used when target is `users` or `user_history`.",
+                    ephemeral=True,
+                )
+                return
             wipe_price_history(guild_id)
         elif target == "users":
-            wipe_users(guild_id)
-        elif target == "companies":
-            wipe_companies(guild_id)
+            wipe_users(guild_id, target_user.id if target_user is not None else None)
+        elif target == "user_history":
+            wipe_user_history(guild_id, target_user.id if target_user is not None else None)
         else:
             await interaction.response.send_message(
                 f"Unknown wipe target: `{target}`.",
@@ -52,7 +60,14 @@ def setup_wipe(tree: app_commands.CommandTree) -> None:
             )
             return
 
+        suffix = (
+            (
+                f" for user {target_user.mention}"
+                if target in {"users", "user_history"} and target_user is not None
+                else " for this server"
+            )
+        )
         await interaction.response.send_message(
-            f"Wiped `{target}` for this server.",
+            f"Wiped `{target}`{suffix}.",
             ephemeral=True,
         )

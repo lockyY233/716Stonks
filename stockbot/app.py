@@ -44,8 +44,8 @@ from stockbot.services.perks import (
     DAILY_CLOSE_RANK_BONUS_PERK_ID,
     apply_income_perks,
     check_and_announce_perk_activations_for_user,
-    evaluate_user_perks,
 )
+from stockbot.services.ranking import MIN_RANKING_NOTE, get_ranked_users_with_effective_networth
 
 
 class StockBot(discord.Client):
@@ -66,6 +66,27 @@ class StockBot(discord.Client):
     async def _track_activity_interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
             return True
+        try:
+            maintenance_mode = int(get_app_config("MAINTENANCE_MODE")) > 0
+            gm_id = int(get_app_config("GM_ID"))
+        except Exception:
+            maintenance_mode = False
+            gm_id = 0
+        if maintenance_mode and int(interaction.user.id) != gm_id:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "Bot undergo maintanance!",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        "Bot undergo maintanance!",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
+            return False
         try:
             set_state_value(
                 f"user_last_active:{interaction.guild.id}:{interaction.user.id}",
@@ -350,6 +371,7 @@ class StockBot(discord.Client):
         stonkers_role_name = str(get_app_config("STONKERS_ROLE_NAME"))
         announcement_channel_id = int(get_app_config("ANNOUNCEMENT_CHANNEL_ID"))
         mention_role_enabled = int(get_app_config("ANNOUNCE_MENTION_ROLE")) > 0
+        close_announcements_enabled = int(get_app_config("IS_ANNOUNCEMENT")) > 0
         inactive_role_name = str(get_app_config("STONKERS_ROLE_INACTIVE")).strip()
         gm_id = int(get_app_config("GM_ID"))
         try:
@@ -406,69 +428,77 @@ class StockBot(discord.Client):
                 top,
             )
 
-            channel = await self._pick_announcement_channel(guild, announcement_channel_id)
-            if channel is None:
-                print(
-                    f"[announce] no usable announcement channel "
-                    f"guild={guild.id} configured_channel={announcement_channel_id}"
-                )
-                continue
-            print(
-                f"[announce] using channel guild={guild.id} channel={getattr(channel, 'id', 'unknown')} "
-                f"top_count={len(top)}"
-            )
-
-            role = discord.utils.get(guild.roles, name=stonkers_role_name)
-            role_mention = ""
-            if mention_role_enabled:
-                role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
-            inactive_ids: set[int] = set()
-            if inactive_role_name:
-                inactive_role = discord.utils.get(guild.roles, name=inactive_role_name)
-                if inactive_role is not None:
-                    inactive_ids = {int(member.id) for member in inactive_role.members}
-            lines = build_close_ranking_lines(
-                top,
-                mention_users=mention_role_enabled,
-                inactive_user_ids=inactive_ids,
-            )
-
-            announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
             announced_ok = False
-            try:
-                sent_v2 = await send_market_close_v2(
-                    channel=channel,
-                    role_mention=role_mention,
-                    announcement_md=announcement_md,
-                    ranking_lines=lines,
-                    content_suffix="market close!",
-                )
-                if not sent_v2:
+            if close_announcements_enabled:
+                channel = await self._pick_announcement_channel(guild, announcement_channel_id)
+                if channel is None:
                     print(
-                        f"[announce] skipped market-close update (V2 required) "
-                        f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}"
+                        f"[announce] no usable announcement channel "
+                        f"guild={guild.id} configured_channel={announcement_channel_id}"
                     )
                     continue
-                announced_ok = True
-                news_rows = await asyncio.to_thread(get_close_news, guild.id, enabled_only=True)
-                print(f"[announce] news embeds count guild={guild.id}: {len(news_rows)}")
-                for row in news_rows:
-                    news_embed = build_close_news_embed(row, preview=False)
-                    await channel.send(embed=news_embed)
-                if awarded_daily_bonus:
-                    bonus_lines = [
-                        (
-                            f"<@{user_id}> Daily Close Rank Bonus activated "
-                            f"(Rank #{rank_index}) — networth +`${bonus:.2f}` until next close."
-                        )
-                        for (user_id, rank_index, bonus) in awarded_daily_bonus
-                    ]
-                    await channel.send("\n".join(bonus_lines))
-            except Exception as exc:
                 print(
-                    f"[announce] failed to send market-close update "
-                    f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}: {exc}"
+                    f"[announce] using channel guild={guild.id} channel={getattr(channel, 'id', 'unknown')} "
+                    f"top_count={len(top)}"
                 )
+
+                role = discord.utils.get(guild.roles, name=stonkers_role_name)
+                role_mention = ""
+                if mention_role_enabled:
+                    role_mention = role.mention if role is not None else f"@{stonkers_role_name}"
+                inactive_ids: set[int] = set()
+                if inactive_role_name:
+                    inactive_role = discord.utils.get(guild.roles, name=inactive_role_name)
+                    if inactive_role is not None:
+                        inactive_ids = {int(member.id) for member in inactive_role.members}
+                lines = build_close_ranking_lines(
+                    top,
+                    mention_users=mention_role_enabled,
+                    inactive_user_ids=inactive_ids,
+                )
+                if len(top) < 5:
+                    if lines:
+                        lines.append("")
+                    lines.append(MIN_RANKING_NOTE)
+
+                announcement_md = get_state_value(f"close_announcement_md:{guild.id}") or ""
+                try:
+                    sent_v2 = await send_market_close_v2(
+                        channel=channel,
+                        role_mention=role_mention,
+                        announcement_md=announcement_md,
+                        ranking_lines=lines,
+                        content_suffix="market close!",
+                    )
+                    if not sent_v2:
+                        print(
+                            f"[announce] skipped market-close update (V2 required) "
+                            f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}"
+                        )
+                        continue
+                    announced_ok = True
+                    news_rows = await asyncio.to_thread(get_close_news, guild.id, enabled_only=True)
+                    print(f"[announce] news embeds count guild={guild.id}: {len(news_rows)}")
+                    for row in news_rows:
+                        news_embed = build_close_news_embed(row, preview=False)
+                        await channel.send(embed=news_embed)
+                    if awarded_daily_bonus:
+                        bonus_lines = [
+                            (
+                                f"<@{user_id}> Daily Close Rank Bonus activated "
+                                f"(Rank #{rank_index}) — networth +`${bonus:.2f}` until next close."
+                            )
+                            for (user_id, rank_index, bonus) in awarded_daily_bonus
+                        ]
+                        await channel.send("\n".join(bonus_lines))
+                except Exception as exc:
+                    print(
+                        f"[announce] failed to send market-close update "
+                        f"guild={guild.id} channel={getattr(channel, 'id', 'unknown')}: {exc}"
+                    )
+            else:
+                announced_ok = True
+                print(f"[announce] market-close announcements disabled for guild={guild.id}")
             if announced_ok:
                 set_state_value(sent_state_key, close_event_id)
                 set_state_value(armed_state_key, "")
@@ -524,38 +554,7 @@ class StockBot(discord.Client):
                 continue
 
     def _get_top_users_with_effective_networth(self, guild_id: int, limit: int = 50) -> list[dict]:
-        rows = get_users(guild_id)
-        ranked: list[dict] = []
-        for row in rows:
-            user_id = int(row.get("user_id", 0))
-            base_networth = float(row.get("networth", 0.0))
-            eval_result = evaluate_user_perks(
-                guild_id=guild_id,
-                user_id=user_id,
-                base_income=0.0,
-                base_trade_limits=0,
-                base_networth=base_networth,
-            )
-            effective_networth = float(eval_result["final"]["networth"])
-            bonus_raw = get_state_value(self._daily_networth_bonus_key(guild_id, user_id))
-            try:
-                top_networth_bonus = float(bonus_raw) if bonus_raw is not None else 0.0
-            except (TypeError, ValueError):
-                top_networth_bonus = 0.0
-            next_row = dict(row)
-            next_row["display_base_networth"] = effective_networth - top_networth_bonus
-            next_row["top_networth_bonus"] = top_networth_bonus
-            next_row["networth"] = effective_networth
-            ranked.append(next_row)
-        ranked.sort(
-            key=lambda r: (
-                float(r.get("networth", 0.0)),
-                float(r.get("bank", 0.0)),
-                -int(r.get("user_id", 0)),
-            ),
-            reverse=True,
-        )
-        return ranked[: max(1, int(limit))]
+        return get_ranked_users_with_effective_networth(guild_id, limit=limit)
 
     def _apply_rank_income_for_guild(
         self,

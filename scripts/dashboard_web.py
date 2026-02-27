@@ -103,6 +103,7 @@ PROPERTY_DETAIL_HTML = _load_template("property_detail.html")
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    DISABLED_PERK_EFFECT_TARGETS = {"slot_bet_multiplier", "steal_chance", "steal_amount_min", "steal_amount_max"}
     repo_root = Path(__file__).resolve().parents[1]
     db_path = Path(os.getenv("DASHBOARD_DB_PATH", str(repo_root / "data" / "stockbot.db")))
     auth_cookie = "webadmin_session"
@@ -884,6 +885,20 @@ def create_app() -> Flask:
             if tag not in tags:
                 tags.append(tag)
         return tags
+
+    def _has_disabled_perk_effect_target(raw: object) -> bool:
+        effects: list[dict] = []
+        if isinstance(raw, dict):
+            effects = [raw]
+        elif isinstance(raw, list):
+            effects = [e for e in raw if isinstance(e, dict)]
+        else:
+            return False
+        for eff in effects:
+            target = str(eff.get("target_stat", "") or "").strip().lower()
+            if target in DISABLED_PERK_EFFECT_TARGETS:
+                return True
+        return False
 
     def _parse_owner_user_ids(raw: object) -> list[int]:
         text = str(raw or "").strip()
@@ -4805,6 +4820,8 @@ def create_app() -> Flask:
                 parsed = json.loads(raw_json)
                 if not isinstance(parsed, (dict, list)):
                     return jsonify({"error": "perk_effects_json must be an object or array"}), 400
+                if _has_disabled_perk_effect_target(parsed):
+                    return jsonify({"error": "One or more perk effect targets are disabled"}), 400
             except json.JSONDecodeError:
                 return jsonify({"error": "Invalid perk_effects_json"}), 400
             updates["perk_effects_json"] = raw_json
@@ -4942,6 +4959,8 @@ def create_app() -> Flask:
             parsed_perk = json.loads(perk_effects_json)
             if not isinstance(parsed_perk, (dict, list)):
                 return jsonify({"error": "perk_effects_json must be an object or array"}), 400
+            if _has_disabled_perk_effect_target(parsed_perk):
+                return jsonify({"error": "One or more perk effect targets are disabled"}), 400
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid perk_effects_json"}), 400
         tags = _parse_tags(data.get("tags", ""))
@@ -5221,17 +5240,26 @@ def create_app() -> Flask:
         bonus_value = 0.0
         if "bank" in data:
             try:
-                updates["bank"] = max(0.0, float(data.get("bank")))
+                bank_value = float(data.get("bank"))
+                if not math.isfinite(bank_value):
+                    raise ValueError("bank must be finite")
+                updates["bank"] = max(0.0, bank_value)
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid value for bank"}), 400
         if "networth" in data:
             try:
-                updates["networth"] = max(0.0, float(data.get("networth")))
+                networth_value = float(data.get("networth"))
+                if not math.isfinite(networth_value):
+                    raise ValueError("networth must be finite")
+                updates["networth"] = max(0.0, networth_value)
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid value for networth"}), 400
         if "owe" in data:
             try:
-                updates["owe"] = max(0.0, float(data.get("owe")))
+                owe_value = float(data.get("owe"))
+                if not math.isfinite(owe_value):
+                    raise ValueError("owe must be finite")
+                updates["owe"] = max(0.0, owe_value)
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid value for owe"}), 400
         if "rank" in data:
@@ -5239,6 +5267,8 @@ def create_app() -> Flask:
         if "daily_networth_bonus" in data:
             try:
                 bonus_value = float(data.get("daily_networth_bonus", 0.0))
+                if not math.isfinite(bonus_value):
+                    raise ValueError("daily_networth_bonus must be finite")
                 bonus_set = True
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid value for daily_networth_bonus"}), 400
@@ -5457,6 +5487,8 @@ def create_app() -> Flask:
     def api_perk_effect_create(perk_id: int):
         data = request.get_json(silent=True) or {}
         target_stat = str(data.get("target_stat", "income")).strip().lower() or "income"
+        if target_stat in DISABLED_PERK_EFFECT_TARGETS:
+            return jsonify({"error": "This perk effect target is disabled"}), 400
         value_mode = str(data.get("value_mode", "flat")).strip().lower() or "flat"
         scale_source = str(data.get("scale_source", "none")).strip().lower() or "none"
         scale_key = str(data.get("scale_key", "")).strip()
@@ -5492,7 +5524,10 @@ def create_app() -> Flask:
         updates: dict[str, object] = {}
         for text_key in {"target_stat", "value_mode", "scale_source", "scale_key"}:
             if text_key in data:
-                updates[text_key] = str(data.get(text_key, "")).strip().lower()
+                text_value = str(data.get(text_key, "")).strip().lower()
+                if text_key == "target_stat" and text_value in DISABLED_PERK_EFFECT_TARGETS:
+                    return jsonify({"error": "This perk effect target is disabled"}), 400
+                updates[text_key] = text_value
         for num_key in {"value", "scale_factor", "cap"}:
             if num_key in data:
                 try:

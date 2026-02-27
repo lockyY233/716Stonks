@@ -27,6 +27,9 @@ def _supports_components_v2() -> bool:
 def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | None:
     if not _supports_components_v2():
         return None
+    user = get_user(guild_id, user_id)
+    balance = float(user.get("bank", 0.0)) if user is not None else 0.0
+    owe = float(user.get("owe", 0.0)) if user is not None else 0.0
     ui = discord.ui
     try:
         view = ui.LayoutView(timeout=300)
@@ -35,6 +38,14 @@ def _build_bank_menu_v2_view(guild_id: int, user_id: int) -> discord.ui.View | N
             ui.TextDisplay(
                 content=(
                     "## 🏛️ Welcome to SaibaBank!\n"
+                )
+            )
+        )
+        container.add_item(
+            ui.TextDisplay(
+                content=(
+                    f"**Your Balance:** `${balance:.2f}`\n"
+                    f"**You Owe:** `${owe:.2f}`"
                 )
             )
         )
@@ -562,6 +573,8 @@ def setup_bank(tree: app_commands.CommandTree) -> None:
             title="Bank Services",
             description="Choose a service below.",
         )
+        embed.add_field(name="Your Balance", value=f"${float(user.get('bank', 0.0)):.2f}", inline=True)
+        embed.add_field(name="You Owe", value=f"${float(user.get('owe', 0.0)):.2f}", inline=True)
         v2_view = _build_bank_menu_v2_view(interaction.guild.id, interaction.user.id)
         if v2_view is not None:
             try:

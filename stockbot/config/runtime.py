@@ -28,6 +28,8 @@ from stockbot.config.settings import (
     MARKET_CLOSE_HOUR,
     ANNOUNCEMENT_CHANNEL_ID,
     ANNOUNCE_MENTION_ROLE,
+    IS_ANNOUNCEMENT,
+    MAINTENANCE_MODE,
     START_BALANCE,
     STONKERS_ROLE_NAME,
     TICK_INTERVAL,
@@ -95,6 +97,16 @@ APP_CONFIG_SPECS: dict[str, AppConfigSpec] = {
         default=int(ANNOUNCE_MENTION_ROLE),
         cast=int,
         description="1 to mention the configured role at close; 0 to disable mention.",
+    ),
+    "IS_ANNOUNCEMENT": AppConfigSpec(
+        default=int(IS_ANNOUNCEMENT),
+        cast=int,
+        description="1 to send market close announcements/news messages; 0 to disable all close announcement posting.",
+    ),
+    "MAINTENANCE_MODE": AppConfigSpec(
+        default=int(MAINTENANCE_MODE),
+        cast=int,
+        description="1 to allow only GM to use bot slash commands; non-GM users receive a maintenance message.",
     ),
     "GM_ID": AppConfigSpec(
         default=int(GM_ID),
@@ -251,6 +263,10 @@ def _normalize(name: str, value: Any) -> Any:
         text = str(value).strip()
         return text or str(STONKERS_ROLE_INACTIVE)
     if name == "ANNOUNCE_MENTION_ROLE":
+        return 1 if int(value) > 0 else 0
+    if name == "IS_ANNOUNCEMENT":
+        return 1 if int(value) > 0 else 0
+    if name == "MAINTENANCE_MODE":
         return 1 if int(value) > 0 else 0
     if name == "GM_ID":
         return max(0, int(value))

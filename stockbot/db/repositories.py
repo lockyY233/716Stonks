@@ -1894,21 +1894,166 @@ def wipe_price_history(guild_id: int) -> None:
         )
 
 
-def wipe_users(guild_id: int) -> None:
+def wipe_users(
+    guild_id: int,
+    user_id: int | None = None,
+    *,
+    reset_bank: float = 5.0,
+) -> None:
+    where_user = ""
+    params: list[object] = [guild_id]
+    if user_id is not None:
+        where_user = " AND user_id = ?"
+        params.append(int(user_id))
+
+    bank_reset = money(max(0.0, float(reset_bank)))
+    with get_connection() as conn:
+        table_rows = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            """
+        ).fetchall()
+        existing_tables = {str(row["name"]) for row in table_rows}
+
+        conn.execute(
+            f"""
+            DELETE FROM action_history
+            WHERE guild_id = ?
+              AND action_type = 'trade'
+              {where_user}
+            """,
+            tuple(params),
+        )
+        if "user_commodities" in existing_tables:
+            conn.execute(
+                f"""
+                DELETE FROM user_commodities
+                WHERE guild_id = ?{where_user}
+                """,
+                tuple(params),
+            )
+        if "holdings" in existing_tables:
+            conn.execute(
+                f"""
+                DELETE FROM holdings
+                WHERE guild_id = ?{where_user}
+                """,
+                tuple(params),
+            )
+        if "user_properties" in existing_tables:
+            conn.execute(
+                f"""
+                DELETE FROM user_properties
+                WHERE guild_id = ?{where_user}
+                """,
+                tuple(params),
+            )
+        if "user_jobs" in existing_tables:
+            conn.execute(
+                f"""
+                DELETE FROM user_jobs
+                WHERE guild_id = ?{where_user}
+                """,
+                tuple(params),
+            )
+        if "stock_alerts" in existing_tables:
+            conn.execute(
+                f"""
+                DELETE FROM stock_alerts
+                WHERE guild_id = ?{where_user}
+                """,
+                tuple(params),
+            )
+        if user_id is None:
+            conn.execute(
+                """
+                UPDATE users
+                SET bank = ?,
+                    networth = 0.0,
+                    owe = 0.0
+                WHERE guild_id = ?
+                """,
+                (bank_reset, guild_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE users
+                SET bank = ?,
+                    networth = 0.0,
+                    owe = 0.0
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (bank_reset, guild_id, int(user_id)),
+            )
+
+        app_state_filters = [
+            "trade_used",
+            "cost_basis",
+            "daily_networth_bonus",
+            "perk_state_active",
+            "slot_hour_usage",
+            "steal_cooldown",
+        ]
+        for prefix in app_state_filters:
+            if user_id is None:
+                conn.execute(
+                    """
+                    DELETE FROM app_state
+                    WHERE key LIKE ?
+                    """,
+                    (f"{prefix}:{guild_id}:%",),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM app_state
+                    WHERE key = ? OR key LIKE ? OR key LIKE ?
+                    """,
+                    (
+                        f"{prefix}:{guild_id}:{int(user_id)}",
+                        f"{prefix}:{guild_id}:{int(user_id)}:%",
+                        f"{prefix}:{guild_id}:%:{int(user_id)}:%",
+                    ),
+                )
+
+        conn.execute(
+            f"""
+            DELETE FROM app_state
+            WHERE key LIKE ?
+            """,
+            (f"perk_check_queue:{guild_id}:{int(user_id)}:%",)
+            if user_id is not None
+            else (f"perk_check_queue:{guild_id}:%",),
+        )
+
+
+def wipe_user_history(
+    guild_id: int,
+    user_id: int | None = None,
+) -> None:
+    params: list[object] = [guild_id]
+    where_user = ""
+    if user_id is not None:
+        where_user = " AND user_id = ?"
+        params.append(int(user_id))
+
     with get_connection() as conn:
         conn.execute(
-            """
-            DELETE FROM users
-            WHERE guild_id = ?
+            f"""
+            DELETE FROM action_history
+            WHERE guild_id = ?{where_user}
             """,
-            (guild_id,),
+            tuple(params),
         )
         conn.execute(
-            """
-            DELETE FROM user_commodities
-            WHERE guild_id = ?
+            f"""
+            DELETE FROM bank_requests
+            WHERE guild_id = ?{where_user}
             """,
-            (guild_id,),
+            tuple(params),
         )
 
 

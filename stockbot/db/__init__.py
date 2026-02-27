@@ -66,6 +66,7 @@ from stockbot.db.repositories import (
     upsert_user_commodity,
     wipe_companies,
     wipe_price_history,
+    wipe_user_history,
     wipe_users,
 )
 
@@ -136,6 +137,7 @@ __all__ = [
     "upsert_user_commodity",
     "wipe_companies",
     "wipe_price_history",
+    "wipe_user_history",
     "wipe_users",
     "set_holding",
     "set_state_value",

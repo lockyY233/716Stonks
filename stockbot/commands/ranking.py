@@ -1,8 +1,8 @@
 from discord import Embed, Interaction, app_commands
 
 from stockbot.config.runtime import get_app_config
-from stockbot.db import get_state_value, get_users, recalc_all_networth
-from stockbot.services.perks import evaluate_user_perks
+from stockbot.db import recalc_all_networth
+from stockbot.services.ranking import MIN_RANKING_NOTE, get_ranked_users_with_effective_networth
 
 
 def setup_ranking(tree: app_commands.CommandTree) -> None:
@@ -17,43 +17,10 @@ def setup_ranking(tree: app_commands.CommandTree) -> None:
 
         recalc_all_networth(interaction.guild.id)
         gm_id = int(get_app_config("GM_ID"))
-        rows = get_users(interaction.guild.id)
-        if gm_id > 0:
-            rows = [row for row in rows if int(row.get("user_id", 0)) != gm_id]
-        if not rows:
-            await interaction.response.send_message("No players found.")
-            return
-
-        ranked: list[dict] = []
-        for row in rows:
-            user_id = int(row.get("user_id", 0))
-            base_networth = float(row.get("networth", 0.0))
-            eval_result = evaluate_user_perks(
-                guild_id=interaction.guild.id,
-                user_id=user_id,
-                base_income=0.0,
-                base_trade_limits=0,
-                base_networth=base_networth,
-            )
-            bonus_raw = get_state_value(f"daily_networth_bonus:{interaction.guild.id}:{user_id}")
-            try:
-                top_networth_bonus = float(bonus_raw) if bonus_raw is not None else 0.0
-            except (TypeError, ValueError):
-                top_networth_bonus = 0.0
-            final_networth = float(eval_result["final"]["networth"])
-            next_row = dict(row)
-            next_row["top_networth_bonus"] = top_networth_bonus
-            next_row["display_base_networth"] = final_networth - top_networth_bonus
-            next_row["networth"] = final_networth
-            ranked.append(next_row)
-        rows = sorted(
-            ranked,
-            key=lambda r: (
-                float(r.get("networth", 0.0)),
-                float(r.get("bank", 0.0)),
-                -int(r.get("user_id", 0)),
-            ),
-            reverse=True,
+        rows = get_ranked_users_with_effective_networth(
+            interaction.guild.id,
+            limit=500,
+            exclude_user_id=gm_id,
         )
 
         top_rows = rows[:5]
@@ -97,6 +64,13 @@ def setup_ranking(tree: app_commands.CommandTree) -> None:
                 )
             else:
                 lines.append(f"**Your Rank:** #{sender_rank} {sender_name} — `${sender_final:.2f}`")
+
+        if len(rows) < 5:
+            if lines:
+                lines.append("")
+            lines.append(MIN_RANKING_NOTE)
+        if not lines:
+            lines.append(MIN_RANKING_NOTE)
 
         embed = Embed(
             title="Top 5 Networth Ranking",
